@@ -6,7 +6,7 @@
 
 ---
 
-Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑）和**控制端**（你用来操作的电脑），支持 **Windows** 和 **Linux**（X11 桌面）。另有一个很小的中转服务器，用 Docker Compose 一条命令部署，负责信令和转发。控制端也可以用 Docker Compose 部署成**网页控制台**，在浏览器里使用。
+Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑）和**控制端**（你用来操作的电脑），支持 **Windows**、**macOS**（13 及以上）和 **Linux**（X11 桌面）。另有一个很小的中转服务器，用 Docker Compose 一条命令部署，负责信令和转发。控制端也可以用 Docker Compose 部署成**网页控制台**，在浏览器里使用。
 
 > **状态：**开发中。协议在版本之间还会变化，客户端和服务器需要用同一个版本构建（版本不一致时会检测出来并提示，见[协议版本](#协议版本)）。
 
@@ -43,7 +43,7 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
    docker compose logs airhand | grep fingerprint   # 记下证书 SHA-256 指纹
    ```
 
-2. **构建客户端**，把服务器地址和指纹编译进程序（依赖和 Linux 的步骤见[构建客户端](#构建客户端)）：
+2. **构建客户端**，把服务器地址和指纹编译进程序（依赖以及 macOS、Linux 的步骤见[构建客户端](#构建客户端)）：
 
    ```powershell
    cd client
@@ -62,7 +62,7 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
 
 ### 被控端（默认）
 
-双击运行，右下角（Linux 是顶栏 / 任务栏的状态区）出现托盘图标：灰色表示没连上服务器，彩色表示已连接。右键菜单里有：
+双击运行，右下角（macOS 是屏幕顶部的菜单栏，Linux 是顶栏 / 任务栏的状态区）出现托盘图标：灰色表示没连上服务器，彩色表示已连接。右键（macOS 上单击）菜单里有：
 
 - 当前模式、服务器状态
 - **控制码**和"复制控制码"
@@ -73,6 +73,8 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
 掉线后会按指数退避自动重连，并且**取回原来的控制码**（服务器重启后也能取回）。被控端离线后 10 分钟内，它的控制码不会分配给别人。
 
 > Linux 的托盘图标走 AppIndicator：Ubuntu、KDE、Xfce 等开箱即用，原版 GNOME 需要装 "AppIndicator and KStatusNotifierItem Support" 扩展。没有 AppIndicator 库时程序照常作为被控端运行，控制码打印在日志（stderr）里。
+
+> macOS 上被控端需要两项系统权限：**屏幕与系统录音**（采集画面和声音）和**辅助功能**（操作键盘鼠标）。第一次启动时系统会弹窗询问；没有授权时菜单里会有提示，点一下就打开"系统设置 → 隐私与安全性"里对应的页面；连上来的控制端也会看到对方缺少哪一项权限（按控制端自己的语言显示），对方授权后提示自动消失。授予"屏幕与系统录音"后需要重新打开 Airhand。Airhand 平时只在菜单栏里，打开控制台时才出现在程序坞中。
 
 ### 控制端
 
@@ -149,6 +151,7 @@ AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<服务器证书指纹> 
 需要：Rust（stable）、Node.js 20+、CMake（编译 libopus）。
 
 - **Windows**：Windows 10/11（系统自带 WebView2）
+- **macOS**：macOS 13 及以上，Xcode 命令行工具（`xcode-select --install`）；CMake 可以用 `brew install cmake` 安装
 - **Linux**：Tauri 的依赖、PulseAudio 开发库，以及控制台解码视频用的 GStreamer 插件。Debian / Ubuntu：
 
   ```bash
@@ -175,12 +178,25 @@ npm run tauri build
 #   client/src-tauri/target/release/bundle/deb/Airhand_<版本>_amd64.deb（会自动装上托盘、声音、GStreamer 依赖）
 ```
 
+**macOS**（环境变量同样用 `export` 设置）：
+
+```bash
+cd client && npm install
+npm run tauri build
+# → client/src-tauri/target/release/bundle/macos/Airhand.app（约 8 MB）
+#   client/src-tauri/target/release/bundle/dmg/Airhand_<版本>_<架构>.dmg
+```
+
+- 只要 .app 时用 `npm run tauri build -- --bundles app`；构建的是本机的架构（Apple 芯片是 arm64）
+- 程序只做了临时签名（ad-hoc），没有经过 Apple 公证：拷到别的 Mac 上第一次打开时，在访达里右键 → 打开（或者 `xattr -dr com.apple.quarantine Airhand.app`）
+- 系统按签名记住授予的权限，而临时签名每次构建都会变：重新构建后要在"系统设置 → 隐私与安全性"里把 Airhand 删掉再重新授权。长期使用的话，在 `client/src-tauri/tauri.macos.conf.json` 里把 `signingIdentity` 换成自己的开发者证书
+
 ## 工作原理
 
 ### 架构
 
 ```
- 被控端 (Windows，Linux 见下表)       airhand-server (Docker)                 控制端 (Tauri / 网页)
+ 被控端 (Windows，其它见下表)         airhand-server (Docker)                 控制端 (Tauri / 网页)
 ┌──────────────────────┐            ┌──────────────────────┐            ┌──────────────────────┐
 │ DXGI 桌面复制 (GPU)   │            │ 控制码注册 / 找回     │            │ WebCodecs 硬件解码    │
 │ SIMD 缩放 + NV12 转换 │  QUIC/TLS  │ 会话配对              │  QUIC/TLS  │ Canvas 低延迟渲染     │
@@ -204,25 +220,25 @@ npm run tauri build
 | `client/src/` | 控制台界面（React 19 + TypeScript，不依赖 UI 库），桌面版和网页版共用，区别只在 `client/src/lib/backend/`；文案在 `client/src/locales/` |
 | `assets/icon.svg` | 应用图标源文件 |
 
-被控端各环节在两个平台上的实现：
+被控端各环节在三个平台上的实现：
 
-| 环节 | Windows | Linux（X11） |
-|---|---|---|
-| 屏幕采集 | DXGI Desktop Duplication | MIT-SHM 共享内存 + DAMAGE 变化通知，RandR 多显示器 |
-| 光标形状 | DXGI | XFIXES |
-| 视频编码 | Media Foundation 硬件编码，OpenH264 兜底 | OpenH264 |
-| 输入注入 | SendInput（扫描码） | XTEST（evdev 物理键码） |
-| 声音采集 | WASAPI 环回 | PulseAudio / PipeWire 的输出监视器 |
-| 剪贴板 | 剪贴板序号检测变化 | XFIXES 选择所有者变化通知 |
-| 控制台界面 | WebView2 | WebKitGTK（WebCodecs 由 GStreamer 解码） |
+| 环节 | Windows | macOS | Linux（X11） |
+|---|---|---|---|
+| 屏幕采集 | DXGI Desktop Duplication | ScreenCaptureKit | MIT-SHM 共享内存 + DAMAGE 变化通知，RandR 多显示器 |
+| 光标形状 | DXGI | NSCursor | XFIXES |
+| 视频编码 | Media Foundation 硬件编码，OpenH264 兜底 | VideoToolbox 硬件编码（H.264 / HEVC），OpenH264 兜底 | OpenH264 |
+| 输入注入 | SendInput（扫描码） | CGEvent（虚拟键码） | XTEST（evdev 物理键码） |
+| 声音采集 | WASAPI 环回 | ScreenCaptureKit（系统混音） | PulseAudio / PipeWire 的输出监视器 |
+| 剪贴板 | 剪贴板序号检测变化 | NSPasteboard 变化计数 | XFIXES 选择所有者变化通知 |
+| 控制台界面 | WebView2 | WKWebView | WebKitGTK（WebCodecs 由 GStreamer 解码） |
 
 ### 画面
 
 | 环节 | 做法 |
 |---|---|
-| 采集 | 只在画面变化时产生帧（Windows 靠 DXGI，X11 靠 DAMAGE），静止的桌面几乎不占带宽 |
+| 采集 | 只在画面变化时产生帧（Windows 靠 DXGI，macOS 靠 ScreenCaptureKit，X11 靠 DAMAGE），静止的桌面几乎不占带宽 |
 | 预处理 | `fast_image_resize`（SIMD）缩放，`yuvutils-rs`（AVX2）BGRA→NV12/I420，缓冲区全部复用 |
-| 编码 | **硬件优先**：Media Foundation 硬件编码器（NVENC / Quick Sync / AMF），支持 **AV1 / HEVC / H.264**，低延迟模式、无 B 帧、超长 GOP；没有硬件编码器时回退到 **OpenH264 屏幕内容模式** |
+| 编码 | **硬件优先**：Media Foundation 硬件编码器（NVENC / Quick Sync / AMF），支持 **AV1 / HEVC / H.264**，低延迟模式、无 B 帧、超长 GOP；macOS 上是 VideoToolbox（H.264 / HEVC，H.264 用低延迟码率控制）；没有硬件编码器时回退到 **OpenH264 屏幕内容模式** |
 | 码率控制 | 控制端每帧都回 ACK，被控端限制**在途帧数**（≈ RTT × 帧率 + 2），网络慢时等待并**跳到最新一帧**，不会越积越卡；自适应码率按拥塞情况下调，恢复后逐步回升 |
 | 传输 | QUIC + **BBR** 拥塞控制（Wi-Fi、跨境这类丢包网络下比 Cubic 稳）；控制消息、声音、画面分开排队，Ping 和鼠标不会排在大帧后面 |
 | 解码 | 控制端用 **WebCodecs** GPU 解码（`optimizeForLatency`），解完马上画到 `desynchronized` Canvas |
@@ -244,6 +260,8 @@ npm run tauri build
 
 只有当前正在看的会话播放声音（多屏总览时都不播放），其它被控端会被通知停止采集。
 
+被控端采集不到声音时（例如没有声音输出设备、Linux 上没有运行 PulseAudio / PipeWire），控制端会显示提示，工具栏的喇叭上有黄点，声音菜单里也写着原因；被控端每 2 秒重试一次，恢复后提示自动消失。
+
 ### 音画同步（可选，默认关闭）
 
 声音要经过抖动缓冲，画面则是一到就显示，所以默认声音会比画面晚一点：实测约 **70 ms**（同机、本地中转、4K 屏输出 1080p；单次 49~78 ms）。操作电脑时几乎察觉不到，看视频时可能会。
@@ -261,8 +279,8 @@ npm run tauri build
 
 - 没有配置文件，服务器地址编译在程序里；日志只写到 stderr
 - 被控端模式**不创建 WebView**，不会产生任何文件
-- 单实例锁用的是内核对象而不是锁文件：Windows 是命名互斥量，Linux 是抽象命名空间的 Unix 套接字
-- 控制台的 WebView 需要数据目录：放在临时目录下的随机子目录，开启隐私模式（不保存 Cookie 和缓存），关闭窗口或退出程序时删除；进程被强制结束时，下次启动会清理残留
+- 单实例锁用的是内核对象而不是锁文件：Windows 是命名互斥量，Linux 是抽象命名空间的 Unix 套接字，macOS 是登记在 bootstrap 服务里的 Mach 端口名
+- 控制台的 WebView 需要数据目录：放在临时目录下的随机子目录，开启隐私模式（不保存 Cookie 和缓存），关闭窗口或退出程序时删除；进程被强制结束时，下次启动会清理残留。macOS 的 WKWebView 不需要数据目录，隐私模式下完全不写磁盘
 - Linux 上几样只能以文件形式交出去的东西（交给 AppIndicator 的托盘图标、WebKitGTK 的 GStreamer 插件缓存）放在 `XDG_RUNTIME_DIR`（内存盘）里本进程专用的随机目录，退出时删除（收到 SIGTERM / SIGINT 也一样）；Mesa / NVIDIA 的着色器磁盘缓存直接关闭
 - 控制端的设置只保存在内存里
 - 以上说的是桌面客户端。网页控制台是部署在服务器上的服务：它把自签名的 HTTPS 证书存在数据卷里，浏览器那边也只在内存里保存设置（登录密码时会有一个会话 Cookie）
@@ -282,6 +300,9 @@ npm run tauri build
 - Linux 被控端只有 OpenH264 软件编码（还没接 VA-API / NVENC），选择 AV1 / HEVC 时会改用 H.264
 - Linux 控制端的解码依赖 WebKitGTK + GStreamer：H.264 需要 `gstreamer1.0-plugins-bad`（解析）和 `gstreamer1.0-libav` 或 openh264（解码）；AV1 / HEVC 取决于装了哪些 GStreamer 解码器。某种格式实际解不出画面时，控制端会改用 H.264
 - Windows 上不以管理员身份运行时，无法采集或操作 UAC 弹窗和锁屏界面（它们在安全桌面上，需要以 SYSTEM 服务运行），也无法注入 `Ctrl+Alt+Del`。Linux 的锁屏同理（屏保程序会独占键鼠）
+- macOS 被控端需要"屏幕与系统录音"和"辅助功能"两项权限，只能由本机用户在系统设置里授予；macOS 15 起系统还会定期询问是否继续允许它录屏。登录界面和锁屏无法采集或操作
+- Mac 被控端不提供 AV1 编码（目前的 Apple 芯片只能硬件解码 AV1），控制台里的 AV1 会显示为不可用
+- macOS 控制端（WKWebView）不支持键盘锁定：全屏时 Command+Tab、Command+空格等系统快捷键仍由本机处理，请用工具栏的"发送快捷键"。较旧的 macOS 上 WKWebView 可能不支持 Opus 解码，这时控制台会提示无法播放远程声音
 - 剪贴板只同步文本，不同步文件
 - 声音只从被控端传到控制端，不转发控制端的麦克风；采集的是音量调节之后的声音，被控端静音时传过来的也是静音
 - 网页控制台：刷新或关闭标签页会断开会话；Firefox 里本机剪贴板不能自动同步给对方；浏览器不全屏时部分快捷键（Ctrl+W 等）发不到远端
@@ -305,6 +326,8 @@ cargo test --lib
 # 声音环回采集（需要声音输出设备，会以 -60 dBFS 播放 1.5 秒测试音，几乎听不见）
 cargo test --lib loopback_captures_tone -- --ignored --nocapture
 ```
+
+macOS 上，屏幕 / 声音采集（`sck_capture`、`loopback_captures_tone`、端到端测试里的画面和声音）和键鼠注入（`mac_move_to_center`）的测试需要先在"系统设置 → 隐私与安全性"里给运行测试的终端授予"屏幕与系统录音"和"辅助功能"权限。没有权限时 `sck_capture`、`loopback_captures_tone`、`mac_move_to_center` 会直接跳过；端到端测试会检查被控端发来的是"缺少权限"的提示而不是"采集失败"，然后跳过画面和声音的检查（剪贴板、Ping、断开等其余部分照常检查）。
 
 端到端测试（真实服务器、带屏幕采集和编码的真实被控端、协议级控制端）：
 

@@ -5,7 +5,11 @@ pub mod capture;
 pub(crate) mod clock;
 pub mod encoder;
 mod input;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 mod pipeline;
+#[cfg(target_os = "macos")]
+pub(crate) mod sck;
 mod session;
 #[cfg(target_os = "linux")]
 pub(crate) mod x11;
@@ -47,6 +51,32 @@ pub(crate) fn dpi_aware<T>(f: impl FnOnce() -> T) -> T {
     }
     #[cfg(not(windows))]
     f()
+}
+
+/// 被控端缺少的系统权限：`(屏幕与系统录音, 辅助功能)`，true = 缺少。目前只有 macOS 需要用户授权。
+pub(crate) fn missing_permissions() -> (bool, bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let p = macos::permissions();
+        (!p.screen, !p.input)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (false, false)
+    }
+}
+
+/// 采集失败是不是因为缺少系统权限（这种情况由会话用 `Notice::MissingPermissions` 单独说明）。
+pub(crate) fn missing_permission(e: &anyhow::Error) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        e.chain().any(|c| c.is::<macos::PermissionDenied>())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = e;
+        false
+    }
 }
 
 /// 托盘菜单发给被控端服务的命令

@@ -1,7 +1,7 @@
 //! 视频编码。
 //!
 //! * **硬件编码**（优先）：Windows Media Foundation 硬件 MFT（NVENC / Quick Sync / AMF），
-//!   支持 H.264 / H.265 / AV1，几乎不占用 CPU；
+//!   支持 H.264 / H.265 / AV1；macOS VideoToolbox，支持 H.264 / H.265。几乎不占用 CPU；
 //! * **软件编码**（兜底）：OpenH264 屏幕内容模式。
 //!
 //! 共同的预处理：BGRA →（SIMD 缩放）→（SIMD 色彩转换）YUV 4:2:0。
@@ -10,6 +10,8 @@
 #[cfg(windows)]
 mod mf;
 mod software;
+#[cfg(target_os = "macos")]
+mod vt;
 
 use std::sync::OnceLock;
 
@@ -17,7 +19,7 @@ use airhand_proto::session::{Codec, EncoderInfo, QualitySettings};
 use anyhow::{Context, Result, anyhow};
 use fast_image_resize as fir;
 use tracing::info;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use tracing::warn;
 
 use super::capture::Frame;
@@ -67,9 +69,9 @@ pub fn available_codecs() -> Vec<Codec> {
         .get_or_init(|| {
             #[allow(unused_mut)]
             let mut list = vec![Codec::H264];
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             for c in [Codec::H265, Codec::AV1] {
-                if mf::has_hardware(c) {
+                if has_hardware(c) {
                     list.push(c);
                 }
             }
@@ -77,6 +79,38 @@ pub fn available_codecs() -> Vec<Codec> {
             list
         })
         .clone()
+}
+
+#[cfg(windows)]
+fn has_hardware(codec: Codec) -> bool {
+    mf::has_hardware(codec)
+}
+
+#[cfg(target_os = "macos")]
+fn has_hardware(codec: Codec) -> bool {
+    vt::has_hardware(codec)
+}
+
+#[cfg(windows)]
+fn hardware_encoder(
+    codec: Codec,
+    w: u32,
+    h: u32,
+    fps: u8,
+    kbps: u32,
+) -> Result<Box<dyn VideoEncoder>> {
+    Ok(Box::new(mf::MfEncoder::new(codec, w, h, fps, kbps)?))
+}
+
+#[cfg(target_os = "macos")]
+fn hardware_encoder(
+    codec: Codec,
+    w: u32,
+    h: u32,
+    fps: u8,
+    kbps: u32,
+) -> Result<Box<dyn VideoEncoder>> {
+    Ok(Box::new(vt::VtEncoder::new(codec, w, h, fps, kbps)?))
 }
 
 /// 缩放 + 编码。持有可复用的缩放缓冲区。
@@ -104,7 +138,7 @@ impl Encoder {
         #[allow(unused_mut)]
         let mut inner: Option<Box<dyn VideoEncoder>> = None;
 
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if allow_hw {
             let mut order = vec![s.codec];
             if s.codec != Codec::H264 {
@@ -114,16 +148,16 @@ impl Encoder {
                 if codec != Codec::H264 && !available_codecs().contains(&codec) {
                     continue;
                 }
-                match mf::MfEncoder::new(codec, w, h, s.fps, kbps) {
+                match hardware_encoder(codec, w, h, s.fps, kbps) {
                     Ok(e) => {
-                        inner = Some(Box::new(e));
+                        inner = Some(e);
                         break;
                     }
                     Err(e) => warn!(?codec, "hardware encoder unavailable: {e:#}"),
                 }
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         let _ = allow_hw;
 
         let inner = match inner {
@@ -205,7 +239,7 @@ impl Encoder {
 }
 
 /// 在 Annex-B 码流中查找 NAL 类型（用于判断是否包含参数集 / 关键帧）。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub(crate) fn annexb_nal_types(data: &[u8], hevc: bool) -> impl Iterator<Item = u8> + '_ {
     let mut i = 0usize;
     std::iter::from_fn(move || {
@@ -295,7 +329,7 @@ mod tests {
         assert_eq!(check(Codec::H264, false).as_deref(), Some("OpenH264"));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn hardware_all() {
         for c in available_codecs() {

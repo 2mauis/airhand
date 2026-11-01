@@ -22,6 +22,21 @@ use crate::config;
 
 /// 控制端每秒都会发 Ping，这么久没有任何消息说明对方已失联
 const PEER_TIMEOUT: Duration = Duration::from_secs(30);
+/// 检查系统权限是否有变化的间隔
+const PERMISSION_CHECK: Duration = Duration::from_secs(2);
+
+/// 等到声音采集的状态有变化；没有订阅声音时一直等下去
+async fn audio_failure(sound: &mut Option<AudioSubscription>) -> Option<String> {
+    match sound {
+        Some(s) => s.failure_changed().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// `(缺少屏幕录制, 缺少辅助功能)` → 提示（两项都为 false 表示已经全部授予）
+fn permission_notice((screen, input): (bool, bool)) -> Notice {
+    Notice::MissingPermissions { screen, input }
+}
 
 pub async fn run(
     conn: Connection,
@@ -78,6 +93,11 @@ pub async fn run(
     if let Some(notice) = notice {
         ctl(&HostMsg::Notice(notice))?;
     }
+    // 缺少系统权限（macOS）：告诉控制端为什么没有画面 / 不能操作；之后权限有变化时再发
+    let mut missing = super::missing_permissions();
+    if missing != (false, false) {
+        ctl(&HostMsg::Notice(permission_notice(missing)))?;
+    }
 
     // 写任务：所有发往控制端的数据都经过这里（Bytes 零拷贝交给 QUIC）
     let writer = tokio::spawn(async move {
@@ -131,6 +151,8 @@ pub async fn run(
     let mut clip_tick = tokio::time::interval(clipboard::POLL);
     clip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut watchdog = tokio::time::interval(Duration::from_secs(5));
+    let mut permission_tick = tokio::time::interval(PERMISSION_CHECK);
+    permission_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_msg = Instant::now();
 
     let result: Result<()> = async {
@@ -176,7 +198,12 @@ pub async fn run(
                             if !enabled {
                                 sound = None;
                             } else if sound.is_none() {
-                                sound = Some(audio::subscribe(audio_tx.clone()));
+                                let s = audio::subscribe(audio_tx.clone());
+                                // 别的会话已经在采集、并且正打不开：马上告诉这个控制端
+                                if let Some(detail) = s.failure() {
+                                    ctl(&HostMsg::Notice(Notice::AudioFailed { detail }))?;
+                                }
+                                sound = Some(s);
                             }
                         }
                     }
@@ -195,6 +222,22 @@ pub async fn run(
                 _ = watchdog.tick() => {
                     if last_msg.elapsed() > PEER_TIMEOUT {
                         anyhow::bail!("the controller stopped responding");
+                    }
+                }
+                // 声音采集打不开 / 恢复了（只在控制端开着声音时）
+                failure = audio_failure(&mut sound) => {
+                    ctl(&HostMsg::Notice(match failure {
+                        Some(detail) => Notice::AudioFailed { detail },
+                        None => Notice::AudioRecovered,
+                    }))?;
+                }
+                // 例如本机用户在会话中途打开了"辅助功能"：更新（两项都授予时撤下）控制端的提示
+                _ = permission_tick.tick() => {
+                    let now = super::missing_permissions();
+                    if now != missing {
+                        info!(session_id, screen = !now.0, input = !now.1, "permissions changed");
+                        missing = now;
+                        ctl(&HostMsg::Notice(permission_notice(now)))?;
                     }
                 }
             }

@@ -6,7 +6,7 @@
 
 ---
 
-Airhand is a single program that is both the **host** (the computer being controlled) and the **controller** (the computer you control it from). It runs on **Windows** and **Linux** (X11 desktops). A small relay server, deployed with one Docker Compose command, handles signaling and forwards traffic. The controller can also be deployed with Docker Compose as a **web console** that you use from a browser.
+Airhand is a single program that is both the **host** (the computer being controlled) and the **controller** (the computer you control it from). It runs on **Windows**, **macOS** (13 or later) and **Linux** (X11 desktops). A small relay server, deployed with one Docker Compose command, handles signaling and forwards traffic. The controller can also be deployed with Docker Compose as a **web console** that you use from a browser.
 
 > **Status:** under active development. The protocol still changes between versions, so the clients and the server must be built from the same version (a mismatch is detected and reported, see [Protocol versions](#protocol-versions)).
 
@@ -43,7 +43,7 @@ Airhand is a single program that is both the **host** (the computer being contro
    docker compose logs airhand | grep fingerprint   # note the certificate SHA-256 fingerprint
    ```
 
-2. **Build the client** with the server address and fingerprint compiled in (requirements and Linux steps in [Building the client](#building-the-client)):
+2. **Build the client** with the server address and fingerprint compiled in (requirements and the macOS / Linux steps in [Building the client](#building-the-client)):
 
    ```powershell
    cd client
@@ -62,7 +62,7 @@ Airhand is a single program that is both the **host** (the computer being contro
 
 ### Host (default)
 
-Double-click to run. A tray icon appears in the bottom-right corner (on Linux, in the top bar / panel status area). Grey means not connected to the server, coloured means connected. The right-click menu contains:
+Double-click to run. A tray icon appears in the bottom-right corner (on macOS in the menu bar at the top of the screen, on Linux in the top bar / panel status area). Grey means not connected to the server, coloured means connected. The right-click menu (a plain click on macOS) contains:
 
 - Current mode and server status
 - The **control code** and "Copy control code"
@@ -73,6 +73,8 @@ Double-click to run. A tray icon appears in the bottom-right corner (on Linux, i
 After a network drop the host reconnects automatically with exponential backoff and **gets its old control code back**, even after a server restart. A code is reserved for its host for 10 minutes after the host goes offline.
 
 > On Linux the tray icon uses AppIndicator. It works out of the box on Ubuntu, KDE, Xfce and similar; stock GNOME needs the "AppIndicator and KStatusNotifierItem Support" extension. Without an AppIndicator library the program still runs as a host and prints the control code to the log (stderr).
+
+> On macOS the host needs two system permissions: **Screen & System Audio Recording** (to capture the screen and sound) and **Accessibility** (to control the keyboard and mouse). macOS asks on the first start; while one is missing, the menu says so, and clicking that item opens the matching page in System Settings → Privacy & Security. A connected controller is told which permission is missing too (in the controller's own language), and the message goes away once it is granted. After granting Screen & System Audio Recording, reopen Airhand. Airhand normally lives in the menu bar only and shows up in the Dock while the console is open.
 
 ### Controller
 
@@ -149,6 +151,7 @@ Environment variables (see `web/docker-compose.yml` and `web/.env.example`):
 Requirements: Rust (stable), Node.js 20+, CMake (to build libopus).
 
 - **Windows**: Windows 10/11 (WebView2 ships with the OS)
+- **macOS**: macOS 13 or later and the Xcode Command Line Tools (`xcode-select --install`); CMake can come from `brew install cmake`
 - **Linux**: Tauri's dependencies, the PulseAudio development files and the GStreamer plugins the console uses to decode video. On Debian / Ubuntu:
 
   ```bash
@@ -175,12 +178,25 @@ npm run tauri build
 #   client/src-tauri/target/release/bundle/deb/Airhand_<version>_amd64.deb (pulls in the tray, audio and GStreamer dependencies)
 ```
 
+**macOS** (set the variables with `export` as well):
+
+```bash
+cd client && npm install
+npm run tauri build
+# → client/src-tauri/target/release/bundle/macos/Airhand.app (~8 MB)
+#   client/src-tauri/target/release/bundle/dmg/Airhand_<version>_<arch>.dmg
+```
+
+- For just the .app use `npm run tauri build -- --bundles app`; it is built for the machine's own architecture (arm64 on Apple silicon)
+- The app is only ad-hoc signed, not notarized: the first time you open a copy on another Mac, right-click it in Finder → Open (or run `xattr -dr com.apple.quarantine Airhand.app`)
+- macOS remembers granted permissions by code signature, and an ad-hoc signature changes with every build: after rebuilding, remove Airhand in System Settings → Privacy & Security and grant the permissions again. For long-term use, put your own Developer ID in `signingIdentity` in `client/src-tauri/tauri.macos.conf.json`
+
 ## How it works
 
 ### Architecture
 
 ```
- Host (Windows; Linux: see table)        airhand-server (Docker)                  Controller (Tauri / web)
+ Host (Windows; others: see table)       airhand-server (Docker)                  Controller (Tauri / web)
 ┌───────────────────────────┐            ┌───────────────────────────┐            ┌───────────────────────────┐
 │ DXGI capture (GPU)        │            │ Control-code registry     │            │ WebCodecs HW decode       │
 │ SIMD scale + NV12 convert │  QUIC/TLS  │ Session pairing           │  QUIC/TLS  │ Low-latency Canvas        │
@@ -204,25 +220,25 @@ The web console splits the controller on the right in two: the QUIC connection a
 | `client/src/` | Console UI (React 19 + TypeScript, no UI library), shared by the desktop and web consoles, which differ only in `client/src/lib/backend/`; strings in `client/src/locales/` |
 | `assets/icon.svg` | Application icon source |
 
-How each host stage is implemented on the two platforms:
+How each host stage is implemented on the three platforms:
 
-| Stage | Windows | Linux (X11) |
-|---|---|---|
-| Screen capture | DXGI Desktop Duplication | MIT-SHM shared memory + DAMAGE change notifications; RandR for multiple monitors |
-| Cursor shape | DXGI | XFIXES |
-| Video encoding | Media Foundation hardware encoders, OpenH264 fallback | OpenH264 |
-| Input injection | SendInput (scan codes) | XTEST (evdev physical key codes) |
-| Audio capture | WASAPI loopback | PulseAudio / PipeWire output monitor |
-| Clipboard | Change detection via the clipboard sequence number | XFIXES selection-owner change notifications |
-| Console UI | WebView2 | WebKitGTK (WebCodecs decoding via GStreamer) |
+| Stage | Windows | macOS | Linux (X11) |
+|---|---|---|---|
+| Screen capture | DXGI Desktop Duplication | ScreenCaptureKit | MIT-SHM shared memory + DAMAGE change notifications; RandR for multiple monitors |
+| Cursor shape | DXGI | NSCursor | XFIXES |
+| Video encoding | Media Foundation hardware encoders, OpenH264 fallback | VideoToolbox hardware encoders (H.264 / HEVC), OpenH264 fallback | OpenH264 |
+| Input injection | SendInput (scan codes) | CGEvent (virtual key codes) | XTEST (evdev physical key codes) |
+| Audio capture | WASAPI loopback | ScreenCaptureKit (system mix) | PulseAudio / PipeWire output monitor |
+| Clipboard | Change detection via the clipboard sequence number | NSPasteboard change count | XFIXES selection-owner change notifications |
+| Console UI | WebView2 | WKWebView | WebKitGTK (WebCodecs decoding via GStreamer) |
 
 ### Video
 
 | Stage | How it works |
 |---|---|
-| Capture | Frames are only produced when the screen changes (DXGI on Windows, DAMAGE on X11), so an idle desktop uses almost no bandwidth |
+| Capture | Frames are only produced when the screen changes (DXGI on Windows, ScreenCaptureKit on macOS, DAMAGE on X11), so an idle desktop uses almost no bandwidth |
 | Preprocessing | `fast_image_resize` (SIMD) for scaling, `yuvutils-rs` (AVX2) for BGRA→NV12/I420; all buffers are reused |
-| Encoding | **Hardware first**: Media Foundation hardware encoders (NVENC / Quick Sync / AMF) for **AV1 / HEVC / H.264**, low-latency mode, no B-frames, very long GOP. Without one it falls back to **OpenH264 in screen-content mode** |
+| Encoding | **Hardware first**: Media Foundation hardware encoders (NVENC / Quick Sync / AMF) for **AV1 / HEVC / H.264**, low-latency mode, no B-frames, very long GOP; on macOS VideoToolbox (H.264 / HEVC, low-latency rate control for H.264). Without one it falls back to **OpenH264 in screen-content mode** |
 | Rate control | The controller ACKs every frame. The host caps the number of **in-flight frames** (≈ RTT × fps + 2); on a slow network it waits and **skips to the newest frame** instead of building up lag. Adaptive bitrate steps down under congestion and recovers gradually |
 | Transport | QUIC with **BBR** congestion control (steadier than Cubic on lossy links such as Wi-Fi or cross-border routes). Control messages, audio and video are queued separately, so pings and mouse events never wait behind a large frame |
 | Decoding | The controller decodes on the GPU with **WebCodecs** (`optimizeForLatency`) and paints straight into a `desynchronized` Canvas |
@@ -244,6 +260,8 @@ The host's system sound (not the microphone) is streamed to the controller:
 
 Only the session you are looking at plays audio (none do in the multi-screen overview); the other hosts are told to stop capturing.
 
+When the host can't capture sound (no audio output device, or no PulseAudio / PipeWire running on Linux, for example), the controller shows a message, the speaker in the toolbar gets a yellow dot and the sound menu gives the reason. The host retries every 2 seconds, and the message goes away once it recovers.
+
 ### A/V sync (optional, off by default)
 
 Audio goes through a jitter buffer while video is shown as soon as it arrives, so by default audio lags video slightly: about **70 ms** in our measurements (same machine, local relay, 4K output at 1080p; 49–78 ms per run). That's barely noticeable while working, but may be when watching video.
@@ -261,8 +279,8 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 
 - No config file; the server address is compiled in. Logs go to stderr only
 - Host mode **doesn't create a WebView**, so it creates no files at all
-- The single-instance lock is a kernel object, not a lock file: a named mutex on Windows, an abstract-namespace Unix socket on Linux
-- The console's WebView needs a data directory: it lives in a random subdirectory of the temp directory, runs in private mode (no cookies or cache saved), and is deleted when the window closes or the program exits. If the process is killed, leftovers are removed on the next start
+- The single-instance lock is a kernel object, not a lock file: a named mutex on Windows, an abstract-namespace Unix socket on Linux, a Mach port name registered with the bootstrap server on macOS
+- The console's WebView needs a data directory: it lives in a random subdirectory of the temp directory, runs in private mode (no cookies or cache saved), and is deleted when the window closes or the program exits. If the process is killed, leftovers are removed on the next start. On macOS WKWebView needs no data directory and writes nothing to disk in private mode
 - On Linux, the few things that can only be handed over as files (the tray icon for AppIndicator, WebKitGTK's GStreamer plugin cache) live in a random per-process directory under `XDG_RUNTIME_DIR` (a RAM disk) that is removed on exit, including on SIGTERM / SIGINT. The Mesa / NVIDIA on-disk shader caches are turned off
 - Controller settings live in memory only
 - All of the above is about the desktop client. The web console is a service you deploy: it keeps its self-signed HTTPS certificate in a data volume, and the browser also keeps settings in memory only (plus a session cookie when a password is set)
@@ -282,6 +300,9 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 - The Linux host only has OpenH264 software encoding (no VA-API / NVENC yet); when AV1 / HEVC is selected it uses H.264
 - Decoding on a Linux controller relies on WebKitGTK + GStreamer: H.264 needs `gstreamer1.0-plugins-bad` (parsing) and `gstreamer1.0-libav` or openh264 (decoding); AV1 / HEVC depend on the installed GStreamer decoders. If a format turns out not to produce a picture, the controller switches to H.264
 - Without elevated privileges on Windows, UAC prompts and the lock screen can't be captured or controlled (they are on the secure desktop; that would need a SYSTEM service), and `Ctrl+Alt+Del` can't be injected. On Linux the lock screen is similar (the screensaver grabs the keyboard and mouse)
+- The macOS host needs the Screen & System Audio Recording and Accessibility permissions, which only the local user can grant in System Settings; since macOS 15 the system also asks again from time to time whether to keep allowing screen recording. The login window and the lock screen can't be captured or controlled
+- A Mac host doesn't offer AV1 (current Apple chips can only decode it in hardware), so AV1 shows as unavailable in the console
+- A macOS controller (WKWebView) can't lock the keyboard: in fullscreen, Command+Tab, Command+Space and the like are still handled locally, so use "Send shortcut" in the toolbar. WKWebView on older macOS versions may lack Opus decoding, in which case the console says remote audio can't be played
 - The clipboard syncs text only, not files
 - Audio flows from host to controller only; the controller's microphone isn't forwarded. Audio is captured after the volume control, so a muted host sends silence
 - Web console: reloading or closing the tab disconnects its sessions; in Firefox, text copied locally isn't synced to the remote side automatically; outside fullscreen some shortcuts (Ctrl+W…) can't reach the remote computer
@@ -305,6 +326,8 @@ cargo test --lib
 # audio loopback capture (needs an audio output device; plays a 1.5 s test tone at -60 dBFS, barely audible)
 cargo test --lib loopback_captures_tone -- --ignored --nocapture
 ```
+
+On macOS the screen / audio capture tests (`sck_capture`, `loopback_captures_tone`, video and audio in the end-to-end test) and the input injection test (`mac_move_to_center`) need the Screen & System Audio Recording and Accessibility permissions for the terminal that runs them (System Settings → Privacy & Security). Without them `sck_capture`, `loopback_captures_tone` and `mac_move_to_center` skip themselves; the end-to-end test checks that the host reports the missing permission (rather than a capture failure) and then skips the video and audio checks (clipboard, ping, disconnect and the rest are still checked).
 
 End to end (a real server, a real host with screen capture and encoding, and a protocol-level controller):
 

@@ -35,6 +35,7 @@ pub enum HostMsg {
 /// 被控端给控制端的提示。
 ///
 /// 发送的是类型而不是文字：控制端按**自己的**界面语言显示，不会出现对方电脑的语言。
+/// 会自动恢复的问题成对出现（`XxxFailed` / `XxxRecovered`）：恢复时控制端撤下之前的提示，`XxxRecovered` 本身不显示。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     /// 被控端没有可以采集的显示器
@@ -43,7 +44,21 @@ pub enum Notice {
     Wayland,
     /// 屏幕采集失败（被控端会自动重试）。`detail` 是给排查问题用的技术信息：英文，
     /// 不含操作系统按本地语言给出的错误说明（Windows 只带 HRESULT 错误码）。
+    /// 缺少系统权限不算采集失败，用 [`Notice::MissingPermissions`] 说明。
     CaptureFailed { detail: String },
+    /// 屏幕采集恢复正常（之前发过 [`Notice::CaptureFailed`]）。
+    CaptureRecovered,
+    /// 无法采集声音（被控端会自动重试），只发给开着声音的控制端。`detail` 同 [`Notice::CaptureFailed`]。
+    /// 缺少系统权限时不发（已经用 [`Notice::MissingPermissions`] 说明）。
+    AudioFailed { detail: String },
+    /// 声音采集恢复正常（之前发过 [`Notice::AudioFailed`]）。
+    AudioRecovered,
+    /// 被控端缺少系统权限（目前只有 macOS），只能由那台电脑的用户在"系统设置 → 隐私与安全性"里授予：
+    /// `screen` 是"屏幕与系统录音"（缺了就没有画面和声音），`input` 是"辅助功能"（缺了就不能操作键盘鼠标）。
+    ///
+    /// 会话开始时缺少权限就发一次，之后权限有变化再发；两项都为 false 表示已经全部授予，
+    /// 控制端据此撤下之前的提示。
+    MissingPermissions { screen: bool, input: bool },
 }
 
 /// 被控端结束会话的原因

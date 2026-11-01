@@ -1,23 +1,28 @@
-//! 声音：采集被控端正在播放的声音（Windows：WASAPI 环回；Linux：PulseAudio/PipeWire 监视器），
-//! Opus 编码后发给控制端。
+//! 声音：采集被控端正在播放的声音（Windows：WASAPI 环回；Linux：PulseAudio/PipeWire 监视器；
+//! macOS：ScreenCaptureKit），Opus 编码后发给控制端。
 //!
 //! * 所有会话共享一个采集 + 编码线程（引用计数，最后一个订阅者离开时停止）；
 //! * 没有声音时不发包（静音检测 + 拖尾），静止的桌面不会因为声音占用带宽；
 //! * 每个会话一个有界队列，网络拥塞时直接丢包，不会让声音越积越慢；
-//! * 默认输出设备变化（例如插上耳机）或设备失效时自动重新打开。
+//! * 默认输出设备变化（例如插上耳机）或设备失效时自动重新打开；打不开时把原因告诉订阅者
+//!   （会话据此给控制端发 `Notice::AudioFailed` / `AudioRecovered`）。
 
 #[cfg(target_os = "linux")]
 pub(crate) mod pulse;
+#[cfg(target_os = "macos")]
+pub(crate) mod sck;
 #[cfg(windows)]
 pub(crate) mod wasapi;
 
 #[cfg(target_os = "linux")]
 use pulse as backend;
+#[cfg(target_os = "macos")]
+use sck as backend;
 #[cfg(windows)]
 use wasapi as backend;
 
 /// 测试用：在本机默认输出设备上播放测试音
-#[cfg(all(test, any(windows, target_os = "linux")))]
+#[cfg(all(test, any(windows, target_os = "linux", target_os = "macos")))]
 pub(crate) use backend::TonePlayer;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,7 +35,7 @@ use airhand_proto::session::{
 };
 use anyhow::Result;
 use bytes::Bytes;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 /// 每帧每声道的采样数（20 ms = 960）
@@ -190,6 +195,9 @@ struct Subscriber {
 struct Shared {
     subs: Mutex<Vec<Subscriber>>,
     stop: AtomicBool,
+    /// 打不开声音采集的原因（英文技术信息，见 `capture::wire_detail`）。正常时为 `None`；
+    /// 缺少系统权限时也是 `None`：会话已经用 `Notice::MissingPermissions` 说明了
+    failure: watch::Sender<Option<String>>,
 }
 
 static HUB: LazyLock<Mutex<Weak<Shared>>> = LazyLock::new(|| Mutex::new(Weak::new()));
@@ -199,6 +207,32 @@ static NEXT_SUB: AtomicU64 = AtomicU64::new(1);
 pub struct AudioSubscription {
     shared: Arc<Shared>,
     id: u64,
+    failure: watch::Receiver<Option<String>>,
+}
+
+impl AudioSubscription {
+    fn new(shared: Arc<Shared>, id: u64) -> Self {
+        let failure = shared.failure.subscribe();
+        Self {
+            shared,
+            id,
+            failure,
+        }
+    }
+
+    /// 现在为什么采集不到声音（`None` = 正常）
+    pub fn failure(&self) -> Option<String> {
+        self.failure.borrow().clone()
+    }
+
+    /// 等到采集状态有变化，返回新的状态（取消安全）
+    pub async fn failure_changed(&mut self) -> Option<String> {
+        // 发送端在 Shared 里，订阅存在期间不会被释放，所以不会出错
+        if self.failure.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        self.failure.borrow_and_update().clone()
+    }
 }
 
 impl Drop for AudioSubscription {
@@ -209,7 +243,9 @@ impl Drop for AudioSubscription {
         subs.retain(|s| s.id != self.id);
         if subs.is_empty() {
             self.shared.stop.store(true, Ordering::Release);
-            *hub = Weak::new();
+            if std::ptr::eq(hub.as_ptr(), Arc::as_ptr(&self.shared)) {
+                *hub = Weak::new();
+            }
         }
     }
 }
@@ -227,11 +263,12 @@ pub fn subscribe(tx: mpsc::Sender<Bytes>) -> AudioSubscription {
         && !shared.stop.load(Ordering::Acquire)
     {
         shared.subs.lock().unwrap().push(sub);
-        return AudioSubscription { shared, id };
+        return AudioSubscription::new(shared, id);
     }
     let shared = Arc::new(Shared {
         subs: Mutex::new(vec![sub]),
         stop: AtomicBool::new(false),
+        failure: watch::Sender::new(None),
     });
     *hub = Arc::downgrade(&shared);
     let thread_shared = shared.clone();
@@ -239,7 +276,21 @@ pub fn subscribe(tx: mpsc::Sender<Bytes>) -> AudioSubscription {
         .name("airhand-audio".into())
         .spawn(move || capture_loop(thread_shared))
         .expect("spawn audio thread");
-    AudioSubscription { shared, id }
+    AudioSubscription::new(shared, id)
+}
+
+/// 打不开声音采集时要告诉控制端的原因；缺少系统权限时为 `None`（另有提示）。
+fn failure_detail(e: &anyhow::Error) -> Option<String> {
+    (!super::missing_permission(e)).then(|| super::capture::wire_detail(e))
+}
+
+/// 更新采集状态，有变化才通知订阅者（每次重试失败的原因通常都一样）。
+fn set_failure(shared: &Shared, failure: Option<String>) {
+    shared.failure.send_if_modified(|f| {
+        let changed = *f != failure;
+        *f = failure;
+        changed
+    });
 }
 
 /// 把一个 Opus 包发给所有订阅者（每种 start 取值只编码一次消息）。
@@ -275,18 +326,22 @@ fn broadcast(shared: &Shared, seq: u32, data: &[u8], start: bool, captured: Inst
 
 // ───────────────────────────── 采集线程 ─────────────────────────────
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn capture_loop(_shared: Arc<Shared>) {
     info!("audio capture isn't supported on this platform");
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn capture_loop(shared: Arc<Shared>) {
     super::capture::raise_priority();
     let mut packetizer = match Packetizer::new() {
         Ok(p) => p,
         Err(e) => {
             warn!("can't create the Opus encoder: {e:#}");
+            set_failure(
+                &shared,
+                failure_detail(&e.context("can't create the Opus encoder")),
+            );
             return;
         }
     };
@@ -310,12 +365,18 @@ fn capture_loop(shared: Arc<Shared>) {
                 Ok(c) => {
                     failures = 0;
                     last_check = Instant::now();
+                    set_failure(&shared, None);
                     cap.insert(c)
                 }
                 Err(e) => {
                     failures += 1;
+                    set_failure(&shared, failure_detail(&e));
                     if failures == 1 || failures.is_multiple_of(30) {
-                        warn!("can't open audio capture (no audio output device?): {e:#}");
+                        if super::missing_permission(&e) {
+                            warn!("can't open audio capture: {e:#}");
+                        } else {
+                            warn!("can't open audio capture (no audio output device?): {e:#}");
+                        }
                     }
                     // 设备可能稍后出现（例如插上耳机），定期重试
                     for _ in 0..20 {
@@ -538,6 +599,60 @@ mod tests {
         let err = ms(got, onset);
         println!("解码后出声时刻与真实采集时刻相差 {err:.2} ms");
         assert!(err.abs() < 3.0, "声音时间戳偏差 {err:.2} ms");
+    }
+
+    /// 缺少系统权限不算采集失败（另有提示）；其它原因原样告诉控制端
+    #[test]
+    fn failure_details() {
+        let e = anyhow::anyhow!("no default audio output device");
+        assert_eq!(
+            failure_detail(&e).as_deref(),
+            Some("no default audio output device")
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            failure_detail(&anyhow::Error::from(crate::host::macos::PermissionDenied)),
+            None
+        );
+    }
+
+    /// 订阅时就能拿到当前的状态；之后只有状态真的变了才通知（每次重试失败的原因一样时不重复发）
+    #[tokio::test]
+    async fn failure_is_reported_to_subscribers() {
+        let shared = Arc::new(Shared {
+            subs: Mutex::new(Vec::new()),
+            stop: AtomicBool::new(false),
+            failure: watch::Sender::new(None),
+        });
+        set_failure(&shared, Some("no default audio output device".into()));
+        let mut sub = AudioSubscription::new(shared.clone(), 0);
+        assert_eq!(
+            sub.failure().as_deref(),
+            Some("no default audio output device")
+        );
+        set_failure(&shared, Some("no default audio output device".into()));
+        assert!(!sub.failure.has_changed().unwrap(), "原因没变不应通知");
+        let wait = Duration::from_millis(50);
+        assert!(
+            tokio::time::timeout(wait, sub.failure_changed())
+                .await
+                .is_err()
+        );
+        set_failure(&shared, None);
+        assert_eq!(
+            tokio::time::timeout(wait, sub.failure_changed())
+                .await
+                .unwrap(),
+            None
+        );
+        set_failure(&shared, Some("PulseAudio error 6".into()));
+        assert_eq!(
+            tokio::time::timeout(wait, sub.failure_changed())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("PulseAudio error 6")
+        );
     }
 
     #[test]

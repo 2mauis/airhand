@@ -9,7 +9,7 @@ import zh from "../locales/zh.ts";
 
 export type Lang = "zh" | "en";
 
-export type Params = Record<string, string | number>;
+export type Params = Record<string, string | number | boolean>;
 /** 文案：字符串里的 {name} 会被参数替换；需要处理单复数等情况时写成函数 */
 export type Msg = string | ((p: Params) => string);
 /** 全部词条（以 locales/zh.ts 为准） */

@@ -23,8 +23,21 @@ pub fn us(t: Instant) -> u64 {
 }
 
 /// 系统 API 给出的时间戳只比现在早这么多以内才可信
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const MAX_AGE: Duration = Duration::from_secs(5);
+
+/// `age_secs` 秒之前的时刻（macOS：CoreMedia 主机时钟上的时间差）；稍晚于现在（读取顺序造成的误差）按现在处理。
+#[cfg(target_os = "macos")]
+pub fn ago(age_secs: f64) -> Option<Instant> {
+    if !age_secs.is_finite() {
+        return None;
+    }
+    let age = Duration::from_secs_f64(age_secs.max(0.0));
+    if age > MAX_AGE {
+        return None;
+    }
+    Instant::now().checked_sub(age)
+}
 
 /// `QueryPerformanceCounter` 计数（DXGI 的 `LastPresentTime`）对应的时刻。
 #[cfg(windows)]
@@ -60,6 +73,21 @@ fn from_age(age: i64, freq: i64) -> Option<Instant> {
         return None;
     }
     Instant::now().checked_sub(age)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_tests {
+    use super::*;
+
+    #[test]
+    fn ago_conversion() {
+        let t = ago(0.1).unwrap();
+        let elapsed = t.elapsed().as_secs_f64();
+        assert!((0.099..0.105).contains(&elapsed), "{elapsed}");
+        assert!(ago(-0.01).unwrap().elapsed() < Duration::from_millis(5));
+        assert!(ago(60.0).is_none(), "过旧的时间戳应被拒绝");
+        assert!(ago(f64::NAN).is_none());
+    }
 }
 
 #[cfg(all(test, windows))]

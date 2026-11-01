@@ -8,8 +8,17 @@ import { t } from "./i18n";
 /** 本机产生的提示 */
 export type LocalNotice = { kind: "h264Undecodable" } | { kind: "codecFallback"; codec: string } | { kind: "noOpus" };
 
+/** 被控端发来的"已恢复"：只用来撤下之前的提示，本身不显示 */
+export type RecoveredNotice = Extract<RemoteNotice, { kind: "captureRecovered" | "audioRecovered" }>;
+
+/** "已恢复"撤下的是哪种提示 */
+export const RECOVERS: Record<RecoveredNotice["kind"], SessionNotice["kind"]> = {
+  captureRecovered: "captureFailed",
+  audioRecovered: "audioFailed",
+};
+
 /** 会话画面上显示的提示：被控端发来的，或者本机产生的 */
-export type SessionNotice = RemoteNotice | LocalNotice;
+export type SessionNotice = Exclude<RemoteNotice, RecoveredNotice> | LocalNotice;
 
 export function problemText(p: Problem): string {
   const { kind, ...params } = p;

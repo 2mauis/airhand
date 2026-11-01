@@ -2,6 +2,8 @@
 
 #[cfg(windows)]
 mod dxgi;
+#[cfg(target_os = "macos")]
+mod sck;
 #[cfg(target_os = "linux")]
 mod x11;
 
@@ -180,6 +182,9 @@ impl FrameSlot {
 trait Capturer {
     /// 获取下一次更新；超时（画面无变化）时返回空更新。出错时调用方会重建采集器。
     fn next(&mut self, timeout: Duration, pool: &mut FramePool) -> anyhow::Result<CaptureUpdate>;
+
+    /// 订阅者期望的最高帧率变化。由系统按帧率推送画面的采集器（macOS）据此调整，其余忽略。
+    fn set_fps(&mut self, _fps: u8) {}
 }
 
 struct CaptureShared {
@@ -275,12 +280,14 @@ fn capture_loop(shared: Arc<CaptureShared>) {
     let mut cap: Option<Box<dyn Capturer>> = None;
     let mut last = Instant::now() - Duration::from_secs(1);
     let mut failures = 0u32;
+    let mut fps = shared.max_fps();
     while !shared.stop.load(Ordering::Acquire) {
         let c = match cap.as_mut() {
             Some(c) => c,
-            None => match open(shared.index) {
+            None => match open(shared.index, shared.max_fps()) {
                 Ok(c) => {
                     failures = 0;
+                    fps = shared.max_fps();
                     cap.insert(c)
                 }
                 Err(e) => {
@@ -288,14 +295,23 @@ fn capture_loop(shared: Arc<CaptureShared>) {
                     if failures == 1 || failures.is_multiple_of(20) {
                         warn!(screen = shared.index, "can't open capture: {e:#}");
                     }
-                    shared.slot.set_error(Some(wire_detail(&e)));
+                    // 缺少系统权限不算采集失败：会话已经用 Notice::MissingPermissions 告诉控制端了
+                    let permission = super::missing_permission(&e);
+                    shared
+                        .slot
+                        .set_error((!permission).then(|| wire_detail(&e)));
                     std::thread::sleep(Duration::from_millis(250));
                     continue;
                 }
             },
         };
         // 按订阅者中最高的帧率节流；DXGI 会在等待期间累积画面更新
-        let interval = Duration::from_secs_f64(1.0 / shared.max_fps() as f64);
+        let max_fps = shared.max_fps();
+        if max_fps != fps {
+            fps = max_fps;
+            c.set_fps(fps);
+        }
+        let interval = Duration::from_secs_f64(1.0 / max_fps as f64);
         let since = last.elapsed();
         if since < interval {
             std::thread::sleep(interval - since);
@@ -323,15 +339,19 @@ fn capture_loop(shared: Arc<CaptureShared>) {
     info!(screen = shared.index, "capture stopped");
 }
 
-/// 错误链的文字说明，发给控制端（见 [`Notice::CaptureFailed`]）。
+/// 错误链的文字说明，发给控制端（见 [`Notice::CaptureFailed`]、`Notice::AudioFailed`）。
 ///
-/// 操作系统给出的错误说明是按本机语言写的（Windows 的 FormatMessage，Linux 设置 locale 之后的 strerror），
-/// 这里换成与语言无关的错误码，免得控制端看到被控端电脑的语言。日志里照常记录完整说明。
+/// 操作系统给出的错误说明是按本机语言写的（Windows 的 FormatMessage，Linux 设置 locale 之后的 strerror
+/// 和 libpulse 的错误说明），这里换成与语言无关的错误码，免得控制端看到被控端电脑的语言。日志里照常记录完整说明。
 pub(crate) fn wire_detail(e: &anyhow::Error) -> String {
     let part = |c: &(dyn std::error::Error + 'static)| -> String {
         #[cfg(windows)]
         if let Some(w) = c.downcast_ref::<windows::core::Error>() {
             return w.code().to_string();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(p) = c.downcast_ref::<crate::host::audio::pulse::PulseError>() {
+            return format!("PulseAudio error {}", p.code());
         }
         match c.downcast_ref::<std::io::Error>() {
             Some(io) => match io.raw_os_error() {
@@ -345,17 +365,22 @@ pub(crate) fn wire_detail(e: &anyhow::Error) -> String {
 }
 
 #[cfg(windows)]
-fn open(index: u8) -> anyhow::Result<Box<dyn Capturer>> {
+fn open(index: u8, _fps: u8) -> anyhow::Result<Box<dyn Capturer>> {
     Ok(Box::new(dxgi::DxgiCapturer::open(index)?))
 }
 
 #[cfg(target_os = "linux")]
-fn open(index: u8) -> anyhow::Result<Box<dyn Capturer>> {
+fn open(index: u8, _fps: u8) -> anyhow::Result<Box<dyn Capturer>> {
     Ok(Box::new(x11::X11Capturer::open(index)?))
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
-fn open(_index: u8) -> anyhow::Result<Box<dyn Capturer>> {
+#[cfg(target_os = "macos")]
+fn open(index: u8, fps: u8) -> anyhow::Result<Box<dyn Capturer>> {
+    Ok(Box::new(sck::SckCapturer::open(index, fps)?))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn open(_index: u8, _fps: u8) -> anyhow::Result<Box<dyn Capturer>> {
     anyhow::bail!("screen capture isn't supported on this platform yet")
 }
 
@@ -372,7 +397,11 @@ pub fn displays() -> Vec<DisplayInfo> {
             Vec::new()
         })
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        super::macos::display_infos()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Vec::new()
     }
@@ -398,6 +427,8 @@ pub(crate) fn raise_priority() {
         };
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     }
+    #[cfg(target_os = "macos")]
+    super::macos::raise_thread_qos();
 }
 
 #[cfg(test)]

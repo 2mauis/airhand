@@ -72,13 +72,26 @@ async function rustVariants(file: string, enumName: string): Promise<string[]> {
 test("Rust 的 Problem / NoticeView 在两种语言里都有词条", async () => {
   const problems = await rustVariants("../../crates/airhand-link/src/problem.rs", "Problem");
   const notices = await rustVariants("../../crates/airhand-link/src/controller/session.rs", "NoticeView");
+  for (const k of notices.filter((k) => k.endsWith("Recovered"))) {
+    assert.ok(notices.includes(k.replace(/Recovered$/, "Failed")), `${k} 没有对应的 Failed 提示`);
+  }
   assert.ok(problems.length >= 15 && problems.includes("certMismatch"), `解析结果不对: ${problems}`);
-  assert.deepEqual(notices, ["noDisplays", "wayland", "captureFailed"]);
+  assert.deepEqual(notices, [
+    "noDisplays",
+    "wayland",
+    "captureFailed",
+    "captureRecovered",
+    "audioFailed",
+    "audioRecovered",
+    "missingPermissions",
+  ]);
   const before = getLang();
   try {
     for (const lang of ["zh", "en"] as const) {
       setLang(lang);
-      for (const key of [...problems.map((k) => `problem.${k}`), ...notices.map((k) => `notice.${k}`)]) {
+      // xxxRecovered 只用来撤下对应的 xxxFailed，本身不显示（见 messages.ts 的 RECOVERS），不需要词条
+      const shown = notices.filter((k) => !k.endsWith("Recovered"));
+      for (const key of [...problems.map((k) => `problem.${k}`), ...shown.map((k) => `notice.${k}`)]) {
         const text = t(key as MsgKey, { detail: "D", server: 3, client: 2 });
         assert.notEqual(text, key, `${lang} 缺少词条 ${key}`);
       }
@@ -99,6 +112,26 @@ test("问题文字：版本不兼容按版本号提示更新哪一方，技术�
     assert.match(t("problem.incompatible", { server: 3, client: 2 }), /please update Airhand/);
     assert.match(t("problem.incompatible", { server: 1, client: 2 }), /please update the server/);
     assert.equal(t("problem.kicked"), "The remote user disconnected you");
+  } finally {
+    setLang(before);
+  }
+});
+
+test("对方 Mac 缺少权限：按缺少的是哪一项说明", () => {
+  const before = getLang();
+  try {
+    for (const lang of ["zh", "en"] as const) {
+      setLang(lang);
+      const both = t("notice.missingPermissions", { screen: true, input: true });
+      const screen = t("notice.missingPermissions", { screen: true, input: false });
+      const input = t("notice.missingPermissions", { screen: false, input: true });
+      assert.equal(new Set([both, screen, input]).size, 3, `${lang}: 三种情况应各不相同`);
+      const [rec, acc, reopen] = lang === "zh" ? ["屏幕与系统录音", "辅助功能", "重新打开"] : ["Screen & System Audio Recording", "Accessibility", "reopen"];
+      assert.ok(both.includes(rec) && both.includes(acc) && both.includes(reopen), both);
+      assert.ok(screen.includes(rec) && !screen.includes(acc) && screen.includes(reopen), screen);
+      // 辅助功能授权后立即生效，不需要重新打开
+      assert.ok(input.includes(acc) && !input.includes(rec) && !input.includes(reopen), input);
+    }
   } finally {
     setLang(before);
   }

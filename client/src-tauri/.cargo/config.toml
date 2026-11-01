@@ -9,3 +9,7 @@ rustflags = ["-C", "target-feature=+crt-static"]
 [env]
 CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc = { value = "cmake/msvc-static-crt.cmake", relative = true }
 CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc = { value = "cmake/msvc-static-crt.cmake", relative = true }
+
+# macOS：最低支持 13（ScreenCaptureKit 采集系统声音需要 13），与 tauri.macos.conf.json 的 minimumSystemVersion 一致。
+# 只影响 Apple 目标；已经设置了这个环境变量（例如 tauri build）时以环境变量为准
+MACOSX_DEPLOYMENT_TARGET = "13.0"

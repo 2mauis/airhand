@@ -3,6 +3,7 @@
 //! 被控端模式完全不创建 WebView，因此不会产生任何文件。
 //! 控制端界面需要 WebView（Windows：WebView2；Linux：WebKitGTK），WebView 需要一个用户数据目录；
 //! 这里把它放到临时目录中的随机子目录，并开启隐私模式（不持久化 Cookie/缓存），在窗口关闭和程序退出时彻底删除。
+//! macOS 的 WKWebView 在隐私模式下完全不写磁盘，也不需要数据目录。
 //! Linux 上还有几样东西不得不写文件：托盘图标只能以文件形式交给 AppIndicator；WebKitGTK 的媒体解码
 //! （GStreamer）会写插件缓存；Mesa 会写着色器缓存。前两者都放进本进程专用的随机目录（`XDG_RUNTIME_DIR`
 //! 内存盘），退出时删除；着色器磁盘缓存直接关掉（控制台只画 2D 画面，没有影响）。
@@ -17,6 +18,8 @@ const PREFIX: &str = "airhand-webview-";
 #[cfg(target_os = "linux")]
 const PROCESS_PREFIX: &str = "airhand-run-";
 
+/// 控制台 WebView 的数据目录（Windows / Linux；macOS 的 WKWebView 不需要）。
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn new_dir() -> PathBuf {
     std::env::temp_dir().join(format!("{PREFIX}{:016x}", rand::random::<u64>()))
 }

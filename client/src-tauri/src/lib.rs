@@ -81,7 +81,11 @@ fn switch_services(app: &AppHandle, mode: Mode) {
             s.controllers.clear();
         });
         match mode {
-            Mode::Host => sv.host = Some(HostService::start(state.hub.clone())),
+            Mode::Host => {
+                sv.host = Some(HostService::start(state.hub.clone()));
+                #[cfg(target_os = "macos")]
+                host::macos::request_permissions();
+            }
             Mode::Controller => {
                 sv.controller = Some(Arc::new(ControllerService::start(
                     config::link(),
@@ -105,7 +109,21 @@ fn set_mode(app: &AppHandle, mode: Mode) {
     }
 }
 
+/// macOS：是否在程序坞里显示图标（也决定能不能用 Command+Tab 切换到控制台）。
+/// 只有托盘图标时是"辅助程序"，打开控制台时变成普通程序。
+#[cfg(target_os = "macos")]
+fn show_in_dock(app: &AppHandle, visible: bool) {
+    let policy = if visible {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    };
+    let _ = app.set_activation_policy(policy);
+}
+
 fn open_console(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    show_in_dock(app, true);
     if let Some(w) = app.get_webview_window(CONSOLE) {
         let _ = w.unminimize();
         let _ = w.show();
@@ -115,13 +133,21 @@ fn open_console(app: &AppHandle) {
     let app = app.clone();
     // Windows 上在主线程同步创建 WebView2 可能死锁，放到异步任务中创建
     tauri::async_runtime::spawn(async move {
-        let dir = ephemeral::new_dir();
-        app.state::<AppState>()
-            .webview_dirs
-            .lock()
-            .unwrap()
-            .push(dir.clone());
-        let built = WebviewWindowBuilder::new(&app, CONSOLE, WebviewUrl::App("index.html".into()))
+        let builder =
+            WebviewWindowBuilder::new(&app, CONSOLE, WebviewUrl::App("index.html".into()));
+        // WebView2 / WebKitGTK 需要一个数据目录（放在临时目录里，用完删除，见 ephemeral）；
+        // macOS 的 WKWebView 没有这个概念，隐私模式下本来就不往磁盘写东西
+        #[cfg(not(target_os = "macos"))]
+        let builder = {
+            let dir = ephemeral::new_dir();
+            app.state::<AppState>()
+                .webview_dirs
+                .lock()
+                .unwrap()
+                .push(dir.clone());
+            builder.data_directory(dir)
+        };
+        let built = builder
             .title(console_title())
             // 首屏就用当前语言（之后的切换通过 lang-changed 事件通知）
             .initialization_script(format!(
@@ -131,7 +157,6 @@ fn open_console(app: &AppHandle) {
             .inner_size(1360.0, 860.0)
             .min_inner_size(960.0, 620.0)
             .center()
-            .data_directory(dir)
             .incognito(true)
             .disable_drag_drop_handler()
             .background_color(tauri::window::Color(11, 13, 20, 255))
@@ -162,6 +187,8 @@ fn set_lang(app: &AppHandle, lang: Lang) {
 fn on_console_destroyed(app: &AppHandle) {
     // 关闭控制台 = 回到默认的被控端模式
     switch_services(app, Mode::Host);
+    #[cfg(target_os = "macos")]
+    show_in_dock(app, false);
     let dirs: Vec<PathBuf> =
         std::mem::take(&mut *app.state::<AppState>().webview_dirs.lock().unwrap());
     for d in dirs {
@@ -186,6 +213,12 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
                 h.send(cmd);
             }
         }
+        #[cfg(target_os = "macos")]
+        "perm_screen" => {
+            host::macos::open_privacy_settings(host::macos::PrivacyPane::ScreenRecording)
+        }
+        #[cfg(target_os = "macos")]
+        "perm_input" => host::macos::open_privacy_settings(host::macos::PrivacyPane::Accessibility),
         "copy_code" => {
             if let Some(code) = app.state::<AppState>().hub.borrow().code {
                 match clipboard::set_text(&format!("{code:06}")) {
@@ -400,9 +433,18 @@ pub fn run() {
             app.state::<AppState>().services.lock().unwrap().host =
                 Some(HostService::start(hub.clone()));
             // 仅调试构建：方便开发时直接进入控制端
-            #[cfg(debug_assertions)]
-            if std::env::var_os("AIRHAND_DEV_CONTROLLER").is_some() {
+            let dev_controller =
+                cfg!(debug_assertions) && std::env::var_os("AIRHAND_DEV_CONTROLLER").is_some();
+            if dev_controller {
                 set_mode(&handle, Mode::Controller);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                // 直接进入控制端时用不到被控端的权限，切回被控端时再请求
+                if !dev_controller {
+                    host::macos::request_permissions();
+                }
+                watch_permissions(hub.clone());
             }
 
             // 状态（或界面语言）变化 → 刷新托盘 / 通知控制台
@@ -436,6 +478,14 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("can't initialize Tauri");
+    // macOS：和其它平台一样启动后只有托盘（菜单栏）图标，程序坞里没有图标；打开控制台时才显示。
+    // 打包的 .app 在 Info.plist 里声明了 LSUIElement，这里是给直接运行的可执行文件用的
+    #[cfg(target_os = "macos")]
+    let app = {
+        let mut app = app;
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        app
+    };
 
     app.run(|app, event| match event {
         // 托盘程序：关闭所有窗口时不退出
@@ -461,6 +511,27 @@ pub fn run() {
             ephemeral::remove_with_retry(&ephemeral::process_dir(), Duration::from_secs(1));
         }
         _ => {}
+    });
+}
+
+/// macOS：用户在系统设置里授予 / 收回权限时刷新托盘菜单（菜单里有未授权的提示）。
+#[cfg(target_os = "macos")]
+fn watch_permissions(hub: StatusHub) {
+    tauri::async_runtime::spawn(async move {
+        let mut last = host::macos::permissions();
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let now = host::macos::permissions();
+            if now != last {
+                info!(
+                    screen = now.screen,
+                    input = now.input,
+                    "macOS permissions changed"
+                );
+                last = now;
+                hub.send_modify(|_| {});
+            }
+        }
     });
 }
 

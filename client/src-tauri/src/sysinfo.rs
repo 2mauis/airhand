@@ -8,6 +8,11 @@ pub fn host_identity() -> (String, String) {
 }
 
 fn hostname() -> String {
+    // macOS："系统设置 → 通用 → 共享"里的电脑名称（例如"张三的 MacBook Pro"），比主机名好认
+    #[cfg(target_os = "macos")]
+    if let Some(name) = mac_computer_name() {
+        return name;
+    }
     for key in ["COMPUTERNAME", "HOSTNAME"] {
         if let Ok(v) = std::env::var(key)
             && !v.trim().is_empty()
@@ -91,9 +96,54 @@ fn parse_os_release(text: &str) -> Option<String> {
     field("PRETTY_NAME").or_else(|| field("NAME"))
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn mac_computer_name() -> Option<String> {
+    use objc2_core_foundation::{CFRetained, CFString};
+
+    #[link(name = "SystemConfiguration", kind = "framework")]
+    unsafe extern "C" {
+        fn SCDynamicStoreCopyComputerName(
+            store: *const std::ffi::c_void,
+            encoding: *mut u32,
+        ) -> *mut CFString;
+    }
+    // 返回 +1 引用
+    let name = std::ptr::NonNull::new(unsafe {
+        SCDynamicStoreCopyComputerName(std::ptr::null(), std::ptr::null_mut())
+    })
+    .map(|p| unsafe { CFRetained::from_raw(p) })?;
+    let name = name.to_string();
+    (!name.trim().is_empty()).then_some(name)
+}
+
+/// 例如 "macOS 15.3.1"
+#[cfg(target_os = "macos")]
+fn os_name() -> String {
+    let v = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+    if v.patchVersion > 0 {
+        format!(
+            "macOS {}.{}.{}",
+            v.majorVersion, v.minorVersion, v.patchVersion
+        )
+    } else {
+        format!("macOS {}.{}", v.majorVersion, v.minorVersion)
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn os_name() -> String {
     std::env::consts::OS.to_string()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_tests {
+    #[test]
+    fn identity() {
+        let (name, os) = super::host_identity();
+        println!("{name:?} / {os:?}");
+        assert!(!name.is_empty());
+        assert!(os.starts_with("macOS "), "{os}");
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

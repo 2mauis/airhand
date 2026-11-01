@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use airhand_proto::session::AUDIO_SAMPLE_RATE;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use libpulse_binding as pa;
 use pa::callbacks::ListResult;
 use pa::context::{Context, FlagSet as ContextFlags, State as ContextState};
@@ -31,6 +31,25 @@ const FRAME_BYTES: usize = 8;
 const FRAGMENT: u32 = AUDIO_SAMPLE_RATE / 100 * FRAME_BYTES as u32;
 const TIMEOUT: Duration = Duration::from_secs(3);
 
+/// libpulse 的错误。它的说明文字是按本机语言翻译的（libpulse 用 gettext），所以发给控制端的说明里
+/// 只带错误码（见 `capture::wire_detail`），日志里照常是完整的说明。
+#[derive(Debug)]
+pub struct PulseError(pub pa::error::PAErr);
+
+impl PulseError {
+    pub fn code(&self) -> i32 {
+        self.0.0
+    }
+}
+
+impl std::fmt::Display for PulseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (PulseAudio error {})", self.0, self.code())
+    }
+}
+
+impl std::error::Error for PulseError {}
+
 /// 与声音服务器的连接。
 struct Client {
     // 按声明顺序释放：context 必须先于 mainloop
@@ -47,17 +66,18 @@ impl Client {
         let _ = props.set_str(properties::APPLICATION_NAME, "Airhand");
         let mut context = Context::new_with_proplist(&mainloop, name, &props)
             .ok_or_else(|| anyhow!("can't create the PulseAudio context"))?;
+        const CONNECT: &str = "can't connect to the sound server (is PulseAudio/PipeWire running?)";
         context
             .connect(None, ContextFlags::NOAUTOSPAWN, None)
-            .map_err(|e| {
-                anyhow!("can't connect to the sound server (is PulseAudio/PipeWire running?): {e}")
-            })?;
+            .map_err(PulseError)
+            .context(CONNECT)?;
         let mut me = Self { context, mainloop };
         me.wait(|c| match c.context.get_state() {
             ContextState::Ready => Some(Ok(())),
-            ContextState::Failed | ContextState::Terminated => Some(Err(anyhow!(
-                "can't connect to the sound server (is PulseAudio/PipeWire running?)"
-            ))),
+            ContextState::Failed | ContextState::Terminated => Some(Err(anyhow::Error::new(
+                PulseError(c.context.errno()),
+            )
+            .context(CONNECT))),
             _ => None,
         })?;
         Ok(me)
@@ -70,7 +90,9 @@ impl Client {
                 IterateResult::Success(0) => return Ok(()),
                 IterateResult::Success(_) => {}
                 IterateResult::Quit(_) => bail!("the PulseAudio main loop quit"),
-                IterateResult::Err(e) => bail!("PulseAudio: {e}"),
+                IterateResult::Err(e) => {
+                    return Err(anyhow::Error::new(PulseError(e)).context("PulseAudio main loop"));
+                }
             }
         }
     }
@@ -152,7 +174,8 @@ impl Loopback {
             | StreamFlags::DONT_MOVE;
         stream
             .connect_record(Some(&monitor), Some(&attr), flags)
-            .map_err(|e| anyhow!("can't open audio capture: {e}"))?;
+            .map_err(PulseError)
+            .context("can't open audio capture")?;
         let mut me = Self {
             stream,
             client,
@@ -195,7 +218,8 @@ impl Loopback {
             match self
                 .stream
                 .peek()
-                .map_err(|e| anyhow!("reading audio failed: {e}"))?
+                .map_err(PulseError)
+                .context("reading audio failed")?
             {
                 PeekResult::Empty => break,
                 // 空洞（数据丢失）按静音补齐
@@ -206,7 +230,8 @@ impl Loopback {
             }
             self.stream
                 .discard()
-                .map_err(|e| anyhow!("reading audio failed: {e}"))?;
+                .map_err(PulseError)
+                .context("reading audio failed")?;
         }
         Ok(first)
     }

@@ -85,14 +85,25 @@ pub fn system() -> Lang {
 }
 
 /// 系统界面语言。只看首选语言：不是中文就用英文。
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn system() -> Lang {
     posix_lang(|k| std::env::var(k).ok())
 }
 
+/// 系统界面语言："系统设置 → 通用 → 语言与地区"里排第一的语言（例如 `zh-Hans-CN`）。
+/// 从程序坞 / 访达启动的程序没有 `LANG` 之类的环境变量，所以不看环境变量。
+#[cfg(target_os = "macos")]
+pub fn system() -> Lang {
+    let first = objc2::rc::autoreleasepool(|_| {
+        let langs = objc2_foundation::NSLocale::preferredLanguages();
+        (langs.count() > 0).then(|| langs.objectAtIndex(0).to_string())
+    });
+    first.map_or(Lang::En, |l| Lang::from_tag(&l))
+}
+
 /// 与 gettext 相同的规则：`LC_ALL` > `LC_MESSAGES` > `LANG` 决定区域设置；
 /// 区域设置不是 C/POSIX 时，`LANGUAGE`（冒号分隔的优先列表）优先，取第一个。
-#[cfg(any(not(windows), test))]
+#[cfg(any(not(any(windows, target_os = "macos")), test))]
 fn posix_lang(var: impl Fn(&str) -> Option<String>) -> Lang {
     let get = |k: &str| var(k).filter(|v| !v.trim().is_empty());
     let locale = ["LC_ALL", "LC_MESSAGES", "LANG"].into_iter().find_map(get);

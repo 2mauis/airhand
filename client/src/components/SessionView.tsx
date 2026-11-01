@@ -65,8 +65,20 @@ const LINUX_COMBOS: Combo[] = [
   { label: "combo.printScreen", keys: ["PrintScreen"] },
 ];
 
-/** 被控端操作系统对应的快捷键（Windows 报告 "Windows 11 ..."，Linux 报告发行版名称） */
-const combosFor = (os: string) => (os === "" || /windows/i.test(os) ? WINDOWS_COMBOS : LINUX_COMBOS);
+// macOS 的常用快捷键（Command 键在对方那边就是 MetaLeft）
+const MAC_COMBOS: Combo[] = [
+  { label: "combo.cmdTab", keys: ["MetaLeft", "Tab"] },
+  { label: "combo.spotlight", keys: ["MetaLeft", "Space"] },
+  { label: "combo.missionControl", keys: ["ControlLeft", "ArrowUp"] },
+  { label: "combo.forceQuit", keys: ["MetaLeft", "AltLeft", "Escape"] },
+  { label: "combo.cmdQ", keys: ["MetaLeft", "KeyQ"] },
+  { label: "combo.lockMac", keys: ["ControlLeft", "MetaLeft", "KeyQ"] },
+  { label: "combo.screenshotMac", keys: ["MetaLeft", "ShiftLeft", "Digit5"] },
+];
+
+/** 被控端操作系统对应的快捷键（Windows 报告 "Windows 11 ..."，macOS 报告 "macOS 15.3"，Linux 报告发行版名称） */
+const combosFor = (os: string) =>
+  os === "" || /windows/i.test(os) ? WINDOWS_COMBOS : /^macos/i.test(os) ? MAC_COMBOS : LINUX_COMBOS;
 
 type Menu = null | "quality" | "keys" | "display" | "clipboard" | "audio";
 
@@ -296,7 +308,11 @@ export function SessionView({ s }: { s: RemoteSession }) {
               onClick={() => toggleMenu("audio")}
             >
               {s.audioEnabled ? <IconVolume size={17} /> : <IconVolumeOff size={17} />}
-              {s.audioEnabled && s.avSync && <span className="tb-dot" />}
+              {s.audioEnabled && s.audioError !== null ? (
+                <span className="tb-dot warn" />
+              ) : (
+                s.audioEnabled && s.avSync && <span className="tb-dot" />
+              )}
             </button>
             {menu === "audio" && (
               <Dropdown onClose={closeMenu} className="audio-menu">
@@ -399,6 +415,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
 
 function audioHint(s: RemoteSession): string {
   if (!s.audioEnabled) return t("audio.muted");
+  if (s.audioError !== null) return t("notice.audioFailed", { detail: s.audioError });
   const st = s.audio.stats;
   return st ? t("audio.jitter", { ms: Math.round(st.targetMs) }) : t("audio.remote");
 }

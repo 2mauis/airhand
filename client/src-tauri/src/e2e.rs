@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use airhand_proto::framing::{read_msg, write_msg};
 use airhand_proto::session::{
-    ByeReason, Codec, ControllerMsg, HostMsg, InputEvent, QualitySettings,
+    ByeReason, Codec, ControllerMsg, HostMsg, InputEvent, Notice, QualitySettings,
 };
 use airhand_proto::signal::{ClientMsg, ConnectError, ServerMsg};
 use airhand_proto::{MAX_SESSION_MSG, MAX_SIGNAL_MSG, Role, SessionHeader};
@@ -55,6 +55,12 @@ struct Report {
     /// 收到时距采集时间多久（被控端时钟，毫秒）：最大值
     video_age_ms: f64,
     audio_age_ms: f64,
+    /// 被控端报告缺少屏幕录制权限（macOS）：没有画面和声音
+    no_screen_permission: bool,
+    /// 收到的"采集失败"提示
+    capture_failed: u32,
+    /// 收到的"无法采集声音"提示
+    audio_failed: u32,
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -172,6 +178,9 @@ async fn e2e_roundtrip() {
         audio_late: 0,
         video_age_ms: 0.0,
         audio_age_ms: 0.0,
+        no_screen_permission: false,
+        capture_failed: 0,
+        audio_failed: 0,
     };
     // 被控端在同一进程里，可以直接读它的时钟：画面和声音的采集时间戳都应落在"刚刚"
     let age_ms = |capture_us: u64| {
@@ -286,7 +295,15 @@ async fn e2e_roundtrip() {
             }
             HostMsg::Bye(reason) => panic!("意外的 Bye: {reason:?}"),
             HostMsg::Displays { .. } => {}
-            HostMsg::Notice(notice) => println!("提示: {notice:?}"),
+            HostMsg::Notice(notice) => {
+                println!("提示: {notice:?}");
+                match notice {
+                    Notice::MissingPermissions { screen, .. } => rep.no_screen_permission = screen,
+                    Notice::CaptureFailed { .. } => rep.capture_failed += 1,
+                    Notice::AudioFailed { .. } => rep.audio_failed += 1,
+                    _ => {}
+                }
+            }
             HostMsg::Audio(a) => {
                 let age = age_ms(a.capture_us);
                 assert!(age >= 0.0, "声音时间戳在未来: {age} ms");
@@ -352,7 +369,17 @@ async fn e2e_roundtrip() {
         rep.audio_rms,
         rep.audio_late,
     );
-    if tone_ok {
+    // macOS 上运行测试的终端没有"屏幕与系统录音"权限：被控端应当用专门的提示说明原因
+    //（而不是报告为采集失败），画面和声音的检查跳过
+    let capture = !rep.no_screen_permission;
+    if !capture {
+        println!("被控端没有屏幕录制权限，跳过画面和声音的检查");
+        assert_eq!(rep.capture_failed, 0, "缺少权限不应报告为采集失败");
+        assert_eq!(rep.audio_failed, 0, "缺少权限不应报告为无法采集声音");
+        assert_eq!(rep.frames, 0);
+    }
+    if tone_ok && capture {
+        assert_eq!(rep.audio_failed, 0, "能采集到声音时不应报告失败");
         // 测试音持续播放 6 秒，每包 20 ms：应收到约 300 包
         assert!(rep.audio >= 150, "声音包太少: {}", rep.audio);
         // 环回采集的是音量调节之后的声音，电平取决于系统音量（-60 dBFS 的测试音在 100% 音量时 RMS ≈ 7e-4）
@@ -373,18 +400,20 @@ async fn e2e_roundtrip() {
         );
     }
     assert!(rep.hello, "没有收到 Hello");
-    assert!(rep.frames >= 2, "收到的视频帧太少");
-    assert!(rep.keyframes >= 1);
     assert!(rep.pongs >= 3, "Ping/Pong 不工作");
-    assert!(!rep.encoders.is_empty());
-    assert!(rep.encoders.len() >= 2, "切换编码格式后应重建编码器");
-    assert!(rep.decoded >= 1, "H.264 码流无法解码");
-    // 画面静止时会重新编码上一帧（时间戳不变），所以只检查不离谱
-    assert!(
-        rep.video_age_ms < 10_000.0,
-        "画面时间戳异常: {:.1} ms",
-        rep.video_age_ms
-    );
+    if capture {
+        assert!(rep.frames >= 2, "收到的视频帧太少");
+        assert!(rep.keyframes >= 1);
+        assert!(!rep.encoders.is_empty());
+        assert!(rep.encoders.len() >= 2, "切换编码格式后应重建编码器");
+        assert!(rep.decoded >= 1, "H.264 码流无法解码");
+        // 画面静止时会重新编码上一帧（时间戳不变），所以只检查不离谱
+        assert!(
+            rep.video_age_ms < 10_000.0,
+            "画面时间戳异常: {:.1} ms",
+            rep.video_age_ms
+        );
+    }
 
     // 会话结束后被控端应释放会话
     tokio::time::sleep(Duration::from_millis(800)).await;

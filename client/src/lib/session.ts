@@ -22,7 +22,7 @@ import { AudioPlayer } from "./audio";
 import { AvSync, type AvSyncStats } from "./avsync";
 import { annexBToAvc, avcC, codecString, h264NeedsAvc, markH264NeedsAvc } from "./codec";
 import { t } from "./i18n";
-import type { SessionNotice } from "./messages";
+import { RECOVERS, type SessionNotice } from "./messages";
 import { CODEC_LABEL } from "./presets";
 import { store } from "./store";
 
@@ -59,6 +59,22 @@ const MAX_QUEUED_FRAMES = 120;
 const UNDECODABLE_CHUNKS = 10;
 const UNDECODABLE_MS = 2000;
 
+/** 本机（控制端）是 macOS：键盘事件有两处和其它系统不一样，见 bindInput */
+const IS_MAC = typeof navigator !== "undefined" && /Mac/.test(navigator.platform || navigator.userAgent);
+const META_KEYS = new Set(["MetaLeft", "MetaRight"]);
+const MODIFIER_KEYS = new Set([
+  "ShiftLeft",
+  "ShiftRight",
+  "ControlLeft",
+  "ControlRight",
+  "AltLeft",
+  "AltRight",
+  "MetaLeft",
+  "MetaRight",
+  "CapsLock",
+  "Fn",
+]);
+
 interface PendingVideo {
   key: boolean;
   codec: Codec;
@@ -92,6 +108,8 @@ export class RemoteSession {
   stats: Stats = { fps: 0, kbps: 0, rttMs: null, width: 0, height: 0, decodeMs: 0 };
   /** 画面上方的提示（显示时才变成文字，见 messages.ts） */
   notice: SessionNotice | null = null;
+  /** 被控端为什么采集不到声音（英文技术信息）；正常、或者没开声音时为 null */
+  audioError: string | null = null;
   settings: QualitySettings;
   scaleMode: ScaleMode = "fit";
   /** 双向同步剪贴板文本 */
@@ -214,6 +232,7 @@ export class RemoteSession {
     this.sync.reset();
     // 在连接之前清掉旧提示：被控端紧跟在 Hello 后面发的提示可能比 connect 的返回值先到
     this.notice = null;
+    this.audioError = null;
     const info = await api.connect(this.code, this.settings, sink, this.clipboardSync);
     if (gen !== this.gen || this.disposed) {
       void api.disconnect(info.sid);
@@ -306,9 +325,24 @@ export class RemoteSession {
       case "encoder":
         this.encoder = { codec: ev.codec, name: ev.name, hardware: ev.hardware, width: ev.width, height: ev.height };
         break;
-      case "notice":
-        this.notice = ev.notice;
+      case "notice": {
+        const n = ev.notice;
+        if (n.kind === "captureRecovered" || n.kind === "audioRecovered") {
+          // 对方的问题自己恢复了：撤下对应的提示（别的提示不动）
+          if (n.kind === "audioRecovered") this.audioError = null;
+          if (this.notice?.kind === RECOVERS[n.kind]) this.notice = null;
+        } else if (n.kind === "missingPermissions" && !n.screen && !n.input) {
+          // 对方把权限都打开了：撤下之前的权限提示
+          if (this.notice?.kind === "missingPermissions") this.notice = null;
+        } else if (n.kind === "audioFailed") {
+          this.audioError = n.detail;
+          // 声音的问题不盖住正在显示的其它提示（例如缺少权限、Wayland），原因在声音菜单里一直能看到
+          if (!this.notice || this.notice.kind === "audioFailed") this.notice = n;
+        } else {
+          this.notice = n;
+        }
         break;
+      }
       case "closed":
         if (this.disposed) return;
         if (ev.retry) {
@@ -720,6 +754,16 @@ export class RemoteSession {
     this.applySyncState();
     // 关闭时也通知被控端停止采集，不占带宽
     if (this.sid !== null) void api.audio(this.sid, want).catch(() => {});
+    // 被控端不再采集，之前"无法采集声音"的状态也就作废了（再打开时它会重新报告）
+    if (!want) this.clearAudioError();
+  }
+
+  private clearAudioError() {
+    const shown = this.notice?.kind === "audioFailed";
+    if (this.audioError === null && !shown) return;
+    this.audioError = null;
+    if (shown) this.notice = null;
+    this.emit();
   }
 
   setInteractive(v: boolean) {
@@ -781,6 +825,17 @@ export class RemoteSession {
   private releaseAll() {
     this.pressed.clear();
     this.enqueue(["ReleaseAll"], true);
+  }
+
+  /**
+   * macOS 的 Caps Lock：打开时只有 keydown，关闭时只有 keyup（中间不会抬起）。
+   * 每次都当作"按一下"发给对方，两边的大小写锁定状态才能保持一致。
+   */
+  private tapCapsLock() {
+    this.enqueue(
+      [{ Key: { code: "CapsLock", down: true } }, { Key: { code: "CapsLock", down: false } }],
+      true,
+    );
   }
 
   private enqueue(evs: InputEvent[], urgent: boolean) {
@@ -878,6 +933,7 @@ export class RemoteSession {
       e.preventDefault();
       e.stopPropagation();
       if (!e.code || e.code === "Unidentified") return;
+      if (IS_MAC && e.code === "CapsLock") return this.tapCapsLock();
       if (e.repeat && !this.pressed.has(e.code)) return;
       this.pressed.add(e.code);
       this.enqueue([{ Key: { code: e.code, down: true } }], true);
@@ -887,8 +943,20 @@ export class RemoteSession {
       e.preventDefault();
       e.stopPropagation();
       if (!e.code || e.code === "Unidentified") return;
+      if (IS_MAC && e.code === "CapsLock") return this.tapCapsLock();
       this.pressed.delete(e.code);
-      this.enqueue([{ Key: { code: e.code, down: false } }], true);
+      const evs: InputEvent[] = [];
+      // macOS：按住 Command 时其它键抬起不产生 keyup（例如 Command+C 只有 C 的 keydown），
+      // Command 抬起时把这期间按下的普通键一起抬起，否则对方那边会一直按着
+      if (IS_MAC && META_KEYS.has(e.code)) {
+        for (const code of this.pressed) {
+          if (MODIFIER_KEYS.has(code)) continue;
+          this.pressed.delete(code);
+          evs.push({ Key: { code, down: false } });
+        }
+      }
+      evs.push({ Key: { code: e.code, down: false } });
+      this.enqueue(evs, true);
     });
     // 失焦（Alt+Tab 切走等）时释放所有按键，避免对端粘键
     on("blur", () => this.releaseAll());

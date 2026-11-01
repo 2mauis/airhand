@@ -92,7 +92,21 @@ pub enum SessionEvent {
 pub enum NoticeView {
     NoDisplays,
     Wayland,
-    CaptureFailed { detail: String },
+    CaptureFailed {
+        detail: String,
+    },
+    /// 不显示：撤下之前的 `captureFailed`
+    CaptureRecovered,
+    AudioFailed {
+        detail: String,
+    },
+    /// 不显示：撤下之前的 `audioFailed`
+    AudioRecovered,
+    /// 两项都为 false 表示权限已经全部授予，控制台撤下之前的权限提示
+    MissingPermissions {
+        screen: bool,
+        input: bool,
+    },
 }
 
 impl From<Notice> for NoticeView {
@@ -101,6 +115,12 @@ impl From<Notice> for NoticeView {
             Notice::NoDisplays => NoticeView::NoDisplays,
             Notice::Wayland => NoticeView::Wayland,
             Notice::CaptureFailed { detail } => NoticeView::CaptureFailed { detail },
+            Notice::CaptureRecovered => NoticeView::CaptureRecovered,
+            Notice::AudioFailed { detail } => NoticeView::AudioFailed { detail },
+            Notice::AudioRecovered => NoticeView::AudioRecovered,
+            Notice::MissingPermissions { screen, input } => {
+                NoticeView::MissingPermissions { screen, input }
+            }
         }
     }
 }
@@ -489,6 +509,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&n).unwrap(),
             json!({ "type": "notice", "notice": { "kind": "wayland" } })
+        );
+        let n = SessionEvent::Notice {
+            notice: Notice::MissingPermissions {
+                screen: false,
+                input: true,
+            }
+            .into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&n).unwrap(),
+            json!({ "type": "notice", "notice": { "kind": "missingPermissions", "screen": false, "input": true } })
+        );
+        let n = SessionEvent::Notice {
+            notice: Notice::AudioRecovered.into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&n).unwrap(),
+            json!({ "type": "notice", "notice": { "kind": "audioRecovered" } })
         );
         let c = SessionEvent::Closed {
             reason: Problem::from(airhand_proto::session::ByeReason::Kicked),

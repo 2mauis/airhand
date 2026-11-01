@@ -73,6 +73,48 @@ libc = "0.2"
 x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "randr", "xtest", "xkb"] }
 libpulse-binding = "2"
 
+# macOS 被控端：ScreenCaptureKit 采集画面和系统声音，VideoToolbox 硬件编码，CGEvent 注入键鼠，
+# NSPasteboard 检测剪贴板变化。与 Tauri 用同一套 objc2 绑定（版本一致，不会重复编译两份）；
+# 这些框架绑定的默认 feature 会把整个 AppKit / AVFoundation 都编译进来，所以只打开用到的部分。
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+  "std", "NSArray", "NSDictionary", "NSError", "NSGeometry", "NSLocale", "NSObject",
+  "NSProcessInfo", "NSString", "NSValue",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std", "NSCursor", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-foundation",
+  "objc2-core-graphics",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+  "std", "CFArray", "CFBase", "CFCGTypes", "CFData", "CFDictionary", "CFMessagePort", "CFNumber",
+  "CFString",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+  "std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDirectDisplay", "CGDisplayConfiguration",
+  "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation",
+  "libc",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = [
+  "std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "CMTime",
+  "objc2-core-audio-types", "objc2-core-video",
+] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-video = { version = "0.3", default-features = false, features = [
+  "std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn",
+] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = [
+  "std", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-foundation",
+  "objc2-core-graphics", "objc2-core-media",
+] }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = [
+  "std", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession",
+  "VTVideoEncoderList", "objc2-core-media", "objc2-core-video",
+] }
+
 [profile.release]
 opt-level = 3
 lto = "fat"

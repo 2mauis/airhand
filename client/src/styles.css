@@ -1095,6 +1095,10 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 50%;
   background: var(--good);
 }
+/* 出了问题（例如对方无法采集声音），与画面上方的提示同一个颜色 */
+.tb-dot.warn {
+  background: var(--ok);
+}
 .dd-item.toggle {
   cursor: pointer;
 }

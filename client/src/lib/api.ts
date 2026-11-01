@@ -73,7 +73,18 @@ export type Problem =
   | { kind: "clipboardBlocked" };
 
 /** 被控端发来的提示，与 Rust 端 airhand_link::controller::NoticeView 对应 */
-export type RemoteNotice = { kind: "noDisplays" } | { kind: "wayland" } | { kind: "captureFailed"; detail: string };
+export type RemoteNotice =
+  | { kind: "noDisplays" }
+  | { kind: "wayland" }
+  | { kind: "captureFailed"; detail: string }
+  /** 屏幕采集恢复：撤下 captureFailed（本身不显示） */
+  | { kind: "captureRecovered" }
+  /** 被控端无法采集声音（只发给开着声音的控制端） */
+  | { kind: "audioFailed"; detail: string }
+  /** 声音采集恢复：撤下 audioFailed（本身不显示） */
+  | { kind: "audioRecovered" }
+  /** 被控端（macOS）缺少的系统权限；两项都为 false 表示已经全部授予 */
+  | { kind: "missingPermissions"; screen: boolean; input: boolean };
 
 export interface AppInfo {
   version: string;

@@ -32,7 +32,7 @@ export default {
 
   // 新建连接
   "connect.title": "连接到远程电脑",
-  "connect.hint": "在对方电脑右下角的 Airhand 托盘图标上点右键，即可看到 6 位控制码",
+  "connect.hint": "打开对方电脑上 Airhand 托盘图标的菜单（Windows 在右下角点右键，macOS 在屏幕顶部的菜单栏），即可看到 6 位控制码",
   "connect.prefer": "优先使用 {codec}",
   "connect.busy": "正在连接…",
   "connect.waitServer": "等待服务器连接…",
@@ -145,11 +145,26 @@ export default {
   "combo.terminal": "Ctrl + Alt + T 终端",
   "combo.altF2": "Alt + F2 运行命令",
   "combo.superL": "Super + L 锁屏",
+  "combo.cmdTab": "Command + Tab 切换应用",
+  "combo.spotlight": "Command + 空格 聚焦搜索",
+  "combo.missionControl": "Control + ↑ 调度中心",
+  "combo.forceQuit": "Command + Option + Esc 强制退出",
+  "combo.cmdQ": "Command + Q 退出应用",
+  "combo.lockMac": "Control + Command + Q 锁定屏幕",
+  "combo.screenshotMac": "Command + Shift + 5 截屏",
 
   // 被控端发来的提示（类型，见 Rust 的 proto Notice）
   "notice.noDisplays": "对方电脑没有可采集的显示器",
   "notice.wayland": "对方电脑是 Wayland 桌面：目前只能采集和操作 X11（XWayland）程序。请在对方电脑的登录界面改用 X11（Xorg）会话",
   "notice.captureFailed": "对方电脑的屏幕采集失败，正在重试：{detail}",
+  "notice.audioFailed": "对方电脑无法采集声音，正在重试：{detail}",
+  // 对方是 Mac 且缺少系统权限（两项都已授予时控制台直接撤下提示，不会显示）
+  "notice.missingPermissions": (p) =>
+    p.screen && p.input
+      ? "对方 Mac 没有允许 Airhand 使用“屏幕与系统录音”和“辅助功能”：看不到画面、听不到声音，也不能操作。需要那台电脑的用户在“系统设置 → 隐私与安全性”里允许这两项，然后重新打开 Airhand"
+      : p.input
+        ? "对方 Mac 没有允许 Airhand 使用“辅助功能”，不能操作键盘和鼠标。需要那台电脑的用户在“系统设置 → 隐私与安全性 → 辅助功能”里允许 Airhand"
+        : "对方 Mac 没有允许 Airhand 使用“屏幕与系统录音”，看不到画面，也听不到声音。需要那台电脑的用户在“系统设置 → 隐私与安全性 → 屏幕与系统录音”里允许 Airhand，然后重新打开 Airhand",
   // 本机产生的提示
   "notice.h264Undecodable": "本机无法解码 H.264 画面",
   "notice.codecFallback": "本机无法解码 {codec} 画面，已改用 H.264",

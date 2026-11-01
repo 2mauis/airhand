@@ -1,7 +1,7 @@
 //! 剪贴板文本双向同步（被控端与控制端共用）。
 //!
 //! * 检测到变化后才读取内容：Windows 用 `GetClipboardSequenceNumber`，Linux 用 XFIXES 的
-//!   选择所有者变化通知（都不需要打开剪贴板，几乎零开销）；
+//!   选择所有者变化通知，macOS 用 `NSPasteboard.changeCount`（都不需要读取内容，几乎零开销）；
 //! * 记录"双方已一致"的文本哈希，抑制回声（A 写入 B → B 检测到变化 → 又发回 A）。
 
 use std::future::Future;
@@ -25,7 +25,13 @@ pub fn sequence() -> u32 {
     {
         x11_watch::sequence()
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        objc2::rc::autoreleasepool(|_| {
+            objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() as u32
+        })
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     0
 }
 

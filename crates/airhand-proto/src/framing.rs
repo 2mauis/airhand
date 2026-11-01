@@ -95,6 +95,14 @@ mod tests {
             HostMsg::Notice(Notice::CaptureFailed {
                 detail: "AcquireNextFrame: 0x887A0026".into(),
             }),
+            HostMsg::Notice(Notice::MissingPermissions {
+                screen: true,
+                input: false,
+            }),
+            HostMsg::Notice(Notice::AudioFailed {
+                detail: "no default audio output device".into(),
+            }),
+            HostMsg::Notice(Notice::AudioRecovered),
             HostMsg::Bye(ByeReason::CodeChanged),
             HostMsg::Audio(AudioFrame {
                 seq: 3,
@@ -117,6 +125,20 @@ mod tests {
         assert!(
             matches!(n, HostMsg::Notice(Notice::CaptureFailed { ref detail }) if detail == "AcquireNextFrame: 0x887A0026")
         );
+        let p: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
+        assert!(matches!(
+            p,
+            HostMsg::Notice(Notice::MissingPermissions {
+                screen: true,
+                input: false
+            })
+        ));
+        let a: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
+        assert!(
+            matches!(a, HostMsg::Notice(Notice::AudioFailed { ref detail }) if detail == "no default audio output device")
+        );
+        let a: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
+        assert!(matches!(a, HostMsg::Notice(Notice::AudioRecovered)));
         let bye: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
         assert!(matches!(bye, HostMsg::Bye(ByeReason::CodeChanged)));
         let a: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();

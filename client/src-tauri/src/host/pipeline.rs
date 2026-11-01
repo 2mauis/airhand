@@ -322,8 +322,12 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>) {
                 }
                 continue;
             }
+        } else if reported_error.take().is_some() {
+            // 报告过采集失败，现在又有新画面了：让控制端撤下提示
+            if !send(&HostMsg::Notice(Notice::CaptureRecovered), 16) {
+                break;
+            }
         }
-        reported_error = None;
 
         // 帧率节流
         let now = Instant::now();

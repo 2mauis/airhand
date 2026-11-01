@@ -80,9 +80,14 @@ pub fn create(app: &AppHandle) -> tauri::Result<TrayIcon> {
         .icon(icon_offline())
         .tooltip("Airhand")
         .menu(&build_menu(app, &st)?)
-        .show_menu_on_left_click(false)
+        // macOS 的菜单栏图标习惯上左键就弹出菜单；Windows / Linux 左键在控制端模式下打开控制台
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_menu_event(|app, event| crate::on_menu(app, event.id().as_ref()))
         .on_tray_icon_event(|tray, event| {
+            // macOS 上左键弹出的是菜单（菜单里有"打开控制台"），不再另外打开控制台
+            if cfg!(target_os = "macos") {
+                return;
+            }
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -121,6 +126,8 @@ fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
     menu.append(&label(app, server)?)?;
 
     if st.mode == Mode::Host {
+        #[cfg(target_os = "macos")]
+        permission_items(app, &menu)?;
         if let (ServerState::Connected, Some(code)) = (&st.server, st.code) {
             let code = airhand_proto::format_code(code);
             menu.append(&label(app, tr!("控制码：{code}", "Control code: {code}"))?)?;
@@ -182,6 +189,36 @@ fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&item(app, "quit", tr!("退出", "Quit"))?)?;
     Ok(menu)
+}
+
+/// macOS：没有授予的权限各占一行，点击打开系统设置里对应的页面。
+#[cfg(target_os = "macos")]
+fn permission_items(app: &AppHandle, menu: &Menu<Wry>) -> tauri::Result<()> {
+    let p = crate::host::macos::permissions();
+    if !p.screen {
+        menu.append(&item(
+            app,
+            "perm_screen",
+            tr!(
+                "⚠ 需要“屏幕与系统录音”权限（点击打开设置）",
+                "⚠ Needs Screen & System Audio Recording permission (click to open Settings)"
+            ),
+        )?)?;
+    }
+    if !p.input {
+        menu.append(&item(
+            app,
+            "perm_input",
+            tr!(
+                "⚠ 需要“辅助功能”权限才能操作本机（点击打开设置）",
+                "⚠ Needs Accessibility permission to be controlled (click to open Settings)"
+            ),
+        )?)?;
+    }
+    if !p.screen || !p.input {
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+    Ok(())
 }
 
 fn item(app: &AppHandle, id: &str, text: String) -> tauri::Result<MenuItem<Wry>> {

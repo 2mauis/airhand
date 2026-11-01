@@ -4,6 +4,10 @@
 mod evdev;
 #[cfg(windows)]
 mod keymap;
+#[cfg(target_os = "macos")]
+mod mackeys;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]
@@ -16,6 +20,8 @@ pub struct Injector {
     inner: windows::WinInjector,
     #[cfg(target_os = "linux")]
     inner: x11::X11Injector,
+    #[cfg(target_os = "macos")]
+    inner: macos::MacInjector,
 }
 
 impl Injector {
@@ -25,18 +31,20 @@ impl Injector {
             inner: windows::WinInjector::default(),
             #[cfg(target_os = "linux")]
             inner: x11::X11Injector::default(),
+            #[cfg(target_os = "macos")]
+            inner: macos::MacInjector::default(),
         }
     }
 
     /// 处理一批输入事件。`display` 为当前画面对应的显示器（用于坐标换算）。
     #[allow(unused_variables)]
     pub fn handle(&mut self, events: &[InputEvent], display: &DisplayInfo) {
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         self.inner.handle(events, display);
     }
 
     pub fn release_all(&mut self) {
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         self.inner.release_all();
     }
 }

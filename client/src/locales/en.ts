@@ -1,7 +1,7 @@
 // English strings. Keys must match zh.ts exactly (TypeScript checks this).
-import type { Msg, MsgKey } from "../lib/i18n.ts";
+import type { Msg, MsgKey, Params } from "../lib/i18n.ts";
 
-const plural = (n: string | number, one: string, many: string) => (Number(n) === 1 ? one : many);
+const plural = (n: Params[string], one: string, many: string) => (Number(n) === 1 ? one : many);
 
 const en: Record<MsgKey, Msg> = {
   "app.title": "Airhand Console",
@@ -29,7 +29,7 @@ const en: Record<MsgKey, Msg> = {
   "sidebar.nameHintWeb": "The name remote computers see for this console (AIRHAND_NAME)",
 
   "connect.title": "Connect to a remote computer",
-  "connect.hint": "Right-click the Airhand icon in the remote computer's system tray to see its 6-digit control code",
+  "connect.hint": "Open the menu of the Airhand icon on the remote computer (right-click it in the Windows system tray, or click it in the macOS menu bar) to see its 6-digit control code",
   "connect.prefer": "Prefers {codec}",
   "connect.busy": "Connecting…",
   "connect.waitServer": "Waiting for the server…",
@@ -137,11 +137,25 @@ const en: Record<MsgKey, Msg> = {
   "combo.terminal": "Terminal (Ctrl + Alt + T)",
   "combo.altF2": "Run command (Alt + F2)",
   "combo.superL": "Lock screen (Super + L)",
+  "combo.cmdTab": "Switch apps (Command + Tab)",
+  "combo.spotlight": "Spotlight (Command + Space)",
+  "combo.missionControl": "Mission Control (Control + ↑)",
+  "combo.forceQuit": "Force Quit (Command + Option + Esc)",
+  "combo.cmdQ": "Quit app (Command + Q)",
+  "combo.lockMac": "Lock screen (Control + Command + Q)",
+  "combo.screenshotMac": "Screenshot (Command + Shift + 5)",
 
   "notice.noDisplays": "The remote computer has no display to capture",
   "notice.wayland":
     "The remote computer runs a Wayland desktop: only X11 (XWayland) apps can be captured and controlled. Switch to an X11 (Xorg) session on its login screen",
   "notice.captureFailed": "Screen capture failed on the remote computer, retrying: {detail}",
+  "notice.audioFailed": "The remote computer can't capture sound, retrying: {detail}",
+  "notice.missingPermissions": (p) =>
+    p.screen && p.input
+      ? "The remote Mac hasn't allowed Airhand Screen & System Audio Recording and Accessibility, so there's no picture or sound and it can't be controlled. Someone at that Mac needs to allow both in System Settings → Privacy & Security, then reopen Airhand"
+      : p.input
+        ? "The remote Mac hasn't allowed Airhand Accessibility, so its keyboard and mouse can't be controlled. Someone at that Mac needs to allow Airhand in System Settings → Privacy & Security → Accessibility"
+        : "The remote Mac hasn't allowed Airhand Screen & System Audio Recording, so there's no picture or sound. Someone at that Mac needs to allow Airhand in System Settings → Privacy & Security → Screen & System Audio Recording, then reopen Airhand",
   "notice.h264Undecodable": "This computer can't decode the H.264 video",
   "notice.codecFallback": "This computer can't decode {codec} video. Switched to H.264",
   "notice.noOpus": "This computer can't decode Opus, so remote sound can't be played",
