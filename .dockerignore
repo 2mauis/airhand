@@ -1,0 +1,6 @@
+target
+client
+assets
+**/node_modules
+**/*.md
+.git

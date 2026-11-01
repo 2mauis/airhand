@@ -1,0 +1,216 @@
+//! 显示给用户的问题（错误），以**类型**而不是文字的形式传给界面。
+//!
+//! * 托盘（Rust，见 `tray.rs`）和控制台（前端，见 `src/lib/messages.ts`）各自按本机**当前的**界面语言
+//!   把它变成文字：界面上不会出现另一台电脑或服务器的语言，切换语言时已经显示出来的问题也会跟着切换；
+//! * `Display` 是写日志用的英文；
+//! * `detail` 是给排查问题用的技术信息（英文），界面上原样显示在说明文字后面。
+//!
+//! 新增变体时，前端的 `problem.<kind>` 词条也要补上（`npm test` 会检查）。
+
+use std::fmt;
+
+use airhand_proto::session::ByeReason;
+use airhand_proto::signal::ConnectError;
+use serde::Serialize;
+
+/// 序列化为 `{ "kind": "serverLost", "detail": "..." }` 这样的 JSON。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum Problem {
+    // ── 与中转服务器的连接 ──
+    /// 连不上服务器（解析地址失败、网络不通、超时……）
+    ServerUnreachable { detail: String },
+    /// 服务器证书与编译进程序的指纹不一致（可能是中间人攻击，或者服务器换了证书）
+    CertMismatch,
+    /// 与服务器的协议版本不一致（由双方版本号判断该更新哪一方）
+    Incompatible { server: u16, client: u16 },
+    /// 与服务器的连接断开了，或者连上之后出错
+    ServerLost { detail: String },
+
+    // ── 连接被控端 ──
+    /// 还没有连上服务器
+    NotConnected,
+    /// 控制码不是 6 位数字
+    InvalidCode,
+    /// 控制码不存在或对方不在线
+    CodeNotFound,
+    /// 尝试过于频繁
+    RateLimited,
+    /// 对方的会话数已满
+    HostBusy,
+    /// 服务器没有及时回应连接请求
+    ServerTimeout,
+
+    // ── 会话 ──
+    /// 被控端结束了会话（会话流关闭）
+    HostEnded,
+    /// 被控端长时间没有任何消息
+    HostUnresponsive,
+    /// 被控端的用户断开了所有控制端
+    Kicked,
+    /// 被控端的用户更换了控制码
+    CodeChanged,
+    /// 会话已结束
+    SessionEnded,
+
+    // ── 其它 ──
+    /// 当前不是控制端模式
+    NotController,
+    /// 会话不存在（已经结束）
+    NoSession,
+    /// 本机剪贴板没有文本
+    NoClipboardText,
+    /// 其它错误
+    Failed { detail: String },
+}
+
+impl Problem {
+    /// 取出错误里的 `Problem`（经过 `?` 或 `.context()` 也能取到）；
+    /// 没有的话用 `fallback` 把整条错误链（英文）包装起来。
+    pub fn from_error(e: anyhow::Error, fallback: impl FnOnce(String) -> Problem) -> Problem {
+        match e.downcast::<Problem>() {
+            Ok(p) => p,
+            Err(e) => fallback(format!("{e:#}")),
+        }
+    }
+
+    pub fn failed(e: impl fmt::Display) -> Problem {
+        Problem::Failed {
+            detail: e.to_string(),
+        }
+    }
+
+    /// 重试也不会好的问题（版本不一致），应该放慢重连
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, Problem::Incompatible { .. })
+    }
+
+    /// 对方有意结束的会话，不应该自动重连
+    pub fn is_final(&self) -> bool {
+        matches!(self, Problem::Kicked | Problem::CodeChanged)
+    }
+}
+
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Problem::ServerUnreachable { detail } => {
+                write!(f, "can't connect to the server: {detail}")
+            }
+            Problem::CertMismatch => {
+                f.write_str("the server certificate doesn't match the pinned fingerprint")
+            }
+            Problem::Incompatible { server, client } => {
+                write!(
+                    f,
+                    "protocol version mismatch (server {server}, client {client})"
+                )
+            }
+            Problem::ServerLost { detail } => write!(f, "lost connection to the server: {detail}"),
+            Problem::NotConnected => f.write_str("not connected to the server yet"),
+            Problem::InvalidCode => f.write_str("the control code must be 6 digits"),
+            Problem::CodeNotFound => f.write_str("control code not found, or the host is offline"),
+            Problem::RateLimited => f.write_str("too many attempts"),
+            Problem::HostBusy => f.write_str("the host has reached its session limit"),
+            Problem::ServerTimeout => f.write_str("the server didn't answer in time"),
+            Problem::HostEnded => f.write_str("the host ended the session"),
+            Problem::HostUnresponsive => f.write_str("the host stopped responding"),
+            Problem::Kicked => f.write_str("the user at the host disconnected all controllers"),
+            Problem::CodeChanged => f.write_str("the user at the host changed the control code"),
+            Problem::SessionEnded => f.write_str("session ended"),
+            Problem::NotController => f.write_str("not in controller mode"),
+            Problem::NoSession => f.write_str("no such session"),
+            Problem::NoClipboardText => f.write_str("no text on the local clipboard"),
+            Problem::Failed { detail } => f.write_str(detail),
+        }
+    }
+}
+
+impl std::error::Error for Problem {}
+
+impl From<ConnectError> for Problem {
+    fn from(e: ConnectError) -> Self {
+        match e {
+            ConnectError::NotFound => Problem::CodeNotFound,
+            ConnectError::RateLimited => Problem::RateLimited,
+            ConnectError::Busy => Problem::HostBusy,
+        }
+    }
+}
+
+impl From<ByeReason> for Problem {
+    fn from(r: ByeReason) -> Self {
+        match r {
+            ByeReason::Kicked => Problem::Kicked,
+            ByeReason::CodeChanged => Problem::CodeChanged,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Context;
+    use serde_json::json;
+
+    use super::*;
+    use crate::status::ServerState;
+
+    /// 前端（src/lib/api.ts 的 Problem / ServerState 类型）依赖这个 JSON 形状
+    #[test]
+    fn json_shape() {
+        let v = |p: &Problem| serde_json::to_value(p).unwrap();
+        assert_eq!(v(&Problem::CertMismatch), json!({ "kind": "certMismatch" }));
+        assert_eq!(
+            v(&Problem::Incompatible {
+                server: 3,
+                client: 2
+            }),
+            json!({ "kind": "incompatible", "server": 3, "client": 2 })
+        );
+        assert_eq!(
+            v(&Problem::NoClipboardText),
+            json!({ "kind": "noClipboardText" })
+        );
+        let st = ServerState::Disconnected {
+            reason: Problem::ServerLost {
+                detail: "timed out".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&st).unwrap(),
+            json!({ "state": "disconnected", "reason": { "kind": "serverLost", "detail": "timed out" } })
+        );
+    }
+
+    #[test]
+    fn survives_question_mark_and_context() {
+        fn inner() -> anyhow::Result<()> {
+            Err(Problem::HostEnded)?
+        }
+        assert_eq!(
+            Problem::from_error(inner().unwrap_err(), Problem::failed),
+            Problem::HostEnded
+        );
+        let wrapped = Err::<(), _>(Problem::CertMismatch)
+            .context("handshake")
+            .unwrap_err();
+        assert_eq!(
+            Problem::from_error(wrapped, Problem::failed),
+            Problem::CertMismatch
+        );
+        // 不是 Problem：整条错误链（含 context）作为 detail
+        let other = Err::<(), _>(std::io::Error::other("boom"))
+            .context("reading")
+            .unwrap_err();
+        assert_eq!(
+            Problem::from_error(other, |detail| Problem::ServerLost { detail }),
+            Problem::ServerLost {
+                detail: "reading: boom".into()
+            }
+        );
+    }
+}

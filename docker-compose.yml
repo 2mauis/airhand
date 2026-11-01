@@ -1,0 +1,29 @@
+# Airhand 中转服务器
+#   启动：docker compose up -d
+#   查看证书指纹：docker compose logs airhand | grep fingerprint
+services:
+  airhand:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: airhand-server:latest
+    container_name: airhand-server
+    restart: unless-stopped
+    ports:
+      - "4433:4433/udp" # QUIC 只需要 UDP
+    volumes:
+      - ./data:/data # 自动生成的 TLS 证书（保持不变，客户端靠指纹校验）
+    environment:
+      RUST_LOG: info
+      # 自动生成证书时写入的域名/IP（逗号分隔）
+      AIRHAND_CERT_NAMES: airhand,localhost
+      # 每台被控端最多允许几个控制端同时连接
+      AIRHAND_MAX_SESSIONS: "4"
+      # 如需使用自己的证书，挂载到 /data 并修改以下路径
+      # AIRHAND_CERT: /data/cert.pem
+      # AIRHAND_KEY: /data/key.pem
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

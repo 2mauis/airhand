@@ -1,0 +1,180 @@
+// 简体中文词条。这里的 key 就是全部词条（MsgKey）：新增词条先加在这里，再补 en.ts（漏了 TypeScript 会报错）。
+//
+// 文案里的 {name} 会被参数替换；需要处理单复数等情况时写成函数。
+import type { Msg } from "../lib/i18n.ts";
+
+export default {
+  "app.title": "Airhand 控制台",
+
+  // 通用
+  "common.connecting": "连接中…",
+  "common.disconnected": "已断开",
+  "common.disconnect": "断开",
+  "common.reconnecting": "正在重连…",
+  "common.thisComputer": "本机",
+
+  // 侧边栏
+  "sidebar.subtitle": "远程控制台",
+  "sidebar.server.connected": "服务器已连接",
+  "sidebar.server.connecting": "服务器连接中…",
+  "sidebar.server.disconnected": "服务器未连接",
+  "sidebar.unpinned": "未固定证书",
+  "sidebar.unpinnedHint": "未配置证书指纹，仅适合开发环境",
+  "sidebar.new": "新建连接",
+  "sidebar.grid": "多屏总览",
+  "sidebar.sessions": "会话",
+  "sidebar.empty": "还没有会话，输入对方的 6 位控制码开始远程控制",
+  "sidebar.version": "v{version} · 控制端模式",
+  "sidebar.toHost": "切换为被控端",
+  "sidebar.toHostHint": "切换为被控端（关闭控制台）",
+
+  // 新建连接
+  "connect.title": "连接到远程电脑",
+  "connect.hint": "在对方电脑右下角的 Airhand 托盘图标上点右键，即可看到 6 位控制码",
+  "connect.prefer": "优先使用 {codec}",
+  "connect.busy": "正在连接…",
+  "connect.waitServer": "等待服务器连接…",
+  "connect.go": "连接",
+  "connect.feature.quic": "抗丢包低延迟传输",
+  "connect.feature.hw": "硬件编解码",
+  "connect.feature.multi": "多设备",
+  "connect.feature.multiDesc": "同时控制多台电脑",
+
+  // 画质预设
+  "preset.saver": "省流",
+  "preset.saver.desc": "720p · 24fps · 1.2 Mbps，适合移动网络",
+  "preset.balanced": "均衡",
+  "preset.balanced.desc": "1080p · 30fps · 4 Mbps，办公首选",
+  "preset.smooth": "流畅",
+  "preset.smooth.desc": "1080p · 60fps · 8 Mbps，滚动与动画更顺滑",
+  "preset.hd": "高清",
+  "preset.hd.desc": "1440p · 60fps · 16 Mbps，设计/看图",
+  "preset.native": "原画",
+  "preset.native.desc": "原始分辨率 · 60fps · 30 Mbps，局域网",
+
+  "codec.hint.H264": "兼容性最好",
+  "codec.hint.H265": "同画质省 30~40% 带宽",
+  "codec.hint.AV1": "同画质省 40~50% 带宽",
+
+  // 多屏总览
+  "grid.summary": "共 {n} 台设备 · 点击画面进入控制",
+  "grid.add": "添加设备",
+
+  // 画质面板
+  "quality.title": "画质与带宽",
+  "quality.preset": "预设",
+  "quality.custom": "自定义",
+  "quality.resolution": "分辨率上限",
+  "quality.native": "原始",
+  "quality.fps": "帧率",
+  "quality.bitrate": "码率上限",
+  "quality.idleHint": "画面静止时几乎不占带宽",
+  "quality.codec": "编码格式",
+  "quality.noDecoder": "本机不支持硬件解码该格式",
+  "quality.noEncoder": "对方电脑没有该格式的硬件编码器",
+  "quality.unavailable": "不可用",
+  "quality.adaptive": "自适应码率",
+  "quality.adaptiveHint": "网络拥塞时自动降低码率，恢复后逐步回升",
+  "quality.encoder": "当前编码器：{name}（{kind}） · {size}",
+  "quality.hardware": "硬件",
+  "quality.software": "软件",
+
+  // 会话工具栏
+  "session.hwEncoding": "硬件编码",
+  "session.swEncoding": "软件编码",
+  "session.syncTitle": "音画同步：画面为了与声音对齐而推迟的时间",
+  "session.sync": "同步 +{ms} ms",
+  "session.switchDisplay": "切换显示器",
+  "session.display": "显示器 {n}",
+  "session.primary": "（主）",
+  "session.quality": "画质",
+  "session.shortcuts": "发送快捷键",
+  "session.clipboard": "剪贴板",
+  "session.clipSync": "双向同步剪贴板",
+  "session.clipSyncHint": "复制的文本自动出现在另一端",
+  "session.clipType": "以键盘输入方式发送剪贴板",
+  "session.clipTypeHint": "适用于登录框等禁止粘贴的地方",
+  "session.sound": "声音",
+  "session.soundMuted": "声音（已静音）",
+  "session.playSound": "播放远程声音",
+  "session.avSync": "音画同步",
+  "session.avSyncHint": "画面等声音对齐，适合看视频；操作会变慢",
+  "session.toNative": "切换为原始大小（1:1）",
+  "session.toFit": "切换为适应窗口",
+  "session.fullscreen": "全屏",
+  "session.exitFullscreen": "退出全屏",
+  "session.disconnect": "断开连接",
+  "session.reconnectFailed": "无法重新连接",
+  "session.lost": "连接已断开",
+  "session.ended": "会话已结束",
+  "session.reconnect": "重新连接",
+  "session.close": "关闭",
+  "session.reconnecting": "正在重新连接…",
+  "session.connecting": "正在连接…",
+  "session.attempt": "第 {n} 次尝试",
+  "session.noClipboard": "本机剪贴板没有文本",
+  "session.typed": "已键入 {n} 个字符",
+
+  // 声音 / 音画同步提示
+  "audio.muted": "已静音，被控端停止采集声音",
+  "audio.jitter": "抖动缓冲 {ms} ms",
+  "audio.remote": "对方电脑正在播放的声音",
+  "sync.needSound": "需要先打开声音",
+  "sync.waiting": "等待对方播放声音后开始测量",
+  "sync.audioLate": "未同步：声音比画面晚约 {ms} ms",
+  "sync.videoLate": "未同步：画面比声音晚约 {ms} ms",
+  "sync.wasAudioLate": "原本声音晚 {ms} ms",
+  "sync.wasVideoLate": "原本画面晚 {ms} ms",
+  "sync.audioDelayed": "已同步：声音多等 {ms} ms（{before}）",
+  "sync.videoDelayed": "已同步：画面推迟 {ms} ms（{before}）",
+
+  // 快捷键
+  "combo.winStart": "Win 开始菜单",
+  "combo.altTab": "Alt + Tab 切换窗口",
+  "combo.winD": "Win + D 显示桌面",
+  "combo.winE": "Win + E 资源管理器",
+  "combo.winR": "Win + R 运行",
+  "combo.taskManager": "Ctrl + Shift + Esc 任务管理器",
+  "combo.altF4": "Alt + F4 关闭窗口",
+  "combo.printScreen": "PrintScreen 截图",
+  "combo.super": "Super 活动/开始菜单",
+  "combo.superD": "Super + D 显示桌面",
+  "combo.terminal": "Ctrl + Alt + T 终端",
+  "combo.altF2": "Alt + F2 运行命令",
+  "combo.superL": "Super + L 锁屏",
+
+  // 被控端发来的提示（类型，见 Rust 的 proto Notice）
+  "notice.noDisplays": "对方电脑没有可采集的显示器",
+  "notice.wayland": "对方电脑是 Wayland 桌面：目前只能采集和操作 X11（XWayland）程序。请在对方电脑的登录界面改用 X11（Xorg）会话",
+  "notice.captureFailed": "对方电脑的屏幕采集失败，正在重试：{detail}",
+  // 本机产生的提示
+  "notice.h264Undecodable": "本机无法解码 H.264 画面",
+  "notice.codecFallback": "本机无法解码 {codec} 画面，已改用 H.264",
+  "notice.noOpus": "本机不支持 Opus 解码，无法播放远程声音",
+  "error.canvas": "无法创建 Canvas",
+
+  // 问题（类型，见 Rust 的 problem.rs）：与中转服务器的连接
+  "problem.serverUnreachable": "无法连接服务器：{detail}",
+  "problem.certMismatch": "服务器证书与程序里固定的指纹不一致，连接可能被人拦截",
+  "problem.incompatible": (p) =>
+    Number(p.server) > Number(p.client) ? "与服务器版本不兼容：服务器较新，请更新 Airhand" : "与服务器版本不兼容：服务器较旧，请更新服务器",
+  "problem.serverLost": "与服务器的连接已断开：{detail}",
+  // 连接被控端
+  "problem.notConnected": "尚未连接到服务器，请稍候重试",
+  "problem.invalidCode": "控制码应为 6 位数字",
+  "problem.codeNotFound": "控制码不存在或对方不在线",
+  "problem.rateLimited": "尝试过于频繁，请稍后再试",
+  "problem.hostBusy": "对方当前会话数已满",
+  "problem.serverTimeout": "服务器响应超时",
+  // 会话
+  "problem.hostEnded": "对方结束了会话",
+  "problem.hostUnresponsive": "对方电脑无响应",
+  "problem.kicked": "对方断开了你的连接",
+  "problem.codeChanged": "对方更换了控制码",
+  "problem.sessionEnded": "会话已结束",
+  // 其它
+  "problem.notController": "当前不是控制端模式",
+  "problem.noSession": "会话不存在",
+  "problem.noClipboardText": "本机剪贴板没有文本",
+  "problem.failed": "出错了：{detail}",
+} satisfies Record<string, Msg>;

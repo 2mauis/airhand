@@ -1,0 +1,11 @@
+# 静态链接 C 运行时：发布的 airhand.exe 是一个独立文件，不依赖 VC++ 运行库
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# 用 CMake 构建的 C 依赖（libopus）同样使用静态运行时（/MT），见 cmake/msvc-static-crt.cmake
+[env]
+CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc = { value = "cmake/msvc-static-crt.cmake", relative = true }
+CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc = { value = "cmake/msvc-static-crt.cmake", relative = true }

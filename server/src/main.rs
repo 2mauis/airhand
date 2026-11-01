@@ -1,0 +1,146 @@
+//! Airhand 中转服务器。
+//!
+//! 环境变量：
+//! * `AIRHAND_LISTEN`        监听地址，默认 `0.0.0.0:4433`（UDP）
+//! * `AIRHAND_CERT`          证书路径，默认 `/data/cert.pem`（不存在则自动生成）
+//! * `AIRHAND_KEY`           私钥路径，默认 `/data/key.pem`
+//! * `AIRHAND_CERT_NAMES`    自动生成证书时的 SAN，逗号分隔，默认 `airhand,localhost`
+//! * `AIRHAND_MAX_SESSIONS`  每台被控端最多同时被几个控制端连接，默认 4
+//! * `RUST_LOG`              日志级别，默认 `info`
+
+mod broker;
+mod tls;
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use airhand_proto::ALPN;
+use anyhow::{Context, Result};
+use quinn::crypto::rustls::QuicServerConfig;
+use quinn::{Endpoint, ServerConfig, TransportConfig, VarInt};
+use tracing::info;
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// 针对实时画面优化的传输参数（客户端见 `client/src-tauri/src/net.rs`）。
+///
+/// QUIC 的空闲超时取两端中较短的一个：客户端设置的更短（10 秒，2 秒保活），掉线检测以客户端为准；
+/// 这里的值兜底那些不发保活的连接。
+pub fn transport_config() -> TransportConfig {
+    let mut t = TransportConfig::default();
+    t.max_concurrent_bidi_streams(VarInt::from_u32(64));
+    t.max_concurrent_uni_streams(VarInt::from_u32(0));
+    t.max_idle_timeout(Some(Duration::from_secs(20).try_into().unwrap()));
+    t.keep_alive_interval(Some(Duration::from_secs(4)));
+    // 足够大的窗口以跑满高码率，在途帧数量由应用层 ACK 控制，不会造成延迟堆积
+    t.stream_receive_window(VarInt::from_u32(16 * 1024 * 1024));
+    t.receive_window(VarInt::from_u32(64 * 1024 * 1024));
+    t.send_window(64 * 1024 * 1024);
+    // BBR：在有随机丢包的网络（Wi-Fi/跨境）上比 Cubic 更能维持吞吐，且排队延迟更低
+    t.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    t
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    let listen: SocketAddr = env_or("AIRHAND_LISTEN", "0.0.0.0:4433")
+        .parse()
+        .context("invalid AIRHAND_LISTEN")?;
+    let cert_path = PathBuf::from(env_or("AIRHAND_CERT", "/data/cert.pem"));
+    let key_path = PathBuf::from(env_or("AIRHAND_KEY", "/data/key.pem"));
+    let names: Vec<String> = env_or("AIRHAND_CERT_NAMES", "airhand,localhost")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let max_sessions: usize = env_or("AIRHAND_MAX_SESSIONS", "4")
+        .parse()
+        .unwrap_or(4)
+        .max(1);
+
+    let cert = tls::load_or_generate(&cert_path, &key_path, &names)?;
+    info!("Certificate SHA-256 fingerprint: {}", cert.fingerprint);
+    info!(
+        "(put this fingerprint in the client's SERVER_CERT_SHA256, or set AIRHAND_SERVER_FP when building it, to enable certificate pinning)"
+    );
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(cert.chain, cert.key)
+        .context("the certificate and private key don't match")?;
+    tls.alpn_protocols = vec![ALPN.to_vec()];
+    tls.max_early_data_size = 0;
+
+    let mut server_config = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
+    server_config.transport_config(Arc::new(transport_config()));
+
+    let endpoint = Endpoint::server(server_config, listen)
+        .with_context(|| format!("can't listen on {listen}"))?;
+    info!("Airhand server started on udp://{listen}, up to {max_sessions} sessions per host");
+
+    let broker = broker::Broker::new(broker::Config {
+        max_sessions_per_host: max_sessions,
+    });
+    tokio::spawn(broker.clone().janitor());
+    {
+        let broker = broker.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(300));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let (hosts, pending) = broker.stats();
+                info!(hosts, pending, "online");
+            }
+        });
+    }
+
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else { break };
+                tokio::spawn(broker.clone().handle_incoming(incoming));
+            }
+            _ = &mut shutdown => {
+                info!("shutting down…");
+                break;
+            }
+        }
+    }
+    endpoint.close(VarInt::from_u32(0), b"server shutdown");
+    let _ = tokio::time::timeout(Duration::from_secs(3), endpoint.wait_idle()).await;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("signal");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = term.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}

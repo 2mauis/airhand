@@ -1,0 +1,320 @@
+<p align="center"><img src="assets/icon.svg" width="96" alt="Airhand"></p>
+
+<h1 align="center">Airhand</h1>
+<p align="center">High-performance remote desktop over QUIC · Rust + Tauri + React</p>
+<p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a></p>
+
+---
+
+Airhand is a single program that is both the **host** (the computer being controlled) and the **controller** (the computer you control it from). It runs on **Windows** and **Linux** (X11 desktops). A small relay server, deployed with one Docker Compose command, handles signaling and forwards traffic.
+
+> **Status:** under active development. The protocol still changes between versions, so the clients and the server must be built from the same version (a mismatch is detected and reported, see [Protocol versions](#protocol-versions)).
+
+## Features
+
+- **Host by default**: after launch there is only a tray icon, no window, and no WebView is started
+- **Controller console**: control **several computers at once**, switch between them, or watch them all in a multi-screen overview
+- **Low latency, low bandwidth**: hardware **AV1 / HEVC / H.264** encoding, no frames when the screen is still, adaptive bitrate, the cursor moves locally with no lag
+- **Audio**: the host's system sound is streamed to the controller, with optional A/V sync for watching video
+- **Practical tools**: two-way clipboard sync, typing the clipboard as keystrokes, system shortcuts (Win, Alt+Tab, Ctrl+Shift+Esc…), multiple monitors, fullscreen with keyboard lock
+- **Zero files**: no config file, nothing is left on disk (see [below](#zero-files))
+- **Secure by default**: TLS 1.3 with certificate pinning, brute-force protection for control codes
+- **English and Simplified Chinese**: follows the system language, switchable at any time
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Usage](#usage)
+- [Server configuration](#server-configuration)
+- [Building the client](#building-the-client)
+- [How it works](#how-it-works)
+- [Security](#security)
+- [Known limitations](#known-limitations)
+- [Development](#development)
+
+## Quick start
+
+1. **Deploy the server** on a machine both computers can reach (only **UDP 4433** needs to be open):
+
+   ```bash
+   docker compose up -d
+   docker compose logs airhand | grep fingerprint   # note the certificate SHA-256 fingerprint
+   ```
+
+2. **Build the client** with the server address and fingerprint compiled in (requirements and Linux steps in [Building the client](#building-the-client)):
+
+   ```powershell
+   cd client
+   npm install
+   $env:AIRHAND_SERVER    = "relay.example.com:4433"
+   $env:AIRHAND_SERVER_FP = "<fingerprint from step 1>"
+   npm run tauri build -- --no-bundle
+   # → client/src-tauri/target/release/airhand.exe (single file, ~9 MB)
+   ```
+
+3. **Run it on both computers.** On the remote one, right-click the tray icon to see its 6-digit **control code**. On yours, choose **Switch to controller** in the tray menu and enter the code.
+
+## Usage
+
+### Host (default)
+
+Double-click to run. A tray icon appears in the bottom-right corner (on Linux, in the top bar / panel status area). Grey means not connected to the server, coloured means connected. The right-click menu contains:
+
+- Current mode and server status
+- The **control code** and "Copy control code"
+- Who is controlling this computer right now, and **Disconnect all controllers**
+- **Change control code**: the old code stops working immediately and connected controllers are disconnected
+- Switch to controller / Language / Quit
+
+After a network drop the host reconnects automatically with exponential backoff and **gets its old control code back**, even after a server restart. A code is reserved for its host for 10 minutes after the host goes offline.
+
+> On Linux the tray icon uses AppIndicator. It works out of the box on Ubuntu, KDE, Xfce and similar; stock GNOME needs the "AppIndicator and KStatusNotifierItem Support" extension. Without an AppIndicator library the program still runs as a host and prints the control code to the log (stderr).
+
+### Controller
+
+Tray → **Switch to controller** opens the console. Closing the console window switches back to host mode.
+
+- Enter a 6-digit control code to connect (pasting `123 456` works). Connect to as many computers as you like, switch between them in the left-hand list, or open the **Multi-screen overview**
+- Toolbar: monitor switch, **Quality**, shortcuts, clipboard (two-way sync / type as keystrokes), sound (mute / A/V sync), actual size (1:1), fullscreen, disconnect
+- In fullscreen the console tries to lock the keyboard, so system shortcuts such as the Win key and Alt+Tab go to the remote computer
+- Network hiccups reconnect automatically. If the user at the host disconnects you, the console says so and doesn't reconnect
+
+**Quality panel**: presets from Data saver (720p / 24 fps / 1.2 Mbps) through Balanced (1080p / 30 fps / 4 Mbps), Smooth (1080p / 60 fps / 8 Mbps) and HD (1440p / 60 fps / 16 Mbps) to Original (native resolution / 60 fps / 30 Mbps), or set the resolution cap, frame rate (15–120), bitrate cap (0.5–50 Mbps), codec and adaptive bitrate yourself. The console only offers codecs this computer can hardware-decode; if the host has no matching hardware encoder it falls back automatically, and the toolbar shows the encoder actually in use.
+
+### Language
+
+The console and tray menu are available in **English** and **Simplified Chinese**. By default the client follows the system display language: Chinese if it is Chinese, English otherwise. Switch any time from the tray menu (Language / 语言) or the 中文 / EN switch at the bottom-left of the console; like every other setting it isn't saved.
+
+Notices and errors from the other computer or the server are sent as message types, not text, so they always appear in **your** language. Logs (client and server) are always in English.
+
+## Server configuration
+
+The server listens on **UDP 4433**. On first start it generates a self-signed certificate in the `data/` directory next to `docker-compose.yml`. **Keep that directory**: clients recognise the server by the certificate's fingerprint.
+
+Environment variables (see `docker-compose.yml`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `AIRHAND_LISTEN` | `0.0.0.0:4433` | Listen address (UDP) |
+| `AIRHAND_CERT` / `AIRHAND_KEY` | `/data/cert.pem` / `/data/key.pem` | Certificate paths; generated automatically if missing |
+| `AIRHAND_CERT_NAMES` | `airhand,localhost` | SANs written into an auto-generated certificate |
+| `AIRHAND_MAX_SESSIONS` | `4` | Max simultaneous controllers per host |
+| `RUST_LOG` | `info` | Log level |
+
+The image is based on distroless, runs as a non-root user, and is about 28 MB.
+
+## Building the client
+
+Requirements: Rust (stable), Node.js 20+, CMake (to build libopus).
+
+- **Windows**: Windows 10/11 (WebView2 ships with the OS)
+- **Linux**: Tauri's dependencies, the PulseAudio development files and the GStreamer plugins the console uses to decode video. On Debian / Ubuntu:
+
+  ```bash
+  sudo apt install build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev \
+    libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
+  ```
+
+The server address and certificate fingerprint are **compiled into the program**: set `AIRHAND_SERVER` and `AIRHAND_SERVER_FP` at build time (as in [Quick start](#quick-start)), or change the defaults in `client/src-tauri/src/config.rs`. Without `AIRHAND_SERVER` the client connects to `127.0.0.1:4433`.
+
+> When `AIRHAND_SERVER_FP` is empty the **server certificate is not verified**, which leaves you open to man-in-the-middle attacks. Use that for development only; the console then shows "Not pinned" at the top left.
+
+**Windows**: `npm run tauri build -- --no-bundle` produces `client/src-tauri/target/release/airhand.exe`. Drop `--no-bundle` to also get an NSIS installer.
+
+- The C runtime is statically linked, so the VC++ redistributable isn't needed
+- Media Foundation is delay-loaded, so Windows N editions (without the Media Feature Pack) still run and use software encoding
+
+**Linux** (set the variables with `export AIRHAND_SERVER=...`):
+
+```bash
+cd client && npm install
+npm run tauri build
+# → client/src-tauri/target/release/airhand (single file, ~10 MB)
+#   client/src-tauri/target/release/bundle/deb/Airhand_<version>_amd64.deb (pulls in the tray, audio and GStreamer dependencies)
+```
+
+## How it works
+
+### Architecture
+
+```
+ Host (Windows; Linux: see table)        airhand-server (Docker)                  Controller (Tauri)
+┌───────────────────────────┐            ┌───────────────────────────┐            ┌───────────────────────────┐
+│ DXGI capture (GPU)        │            │ Control-code registry     │            │ WebCodecs HW decode       │
+│ SIMD scale + NV12 convert │  QUIC/TLS  │ Session pairing           │  QUIC/TLS  │ Low-latency Canvas        │
+│ HW encode AV1/HEVC/H.264  │◀══════════▶│ Zero-copy byte relay      │◀══════════▶│ Input capture + cursor    │
+│ SendInput injection       │   UDP 4433 │ Brute-force rate limiting │   UDP 4433 │ Multi-session / overview  │
+│ WASAPI loopback + Opus    │            │                           │            │ Jitter-buffered audio     │
+└───────────────────────────┘            └───────────────────────────┘            └───────────────────────────┘
+```
+
+The first bidirectional stream on every QUIC connection is the **control stream** (signaling). For each remote-control session both sides open another bidirectional stream; the server pairs them by session ID and from then on **only forwards bytes, it never parses the video**. Every message is a `u32` length prefix followed by a postcard-encoded payload.
+
+| Directory | Contents |
+|---|---|
+| `crates/airhand-proto` | Protocol: signaling, session messages, framing |
+| `server/` | Relay server (quinn + rustls) and its `Dockerfile` |
+| `client/src-tauri/` | Client, Rust side: host `host/`, controller `controller/`, tray, networking |
+| `client/src/` | Console UI (React 19 + TypeScript, no UI library); strings in `client/src/locales/` |
+| `assets/icon.svg` | Application icon source |
+
+How each host stage is implemented on the two platforms:
+
+| Stage | Windows | Linux (X11) |
+|---|---|---|
+| Screen capture | DXGI Desktop Duplication | MIT-SHM shared memory + DAMAGE change notifications; RandR for multiple monitors |
+| Cursor shape | DXGI | XFIXES |
+| Video encoding | Media Foundation hardware encoders, OpenH264 fallback | OpenH264 |
+| Input injection | SendInput (scan codes) | XTEST (evdev physical key codes) |
+| Audio capture | WASAPI loopback | PulseAudio / PipeWire output monitor |
+| Clipboard | Change detection via the clipboard sequence number | XFIXES selection-owner change notifications |
+| Console UI | WebView2 | WebKitGTK (WebCodecs decoding via GStreamer) |
+
+### Video
+
+| Stage | How it works |
+|---|---|
+| Capture | Frames are only produced when the screen changes (DXGI on Windows, DAMAGE on X11), so an idle desktop uses almost no bandwidth |
+| Preprocessing | `fast_image_resize` (SIMD) for scaling, `yuvutils-rs` (AVX2) for BGRA→NV12/I420; all buffers are reused |
+| Encoding | **Hardware first**: Media Foundation hardware encoders (NVENC / Quick Sync / AMF) for **AV1 / HEVC / H.264**, low-latency mode, no B-frames, very long GOP. Without one it falls back to **OpenH264 in screen-content mode** |
+| Rate control | The controller ACKs every frame. The host caps the number of **in-flight frames** (≈ RTT × fps + 2); on a slow network it waits and **skips to the newest frame** instead of building up lag. Adaptive bitrate steps down under congestion and recovers gradually |
+| Transport | QUIC with **BBR** congestion control (steadier than Cubic on lossy links such as Wi-Fi or cross-border routes). Control messages, audio and video are queued separately, so pings and mouse events never wait behind a large frame |
+| Decoding | The controller decodes on the GPU with **WebCodecs** (`optimizeForLatency`) and paints straight into a `desynchronized` Canvas |
+| Cursor | The remote cursor's **shape** is mirrored to the local cursor and movement is handled locally, so there is **no perceptible cursor lag** |
+| Background sessions | Sessions that aren't on screen drop to 5 fps |
+
+Measured locally (RTX GPU, 4K display output at 1080p): hardware AV1 encodes a frame in about 7 ms, H.264 in about 9 ms; OpenH264 software encoding takes about 40 ms.
+
+### Audio
+
+The host's system sound (not the microphone) is streamed to the controller:
+
+| Stage | How it works |
+|---|---|
+| Capture | Loopback capture of the default output device, converted to 48 kHz stereo; follows the default device when it changes (e.g. you plug in headphones) |
+| Encoding | Opus at 96 kbps, 20 ms per packet; **no packets during silence** |
+| Transport | Same stream as the video, queued after control messages and before video; when the queue is full packets are dropped instead of building up lag |
+| Playback | WebCodecs decoding → AudioWorklet adaptive jitter buffer: about 40 ms on a stable network, growing under jitter and shrinking back once stable. A ±1–2% speed adjustment cancels the clock drift between the two sound cards, and a large backlog is skipped |
+
+Only the session you are looking at plays audio (none do in the multi-screen overview); the other hosts are told to stop capturing.
+
+### A/V sync (optional, off by default)
+
+Audio goes through a jitter buffer while video is shown as soon as it arrives, so by default audio lags video slightly: about **70 ms** in our measurements (same machine, local relay, 4K output at 1080p; 49–78 ms per run). That's barely noticeable while working, but may be when watching video.
+
+With **A/V sync** turned on (speaker menu in the toolbar):
+
+- Video frames and audio packets both carry the host's capture time on the same clock (DXGI present time and WASAPI QPC timestamps). The controller measures the capture → display/playback latency of each stream separately; **the clock offset between the two computers cancels out**, so no time sync is needed
+- Normally each frame is delayed until it lines up with the audio. If the video is the slower one (tight bandwidth), the audio is buffered longer instead (up to 300 ms); a single slow frame doesn't trigger this
+- Measured residual offset: **−3 to −4 ms** on average (negative = audio slightly early), worst case −31 ms, inside the range generally considered imperceptible (audio ahead by up to about 45 ms)
+- Trade-off: video appears about 70 ms later, so typing and dragging feel slower; it suits watching video, not working. The cursor is drawn locally and is unaffected. The toolbar shows "Sync +N ms"
+
+The delay from painting to the Canvas to the pixels lighting up is estimated at 8 ms (not measured with a camera).
+
+### Zero files
+
+- No config file; the server address is compiled in. Logs go to stderr only
+- Host mode **doesn't create a WebView**, so it creates no files at all
+- The single-instance lock is a kernel object, not a lock file: a named mutex on Windows, an abstract-namespace Unix socket on Linux
+- The console's WebView needs a data directory: it lives in a random subdirectory of the temp directory, runs in private mode (no cookies or cache saved), and is deleted when the window closes or the program exits. If the process is killed, leftovers are removed on the next start
+- On Linux, the few things that can only be handed over as files (the tray icon for AppIndicator, WebKitGTK's GStreamer plugin cache) live in a random per-process directory under `XDG_RUNTIME_DIR` (a RAM disk) that is removed on exit, including on SIGTERM / SIGINT. The Mesa / NVIDIA on-disk shader caches are turned off
+- Controller settings live in memory only
+
+## Security
+
+- TLS 1.3 throughout (QUIC); the client verifies the server by **certificate fingerprint pinning**
+- Brute-force protection: at most 20 failed attempts per IP (IPv6 grouped by /64) per 10 minutes, and each failure adds a 400 ms delay
+- Getting a control code back after a reconnect requires a random secret, so nobody else can claim it
+- The host's tray always shows who is controlling the computer; disconnect them or change the code with one click
+- The relay server can see the content of session streams (TLS ends at the server), so run it on a machine you trust
+
+## Known limitations
+
+- The host supports Windows and Linux **X11** desktops. Under Wayland only X11 (XWayland) applications can be seen and controlled; native Wayland windows are black and the controller suggests logging in with an X11 (Xorg) session. Full Wayland support needs xdg-desktop-portal screen sharing (the local user has to confirm each time) and isn't implemented
+- The Linux host only has OpenH264 software encoding (no VA-API / NVENC yet); when AV1 / HEVC is selected it uses H.264
+- Decoding on a Linux controller relies on WebKitGTK + GStreamer: H.264 needs `gstreamer1.0-plugins-bad` (parsing) and `gstreamer1.0-libav` or openh264 (decoding); AV1 / HEVC depend on the installed GStreamer decoders. If a format turns out not to produce a picture, the controller switches to H.264
+- Without elevated privileges on Windows, UAC prompts and the lock screen can't be captured or controlled (they are on the secure desktop; that would need a SYSTEM service), and `Ctrl+Alt+Del` can't be injected. On Linux the lock screen is similar (the screensaver grabs the keyboard and mouse)
+- The clipboard syncs text only, not files
+- Audio flows from host to controller only; the controller's microphone isn't forwarded. Audio is captured after the volume control, so a muted host sends silence
+
+## Development
+
+### Tests
+
+```bash
+# repository root: protocol + server
+cargo test
+
+# client/: UI (jitter buffer and A/V sync simulations, H.264 conversion, UI strings)
+npm test
+
+# client/src-tauri/: client Rust (encoders incl. hardware probing, Opus packing, format conversion…)
+cargo test --lib
+# audio loopback capture (needs an audio output device; plays a 1.5 s test tone at -60 dBFS, barely audible)
+cargo test --lib loopback_captures_tone -- --ignored --nocapture
+```
+
+End to end (a real server, a real host with screen capture and encoding, and a protocol-level controller):
+
+```bash
+# repository root: start a server without certificate pinning
+cargo build -p airhand-server
+AIRHAND_CERT=target/e2e/cert.pem AIRHAND_KEY=target/e2e/key.pem ./target/debug/airhand-server &
+
+# client/src-tauri/
+cargo test --lib e2e_roundtrip -- --ignored --nocapture   # video / codec switching / clipboard / audio / ping / disconnect
+cargo test --lib e2e_reconnect -- --ignored --nocapture   # getting the code back after a server restart, changing the code
+```
+
+### Debugging tools
+
+```bash
+# client/: debug build that starts straight in controller mode; AIRHAND_LOG sets the log level
+AIRHAND_DEV_CONTROLLER=1 AIRHAND_LOG=debug npm run tauri dev
+# client/: A/V sync measurement (the host plays a white flash + short beep; usage at the top of the script)
+node scripts/measure-avsync.mjs <control-code>
+
+# client/src-tauri/: headless host, for testing the controller on the same machine
+# (mute the controller, otherwise the played-back audio is captured again and echoes)
+cargo run --release --example headless_host
+# client/src-tauri/: encoder benchmark (captures the real screen and compares the encoders)
+cargo run --release --example encode_bench
+```
+
+Use release builds when judging smoothness or A/V sync: debug builds scale very slowly (4K → 1080p takes about 0.5 s per frame).
+
+### Linux / WSL
+
+`bash client/scripts/linux-test.sh` runs all of the tests above (unit, X11 capture and input injection, audio loopback, end to end, frontend). The X11 tests open fullscreen windows and inject input, so the script starts its own Xvfb screen and leaves your desktop alone; audio tests are skipped without PulseAudio / PipeWire. It needs `sudo apt install xvfb x11-apps`.
+
+On Windows you can use WSL2 (tested on Ubuntu 24.04; WSLg ships with PulseAudio):
+
+```bash
+# Copy the repository to WSL's own disk first (building under /mnt/c or /mnt/d is much slower)
+rsync -a --exclude target --exclude node_modules /mnt/d/work/Projects/airhand/ ~/airhand/
+cd ~/airhand && bash client/scripts/linux-test.sh
+```
+
+- The console works in WSLg: `AIRHAND_DEV_CONTROLLER=1 npm run tauri dev` opens it on the Windows desktop
+- To run a host: `Xvfb :99 &`, then `DISPLAY=:99 cargo run --example headless_host` (WSLg's own desktop is Wayland)
+- WSL2 uses NAT networking by default: Windows programs reach a server inside WSL through WSL's IP (`ip addr show eth0`), e.g. `AIRHAND_SERVER=172.30.x.x:4433`
+
+### Conventions
+
+#### Protocol versions
+
+Client and server compare `PROTOCOL_VERSION` (`crates/airhand-proto/src/lib.rs`) when they connect. On a mismatch the server replies `Incompatible` and the client tells the user whether to update Airhand or the server, then retries once a minute. Bump the version for any incompatible protocol change. The handshake itself (`ClientMsg::Hello`, `ServerMsg::Welcome` / `Incompatible`, the ALPN) must **never** change, otherwise different versions can't even tell each other that they differ. The `version_handshake_wire_is_stable` test guards this.
+
+#### Messages are types, not text
+
+Anything the user may see that crosses the network or comes from the Rust side is an enum (`ConnectError`, `Notice`, `ByeReason`, `Problem`…). The UI turns it into text in the user's language:
+
+- Console strings live in `client/src/locales/zh.ts` (the full list of keys) and `en.ts`
+- Tray strings use `tr!` in `client/src-tauri/src/tray.rs`
+- `npm test` fails if a Rust `Problem` / `NoticeView` variant has no string in either language
+- Logs and internal errors are English
+
+#### Icon
+
+The source is `assets/icon.svg`. After editing it, run `npx tauri icon ../assets/icon.svg -o src-tauri/icons` in `client/`, then copy `src-tauri/icons/32x32.png` to `src-tauri/icons/tray.png`.

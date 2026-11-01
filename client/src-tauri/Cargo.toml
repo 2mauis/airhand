@@ -1,0 +1,86 @@
+[package]
+name = "airhand"
+description = "Airhand remote desktop client (controller and host in one program)"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+default-run = "airhand"
+
+# 客户端是独立工作区，与服务端工作区互不影响
+[workspace]
+
+[lib]
+name = "airhand_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+airhand-proto = { path = "../../crates/airhand-proto" }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+sha2 = "0.10"
+rand = "0.9"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+arboard = { version = "3", default-features = false }
+# 编码：OpenH264（屏幕内容模式），YUV 转换与缩放均使用 SIMD
+bytes = "1"
+openh264 = "0.9"
+openh264-sys2 = "0.9"
+yuvutils-rs = "0.8"
+fast_image_resize = "6"
+# 声音：libopus（随包源码静态编译）
+opus = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_Globalization",
+  "Win32_System_Threading",
+  "Win32_System_Performance",
+  "Win32_System_Registry",
+  "Win32_System_DataExchange",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Ole",
+  "Win32_System_Variant",
+  "Win32_Media_MediaFoundation",
+  "Win32_Media_Audio",
+  "Win32_System_StationsAndDesktops",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
+  "Win32_Security",
+] }
+
+# Linux 被控端：X11（MIT-SHM 采集 + DAMAGE 变化检测 + XFIXES 光标/剪贴板 + XTEST 注入），
+# 声音用 PulseAudio（PipeWire 的 pipewire-pulse 同样适用）监听默认输出设备。
+# x11rb 是纯 Rust 实现的 X11 协议，不依赖 libX11/libxcb；arboard 已经在用同一版本。
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "randr", "xtest", "xkb"] }
+libpulse-binding = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# 开发模式下也优化编解码相关依赖，否则软件编码会很慢
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,16 @@
+[package]
+name = "airhand-proto"
+description = "Airhand protocol: server signaling and end-to-end session messages"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+postcard = { version = "1", features = ["use-std"] }
+tokio = { version = "1", features = ["io-util"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "rt", "macros"] }
