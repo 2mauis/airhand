@@ -8,8 +8,8 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 use tauri::{AppHandle, Wry};
 
 use crate::i18n::{self, Lang};
-use crate::problem::Problem;
-use crate::status::{AppStatus, Mode, ServerState};
+use crate::status::{AppStatus, Mode};
+use airhand_link::{Problem, ServerState};
 
 const TRAY_ID: &str = "airhand";
 static ICON_PNG: &[u8] = include_bytes!("../icons/tray.png");

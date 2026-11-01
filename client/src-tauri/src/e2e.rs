@@ -15,8 +15,10 @@ use airhand_proto::session::{
 use airhand_proto::signal::{ClientMsg, ConnectError, ServerMsg};
 use airhand_proto::{MAX_SESSION_MSG, MAX_SIGNAL_MSG, Role, SessionHeader};
 
+use airhand_link::ServerState;
+
 use crate::host::HostService;
-use crate::status::{self, ServerState};
+use crate::status;
 
 async fn wait_code(hub: &status::StatusHub) -> u32 {
     let mut rx = hub.subscribe();
@@ -67,7 +69,7 @@ async fn e2e_roundtrip() {
     println!("被控端控制码: {code}");
 
     // 控制端：连接服务器
-    let mut sig = crate::net::connect_signal(Role::Controller)
+    let mut sig = airhand_link::net::connect_signal(&crate::config::link(), Role::Controller)
         .await
         .expect("控制端连接服务器");
     let mut buf = Vec::new();

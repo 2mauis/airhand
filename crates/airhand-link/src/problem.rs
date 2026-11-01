@@ -1,11 +1,11 @@
 //! 显示给用户的问题（错误），以**类型**而不是文字的形式传给界面。
 //!
-//! * 托盘（Rust，见 `tray.rs`）和控制台（前端，见 `src/lib/messages.ts`）各自按本机**当前的**界面语言
+//! * 托盘（Rust，见 `client/src-tauri/src/tray.rs`）和控制台（前端，见 `client/src/lib/messages.ts`）各自按本机**当前的**界面语言
 //!   把它变成文字：界面上不会出现另一台电脑或服务器的语言，切换语言时已经显示出来的问题也会跟着切换；
 //! * `Display` 是写日志用的英文；
 //! * `detail` 是给排查问题用的技术信息（英文），界面上原样显示在说明文字后面。
 //!
-//! 新增变体时，前端的 `problem.<kind>` 词条也要补上（`npm test` 会检查）。
+//! 新增变体时，前端的 `problem.<kind>` 词条也要补上（`client/` 里的 `npm test` 会检查）。
 
 use std::fmt;
 
@@ -157,9 +157,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::status::ServerState;
+    use crate::ServerState;
 
-    /// 前端（src/lib/api.ts 的 Problem / ServerState 类型）依赖这个 JSON 形状
+    /// 前端（client/src/lib/api.ts 的 Problem / ServerState 类型）依赖这个 JSON 形状
     #[test]
     fn json_shape() {
         let v = |p: &Problem| serde_json::to_value(p).unwrap();

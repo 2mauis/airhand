@@ -10,13 +10,10 @@
 mod i18n;
 mod clipboard;
 mod config;
-mod controller;
 #[cfg(test)]
 mod e2e;
 mod ephemeral;
 pub mod host;
-mod net;
-mod problem;
 mod single_instance;
 pub mod status;
 mod sysinfo;
@@ -26,18 +23,19 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use airhand_link::controller::{
+    ControllerService, Frontend, SessionEvent, SessionInfo, SessionUi, UiClosed,
+};
+use airhand_link::{Problem, ServerState};
 use airhand_proto::session::{InputEvent, QualitySettings};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tracing::{info, warn};
 
-use controller::session::SessionEvent;
-use controller::{ControllerService, SessionInfo};
 use host::HostService;
 use i18n::Lang;
-use problem::Problem;
-use status::{Mode, ServerState, StatusHub};
+use status::{Mode, StatusHub};
 
 const CONSOLE: &str = "main";
 
@@ -85,7 +83,11 @@ fn switch_services(app: &AppHandle, mode: Mode) {
         match mode {
             Mode::Host => sv.host = Some(HostService::start(state.hub.clone())),
             Mode::Controller => {
-                sv.controller = Some(Arc::new(ControllerService::start(state.hub.clone())))
+                sv.controller = Some(Arc::new(ControllerService::start(
+                    config::link(),
+                    tauri::async_runtime::handle().inner().clone(),
+                    status::server_reporter(&state.hub),
+                )))
             }
         }
     }
@@ -244,6 +246,24 @@ fn server_status(state: tauri::State<'_, AppState>) -> ServerState {
     state.hub.borrow().server.clone()
 }
 
+/// 会话的画面和事件经 Tauri 的 Channel 交给控制台窗口
+struct ConsoleUi {
+    video: Channel<InvokeResponseBody>,
+    events: Channel<SessionEvent>,
+}
+
+impl SessionUi for ConsoleUi {
+    fn packet(&self, packet: Vec<u8>) -> Result<(), UiClosed> {
+        self.video
+            .send(InvokeResponseBody::Raw(packet))
+            .map_err(|_| UiClosed)
+    }
+
+    fn event(&self, event: SessionEvent) -> Result<(), UiClosed> {
+        self.events.send(event).map_err(|_| UiClosed)
+    }
+}
+
 #[tauri::command]
 async fn ctrl_connect(
     state: tauri::State<'_, AppState>,
@@ -255,7 +275,12 @@ async fn ctrl_connect(
 ) -> Result<SessionInfo, Problem> {
     let code = airhand_proto::parse_code(&code).ok_or(Problem::InvalidCode)?;
     let svc = state.controller()?;
-    svc.connect(code, settings, video, events, clipboard).await
+    let ui = Arc::new(ConsoleUi { video, events });
+    let frontend = Frontend::Desktop {
+        clipboard: Box::new(clipboard::ClipSync::new()),
+        sync: clipboard,
+    };
+    svc.connect(code, settings, ui, frontend).await
 }
 
 #[tauri::command]

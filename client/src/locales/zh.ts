@@ -27,6 +27,8 @@ export default {
   "sidebar.version": "v{version} · 控制端模式",
   "sidebar.toHost": "切换为被控端",
   "sidebar.toHostHint": "切换为被控端（关闭控制台）",
+  "sidebar.versionWeb": "v{version} · 网页控制台",
+  "sidebar.nameHintWeb": "对方电脑上显示的控制端名称（AIRHAND_NAME）",
 
   // 新建连接
   "connect.title": "连接到远程电脑",
@@ -92,6 +94,7 @@ export default {
   "session.clipboard": "剪贴板",
   "session.clipSync": "双向同步剪贴板",
   "session.clipSyncHint": "复制的文本自动出现在另一端",
+  "session.clipSyncHintWeb": "对方复制的文本会复制到这里；这里复制的文本在回到本页面时发过去（浏览器询问时请允许访问剪贴板）",
   "session.clipType": "以键盘输入方式发送剪贴板",
   "session.clipTypeHint": "适用于登录框等禁止粘贴的地方",
   "session.sound": "声音",
@@ -153,6 +156,13 @@ export default {
   "notice.noOpus": "本机不支持 Opus 解码，无法播放远程声音",
   "error.canvas": "无法创建 Canvas",
 
+  // 网页版用不了时的说明
+  "web.insecure.title": "请通过 HTTPS 打开",
+  "web.insecure.body": "浏览器只在安全的页面（HTTPS 或 localhost）上提供视频解码等功能。这个端口同样支持 HTTPS：",
+  "web.insecure.cert": "使用的是自签名证书，浏览器第一次会提示连接不安全，选择继续访问即可。",
+  "web.unsupported.title": "不支持这个浏览器",
+  "web.unsupported.body": "控制台需要 WebCodecs 视频解码，请使用较新版本的 Chrome、Edge、Safari 或 Firefox。",
+
   // 问题（类型，见 Rust 的 problem.rs）：与中转服务器的连接
   "problem.serverUnreachable": "无法连接服务器：{detail}",
   "problem.certMismatch": "服务器证书与程序里固定的指纹不一致，连接可能被人拦截",
@@ -177,4 +187,6 @@ export default {
   "problem.noSession": "会话不存在",
   "problem.noClipboardText": "本机剪贴板没有文本",
   "problem.failed": "出错了：{detail}",
+  "problem.consoleLost": "与 Airhand 网页服务的连接断开了",
+  "problem.clipboardBlocked": "浏览器不允许读取剪贴板，请在地址栏的网站设置里允许访问剪贴板",
 } satisfies Record<string, Msg>;

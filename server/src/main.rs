@@ -29,7 +29,7 @@ fn env_or(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-/// 针对实时画面优化的传输参数（客户端见 `client/src-tauri/src/net.rs`）。
+/// 针对实时画面优化的传输参数（客户端见 `crates/airhand-link/src/net.rs`）。
 ///
 /// QUIC 的空闲超时取两端中较短的一个：客户端设置的更短（10 秒，2 秒保活），掉线检测以客户端为准；
 /// 这里的值兜底那些不发保活的连接。
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
     let cert = tls::load_or_generate(&cert_path, &key_path, &names)?;
     info!("Certificate SHA-256 fingerprint: {}", cert.fingerprint);
     info!(
-        "(put this fingerprint in the client's SERVER_CERT_SHA256, or set AIRHAND_SERVER_FP when building it, to enable certificate pinning)"
+        "(to enable certificate pinning, set AIRHAND_SERVER_FP to this fingerprint when building the client and when starting the web console)"
     );
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());

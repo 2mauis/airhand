@@ -1,4 +1,4 @@
-//! 控制端的单个会话：接收画面转交给前端（WebCodecs 硬件解码），转发输入与设置。
+//! 控制端的单个会话：接收画面转交给控制台（WebCodecs 硬件解码），转发输入与设置。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -12,12 +12,11 @@ use airhand_proto::session::{
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
 use serde::Serialize;
-use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::clipboard::{self, ClipSync};
-use crate::problem::Problem;
+use super::{CLIPBOARD_POLL, ClipboardSync};
+use crate::Problem;
 
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
@@ -25,7 +24,21 @@ fn now_us() -> u64 {
     EPOCH.elapsed().as_micros() as u64
 }
 
-/// 发往前端的会话事件（JSON）。
+/// 会话的画面和事件交给谁：桌面版是 Tauri 的 Channel，网页版是浏览器的 WebSocket。
+///
+/// 返回 `Err` 表示控制台已经不在了（窗口关了、浏览器断开了），会话随之结束。
+pub trait SessionUi: Send + Sync + 'static {
+    /// 画面 / 光标 / 声音数据包，格式见 [`HEADER_LEN`]
+    fn packet(&self, packet: Vec<u8>) -> Result<(), UiClosed>;
+    /// 会话事件（控制台那边是 JSON）
+    fn event(&self, event: SessionEvent) -> Result<(), UiClosed>;
+}
+
+/// 控制台已经关闭
+#[derive(Debug, Clone, Copy)]
+pub struct UiClosed;
+
+/// 发往控制台的会话事件（JSON）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(
     tag = "type",
@@ -62,11 +75,13 @@ pub enum SessionEvent {
     },
     /// 被控端发来的提示，由控制台按自己的界面语言显示
     Notice { notice: NoticeView },
+    /// 被控端复制了文本（只发给浏览器，见 [`super::Frontend::Browser`]；桌面版直接写入本机剪贴板）
+    Clipboard { text: String },
     /// `retry=false` 表示对方主动断开，不应自动重连
     Closed { reason: Problem, retry: bool },
 }
 
-/// [`Notice`] 发给前端时的 JSON 形状：`{ "kind": "captureFailed", "detail": "..." }`
+/// [`Notice`] 发给控制台时的 JSON 形状：`{ "kind": "captureFailed", "detail": "..." }`
 ///（协议里的 `Notice` 用 postcard 编码，不能直接加 serde 的 `tag`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
@@ -177,16 +192,25 @@ impl Default for Stats {
     }
 }
 
-pub struct SessionIo {
+pub(super) struct SessionIo {
     pub send: SendStream,
     pub recv: RecvStream,
-    pub video: Channel<InvokeResponseBody>,
-    pub events: Channel<SessionEvent>,
-    /// 是否同步剪贴板（界面可随时切换）
-    pub clipboard: Arc<AtomicBool>,
+    pub ui: Arc<dyn SessionUi>,
+    pub mode: Mode,
 }
 
-pub async fn run(
+/// 见 [`super::Frontend`]
+pub(super) enum Mode {
+    Desktop {
+        /// 远端→本机 与 本机→远端 共用同一个同步状态，用来抑制回声
+        clip: Arc<tokio::sync::Mutex<Box<dyn ClipboardSync>>>,
+        /// 是否同步剪贴板（界面可随时切换）
+        enabled: Arc<AtomicBool>,
+    },
+    Browser,
+}
+
+pub(super) async fn run(
     sid: u32,
     io: SessionIo,
     tx: mpsc::UnboundedSender<ControllerMsg>,
@@ -195,12 +219,15 @@ pub async fn run(
     let SessionIo {
         mut send,
         mut recv,
-        video,
-        events,
-        clipboard,
+        ui,
+        mode,
     } = io;
-    // 远端→本机 与 本机→远端 共用同一个同步状态，用来抑制回声
-    let clip = Arc::new(tokio::sync::Mutex::new(ClipSync::new()));
+    let local_clip = match mode {
+        Mode::Desktop { clip, enabled } => Some((clip, enabled)),
+        Mode::Browser => None,
+    };
+    // 桌面版收到画面立即确认；浏览器自己确认（见 Frontend::Browser）
+    let ack_here = local_clip.is_some();
 
     let writer = async move {
         while let Some(msg) = rx.recv().await {
@@ -213,12 +240,10 @@ pub async fn run(
     // 统计数据由读循环写入、定时器读取（读循环本身绝不能被 select 取消，否则会破坏帧边界）
     let stats = std::sync::Arc::new(std::sync::Mutex::new(Stats::default()));
 
-    let ev = events.clone();
+    let out = ui.clone();
     let st = stats.clone();
     let ack_tx = tx.clone();
-    let clip_in = clip.clone();
-    let clip_on = clipboard.clone();
-    let clip_tx = tx.clone();
+    let clip_in = local_clip.clone();
     let reader = async move {
         let mut buf = Vec::with_capacity(256 * 1024);
         loop {
@@ -230,7 +255,9 @@ pub async fn run(
             match msg {
                 HostMsg::Video(v) => {
                     // 收到即确认，被控端据此控制在途帧数量
-                    let _ = ack_tx.send(ControllerMsg::Ack { seq: v.seq });
+                    if ack_here {
+                        let _ = ack_tx.send(ControllerMsg::Ack { seq: v.seq });
+                    }
                     {
                         let mut s = st.lock().unwrap();
                         s.frames += 1;
@@ -239,13 +266,10 @@ pub async fn run(
                         s.w = v.width;
                         s.h = v.height;
                     }
-                    let pkt = video_packet(&v);
-                    if video.send(InvokeResponseBody::Raw(pkt)).is_err() {
-                        return Err(ui_closed());
-                    }
+                    out.packet(video_packet(&v)).map_err(|_| ui_closed())?;
                 }
                 HostMsg::Hello(h) => {
-                    let _ = ev.send(SessionEvent::Hello {
+                    let _ = out.event(SessionEvent::Hello {
                         hostname: h.hostname,
                         os: h.os,
                         version: h.version,
@@ -255,7 +279,7 @@ pub async fn run(
                     });
                 }
                 HostMsg::Displays { displays, current } => {
-                    let _ = ev.send(SessionEvent::Displays { displays, current });
+                    let _ = out.event(SessionEvent::Displays { displays, current });
                 }
                 HostMsg::Pong { t } => {
                     let sample = now_us().saturating_sub(t) as f32 / 1000.0;
@@ -266,33 +290,28 @@ pub async fn run(
                     });
                 }
                 HostMsg::Notice(n) => {
-                    let _ = ev.send(SessionEvent::Notice { notice: n.into() });
+                    let _ = out.event(SessionEvent::Notice { notice: n.into() });
                 }
-                HostMsg::Clipboard { text } => {
-                    if clip_on.load(Ordering::Relaxed) {
-                        clip_in.lock().await.apply(text);
+                HostMsg::Clipboard { text } => match &clip_in {
+                    Some((clip, enabled)) => {
+                        if enabled.load(Ordering::Relaxed) {
+                            clip.lock().await.apply(text);
+                        }
                     }
-                }
+                    None => {
+                        let _ = out.event(SessionEvent::Clipboard { text });
+                    }
+                },
                 HostMsg::Bye(reason) => return Err(Problem::from(reason).into()),
                 HostMsg::Cursor(c) => {
-                    if video
-                        .send(InvokeResponseBody::Raw(cursor_packet(&c)))
-                        .is_err()
-                    {
-                        return Err(ui_closed());
-                    }
+                    out.packet(cursor_packet(&c)).map_err(|_| ui_closed())?;
                 }
                 HostMsg::Audio(a) => {
                     st.lock().unwrap().bytes += a.data.len();
-                    if video
-                        .send(InvokeResponseBody::Raw(audio_packet(&a)))
-                        .is_err()
-                    {
-                        return Err(ui_closed());
-                    }
+                    out.packet(audio_packet(&a)).map_err(|_| ui_closed())?;
                 }
                 HostMsg::Encoder(e) => {
-                    let _ = ev.send(SessionEvent::Encoder {
+                    let _ = out.event(SessionEvent::Encoder {
                         codec: e.codec,
                         name: e.name,
                         hardware: e.hardware,
@@ -306,7 +325,8 @@ pub async fn run(
         anyhow::Ok(())
     };
 
-    let ev = events.clone();
+    let out = ui.clone();
+    let ping_tx = tx.clone();
     let ticker = async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -332,23 +352,28 @@ pub async fn run(
                 s.bytes = 0;
                 e
             };
-            let _ = ev.send(event);
-            let _ = tx.send(ControllerMsg::Ping { t: now_us() });
+            let _ = out.event(event);
+            // 也是保活：被控端很久收不到控制端的消息就会结束会话
+            let _ = ping_tx.send(ControllerMsg::Ping { t: now_us() });
         }
         #[allow(unreachable_code)]
         anyhow::Ok(())
     };
 
     let clipper = async move {
-        let mut tick = tokio::time::interval(clipboard::POLL);
+        let Some((clip, enabled)) = local_clip else {
+            // 网页版：浏览器自己读剪贴板
+            return std::future::pending().await;
+        };
+        let mut tick = tokio::time::interval(CLIPBOARD_POLL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
             let mut c = clip.lock().await;
             // 关闭同步时也要消费变化，否则重新打开时会把旧内容发过去
             let Some(text) = c.poll().await else { continue };
-            if clipboard.load(Ordering::Relaxed)
-                && clip_tx.send(ControllerMsg::Clipboard { text }).is_err()
+            if enabled.load(Ordering::Relaxed)
+                && tx.send(ControllerMsg::Clipboard { text }).is_err()
             {
                 break;
             }
@@ -369,14 +394,14 @@ pub async fn run(
     // 对方有意结束（断开所有控制端 / 更换控制码）时不自动重连
     let retry = !reason.is_final();
     info!(sid, retry, "session ended: {reason}");
-    if events.send(SessionEvent::Closed { reason, retry }).is_err() {
+    if ui.event(SessionEvent::Closed { reason, retry }).is_err() {
         warn!(sid, "couldn't tell the console that the session ended");
     }
 }
 
-/// 前端的 Channel 已经关闭（控制台窗口关了），会话也就没必要继续了
+/// 控制台已经关了（窗口关闭 / 浏览器断开），会话也就没必要继续了
 fn ui_closed() -> anyhow::Error {
-    anyhow::anyhow!("the console window was closed")
+    anyhow::anyhow!("the console was closed")
 }
 
 #[cfg(test)]
@@ -444,7 +469,7 @@ mod tests {
         );
     }
 
-    /// 前端（src/lib/api.ts 的 SessionEvent / Notice 类型）依赖这个 JSON 形状
+    /// 控制台（client/src/lib/api.ts 的 SessionEvent / Notice 类型）依赖这个 JSON 形状
     #[test]
     fn event_json_shape() {
         use serde_json::json;
@@ -472,6 +497,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             json!({ "type": "closed", "reason": { "kind": "kicked" }, "retry": false })
+        );
+        let c = SessionEvent::Clipboard { text: "hi".into() };
+        assert_eq!(
+            serde_json::to_value(&c).unwrap(),
+            json!({ "type": "clipboard", "text": "hi" })
         );
     }
 }

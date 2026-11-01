@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux 上跑全部测试：单元测试 + X11 采集/输入 + 声音环回 + 端到端 + 前端。
+# Linux 上跑全部测试：单元测试（含网页控制台） + X11 采集/输入 + 声音环回 + 端到端 + 前端。
 #
 # X11 相关的测试会开全屏窗口、注入键鼠，所以一律放在单独的 Xvfb 虚拟屏幕上跑，不影响当前桌面。
 # 声音测试需要 PulseAudio 或 PipeWire（WSLg 自带），没有时跳过。
@@ -34,10 +34,14 @@ if command -v xclock >/dev/null; then
   PIDS+=($!)
 fi
 
-step "协议 + 服务器"
+step "协议 + 链路库 + 服务器"
 cd "$ROOT"
 cargo test --quiet
 cargo build --quiet -p airhand-server
+
+step "网页控制台"
+cd "$ROOT/web"
+cargo test --quiet
 
 step "客户端单元测试"
 cd "$CLIENT"

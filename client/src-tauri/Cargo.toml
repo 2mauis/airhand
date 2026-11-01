@@ -18,13 +18,12 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 airhand-proto = { path = "../../crates/airhand-proto" }
+# 与中转服务器的连接、控制端会话（与网页控制台共用）
+airhand-link = { path = "../../crates/airhand-link" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
-sha2 = "0.10"
 rand = "0.9"
 anyhow = "1"
 tracing = "0.1"

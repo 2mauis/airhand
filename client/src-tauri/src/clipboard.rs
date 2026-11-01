@@ -4,15 +4,17 @@
 //!   选择所有者变化通知（都不需要打开剪贴板，几乎零开销）；
 //! * 记录"双方已一致"的文本哈希，抑制回声（A 写入 B → B 检测到变化 → 又发回 A）。
 
+use std::future::Future;
 use std::hash::{Hash, Hasher};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use airhand_proto::session::MAX_CLIPBOARD_TEXT;
 
-/// 轮询间隔
-pub const POLL: Duration = Duration::from_millis(300);
+/// 轮询间隔（被控端与控制端相同）
+pub const POLL: Duration = airhand_link::controller::CLIPBOARD_POLL;
 
 pub fn sequence() -> u32 {
     #[cfg(windows)]
@@ -138,6 +140,17 @@ impl ClipSync {
                 tracing::debug!("writing the clipboard failed");
             }
         });
+    }
+}
+
+/// 控制端会话用它同步本机剪贴板（见 `airhand_link::controller::Frontend::Desktop`）
+impl airhand_link::controller::ClipboardSync for ClipSync {
+    fn poll(&mut self) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        Box::pin(ClipSync::poll(self))
+    }
+
+    fn apply(&self, text: String) {
+        ClipSync::apply(self, text)
     }
 }
 

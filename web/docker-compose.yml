@@ -1,0 +1,38 @@
+# Airhand 网页控制台：控制端跑在容器里，用浏览器打开一个端口就能远程控制
+#   启动：AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<指纹> docker compose up -d
+#        （也可以把这些变量写进本目录的 .env 文件，见 .env.example）
+#   打开：在这台电脑上用 http://localhost:8080 ，在其它电脑上用 https://<这台电脑的地址>:8080
+#        （自签名证书，浏览器第一次会提示不安全，确认继续即可）
+name: airhand-web
+services:
+  airhand-web:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    image: airhand-web:latest
+    container_name: airhand-web
+    restart: unless-stopped
+    ports:
+      - "${AIRHAND_WEB_PORT:-8080}:8080" # HTTP 和 HTTPS 共用这一个端口（TCP）
+    volumes:
+      - data:/data # 网页的自签名 HTTPS 证书（保持不变，浏览器就不会每次都提示）
+    environment:
+      # 中转服务器地址（host:port，UDP）
+      AIRHAND_SERVER: ${AIRHAND_SERVER:?set AIRHAND_SERVER to the relay server address, e.g. relay.example.com:4433}
+      # 中转服务器的证书指纹（docker compose logs airhand | grep fingerprint）。留空则不校验证书，仅用于开发
+      AIRHAND_SERVER_FP: ${AIRHAND_SERVER_FP:-}
+      # 被控端托盘里"谁在控制"显示的名称
+      AIRHAND_NAME: ${AIRHAND_NAME:-Airhand Web}
+      # 访问密码（浏览器弹出登录框，用户名随意）。留空则任何能访问这个端口的人都能使用控制台
+      AIRHAND_WEB_PASSWORD: ${AIRHAND_WEB_PASSWORD:-}
+      # 自动生成 HTTPS 证书时写入的域名 / IP（逗号分隔）
+      AIRHAND_WEB_CERT_NAMES: ${AIRHAND_WEB_CERT_NAMES:-localhost}
+      RUST_LOG: info
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  data:

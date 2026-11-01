@@ -21,6 +21,7 @@ dependencies = [
 name = "airhand"
 version = "0.1.0"
 dependencies = [
+ "airhand-link",
  "airhand-proto",
  "anyhow",
  "arboard",
@@ -33,10 +34,7 @@ dependencies = [
  "opus",
  "quinn",
  "rand 0.9.5",
- "rustls",
  "serde",
- "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tokio",
@@ -45,6 +43,21 @@ dependencies = [
  "windows",
  "x11rb",
  "yuvutils-rs",
+]
+
+[[package]]
+name = "airhand-link"
+version = "0.1.0"
+dependencies = [
+ "airhand-proto",
+ "anyhow",
+ "quinn",
+ "rand 0.9.5",
+ "rustls",
+ "serde",
+ "sha2",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

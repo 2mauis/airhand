@@ -1111,3 +1111,11 @@ input[type="range"]::-webkit-slider-thumb {
   opacity: 0.45;
   cursor: default;
 }
+
+/* 网页版：需要 HTTPS 等说明页 */
+.link-btn {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+  user-select: text;
+}

@@ -25,6 +25,8 @@ const en: Record<MsgKey, Msg> = {
   "sidebar.version": "v{version} · Controller mode",
   "sidebar.toHost": "Switch to host",
   "sidebar.toHostHint": "Switch to host (closes the console)",
+  "sidebar.versionWeb": "v{version} · Web console",
+  "sidebar.nameHintWeb": "The name remote computers see for this console (AIRHAND_NAME)",
 
   "connect.title": "Connect to a remote computer",
   "connect.hint": "Right-click the Airhand icon in the remote computer's system tray to see its 6-digit control code",
@@ -85,6 +87,8 @@ const en: Record<MsgKey, Msg> = {
   "session.clipboard": "Clipboard",
   "session.clipSync": "Two-way clipboard sync",
   "session.clipSyncHint": "Copied text shows up on the other side automatically",
+  "session.clipSyncHintWeb":
+    "Text copied on the remote computer is copied here. Text copied here is sent when you come back to this page (allow clipboard access when the browser asks)",
   "session.clipType": "Type clipboard as keystrokes",
   "session.clipTypeHint": "For login boxes and other places that block pasting",
   "session.sound": "Sound",
@@ -143,6 +147,15 @@ const en: Record<MsgKey, Msg> = {
   "notice.noOpus": "This computer can't decode Opus, so remote sound can't be played",
   "error.canvas": "Couldn't create the canvas",
 
+  "web.insecure.title": "Open this page over HTTPS",
+  "web.insecure.body":
+    "Browsers only allow video decoding and the other features the console needs on secure pages (HTTPS or localhost). This port also serves HTTPS:",
+  "web.insecure.cert":
+    "The certificate is self-signed, so the first time the browser warns that the connection isn't private. Choose to continue to the site.",
+  "web.unsupported.title": "This browser isn't supported",
+  "web.unsupported.body":
+    "The console needs WebCodecs video decoding. Please use a recent version of Chrome, Edge, Safari or Firefox.",
+
   "problem.serverUnreachable": "Can't connect to the server: {detail}",
   "problem.certMismatch": "The server certificate doesn't match the pinned fingerprint. Someone may be intercepting the connection",
   "problem.incompatible": (p) =>
@@ -165,6 +178,9 @@ const en: Record<MsgKey, Msg> = {
   "problem.noSession": "Session not found",
   "problem.noClipboardText": "No text on the local clipboard",
   "problem.failed": "Error: {detail}",
+  "problem.consoleLost": "Lost connection to the Airhand web service",
+  "problem.clipboardBlocked":
+    "The browser didn't allow reading the clipboard. Allow clipboard access in the site settings (address bar)",
 };
 
 export default en;

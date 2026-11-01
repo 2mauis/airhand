@@ -3,3 +3,4 @@ node_modules/
 client/dist/
 client/src-tauri/gen/
 *.log
+web/.env

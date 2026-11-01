@@ -1,6 +1,7 @@
 # Airhand 中转服务器
 #   启动：docker compose up -d
 #   查看证书指纹：docker compose logs airhand | grep fingerprint
+# 网页控制台（在浏览器里使用的控制端）见 web/docker-compose.yml
 services:
   airhand:
     build:

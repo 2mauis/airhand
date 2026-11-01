@@ -1,13 +1,12 @@
 // 远程会话：WebCodecs 硬件解码 + Canvas 渲染 + 输入采集 + 光标同步 + 自动重连。
 //
 // 性能要点：
-// * 视频帧通过二进制 Channel 传入（ArrayBuffer，零 JSON），直接切片交给 VideoDecoder；
+// * 视频帧以二进制传入（桌面版是 Tauri Channel，网页版是 WebSocket，零 JSON），直接切片交给 VideoDecoder；
 // * 解码器 optimizeForLatency，帧解码后立即绘制到 desynchronized Canvas，不排队等 vsync；
 // * 鼠标移动按 8ms 合并，按键/点击立即发送；
 // * 不可见的会话自动降到 5fps，节省带宽与对端 CPU；
 // * 只有当前正在查看的会话播放声音，其余会话通知被控端停止采集声音；
 // * 音画同步（可选）：按采集时间把画面推迟到与声音对齐后再解码显示，见 avsync.ts。
-import { Channel } from "@tauri-apps/api/core";
 import {
   api,
   toProblem,
@@ -52,7 +51,7 @@ const BUTTONS: MouseButton[] = ["Left", "Middle", "Right", "Back", "Forward"];
 const MOVE_INTERVAL_MS = 8;
 const BACKGROUND_FPS = 5;
 const MAX_RETRIES = 30;
-/** 二进制包头长度，见 controller/session.rs */
+/** 二进制包头长度，见 crates/airhand-link/src/controller/session.rs */
 const HEADER_LEN = 24;
 /** 等待显示的画面帧太多（异常情况）时全部立即解码 */
 const MAX_QUEUED_FRAMES = 120;
@@ -201,20 +200,21 @@ export class RemoteSession {
   /** 建立连接。首次连接失败会抛出错误。 */
   async start(): Promise<void> {
     const gen = ++this.gen;
-    const video = new Channel<ArrayBuffer>();
-    video.onmessage = (buf) => {
-      if (gen === this.gen) this.onBinary(buf);
-    };
-    const events = new Channel<SessionEvent>();
-    events.onmessage = (ev) => {
-      if (gen === this.gen) this.onEvent(ev);
+    // 重连后旧连接的数据可能还会到达，按 gen 丢掉
+    const sink = {
+      packet: (data: Uint8Array) => {
+        if (gen === this.gen) this.onBinary(data);
+      },
+      event: (ev: SessionEvent) => {
+        if (gen === this.gen) this.onEvent(ev);
+      },
     };
     this.resetDecoder();
     this.audio.reset();
     this.sync.reset();
     // 在连接之前清掉旧提示：被控端紧跟在 Hello 后面发的提示可能比 connect 的返回值先到
     this.notice = null;
-    const info = await api.connect(this.code, this.settings, video, events, this.clipboardSync);
+    const info = await api.connect(this.code, this.settings, sink, this.clipboardSync);
     if (gen !== this.gen || this.disposed) {
       void api.disconnect(info.sid);
       return;
@@ -326,15 +326,16 @@ export class RemoteSession {
     this.emit();
   }
 
-  private onBinary(buf: ArrayBuffer) {
-    if (buf.byteLength < HEADER_LEN) return;
-    const dv = new DataView(buf);
+  /** 一个数据包（可能是更大的缓冲区中的一段：网页版前面还有 4 字节的 ch） */
+  private onBinary(pkt: Uint8Array) {
+    if (pkt.byteLength < HEADER_LEN) return;
+    const dv = new DataView(pkt.buffer, pkt.byteOffset, pkt.byteLength);
     const kind = dv.getUint8(0);
     // 采集时间（被控端时钟，微秒）；在 2^53 以内，转成 number 不丢精度
     const hostUs = Number(dv.getBigUint64(16, true));
-    if (kind === 1) this.onVideo(dv, buf, hostUs);
-    else if (kind === 2) this.onCursor(dv, buf);
-    else if (kind === 3) this.audio.push(dv.getUint8(1) === 1, hostUs, new Uint8Array(buf, HEADER_LEN));
+    if (kind === 1) this.onVideo(dv, pkt, hostUs);
+    else if (kind === 2) this.onCursor(dv, pkt);
+    else if (kind === 3) this.audio.push(dv.getUint8(1) === 1, hostUs, pkt.subarray(HEADER_LEN));
   }
 
   // ───────────────────────── 解码 ─────────────────────────
@@ -362,7 +363,7 @@ export class RemoteSession {
     return this.sync.enabled;
   }
 
-  private onVideo(dv: DataView, buf: ArrayBuffer, hostUs: number) {
+  private onVideo(dv: DataView, pkt: Uint8Array, hostUs: number) {
     const key = dv.getUint8(1) === 1;
     const v: PendingVideo = {
       key,
@@ -371,7 +372,7 @@ export class RemoteSession {
       width: dv.getUint16(8, true),
       height: dv.getUint16(10, true),
       hostUs,
-      data: new Uint8Array(buf, HEADER_LEN),
+      data: pkt.subarray(HEADER_LEN),
       due: 0,
     };
     if (key) {
@@ -569,18 +570,18 @@ export class RemoteSession {
 
   // ───────────────────────── 光标 ─────────────────────────
 
-  private onCursor(dv: DataView, buf: ArrayBuffer) {
+  private onCursor(dv: DataView, pkt: Uint8Array) {
     this.cursorVisible = dv.getUint8(1) === 1;
     if (dv.getUint16(2, true) === 1) {
       const w = dv.getUint16(8, true);
       const h = dv.getUint16(10, true);
-      if (w > 0 && h > 0 && buf.byteLength >= HEADER_LEN + w * h * 4) {
+      if (w > 0 && h > 0 && pkt.byteLength >= HEADER_LEN + w * h * 4) {
         this.cursorRaw = {
           w,
           h,
           hx: dv.getUint16(12, true),
           hy: dv.getUint16(14, true),
-          rgba: new Uint8ClampedArray(buf, HEADER_LEN, w * h * 4),
+          rgba: new Uint8ClampedArray(pkt.buffer, pkt.byteOffset + HEADER_LEN, w * h * 4),
         };
         this.cursorScale = 0;
       }

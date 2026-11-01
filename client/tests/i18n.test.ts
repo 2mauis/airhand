@@ -70,8 +70,8 @@ async function rustVariants(file: string, enumName: string): Promise<string[]> {
 
 /** Rust 端每一种问题 / 提示，前端两种语言都要有词条（Rust 只传类型，文字全在前端） */
 test("Rust 的 Problem / NoticeView 在两种语言里都有词条", async () => {
-  const problems = await rustVariants("../src-tauri/src/problem.rs", "Problem");
-  const notices = await rustVariants("../src-tauri/src/controller/session.rs", "NoticeView");
+  const problems = await rustVariants("../../crates/airhand-link/src/problem.rs", "Problem");
+  const notices = await rustVariants("../../crates/airhand-link/src/controller/session.rs", "NoticeView");
   assert.ok(problems.length >= 15 && problems.includes("certMismatch"), `解析结果不对: ${problems}`);
   assert.deepEqual(notices, ["noDisplays", "wayland", "captureFailed"]);
   const before = getLang();

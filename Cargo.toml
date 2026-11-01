@@ -1,9 +1,9 @@
-# 服务端工作区（协议库 + 中转服务器）。
-# 客户端（Tauri）位于 client/src-tauri，是一个独立的 Cargo 工作区，
-# 这样 Docker 构建服务端时无需拉取任何 GUI 依赖。
+# 服务端工作区：协议库、客户端链路库、中转服务器。
+# 桌面客户端（client/src-tauri）和网页控制台（web/）各自是独立的 Cargo 工作区，通过路径依赖使用 crates/ 里的库，
+# 这样 Docker 构建中转服务器时既不需要 GUI 依赖，也不需要网页控制台的代码。
 [workspace]
 resolver = "3"
-members = ["crates/airhand-proto", "server"]
+members = ["crates/airhand-proto", "crates/airhand-link", "server"]
 
 [workspace.package]
 version = "0.1.0"

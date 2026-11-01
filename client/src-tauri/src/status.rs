@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
+use airhand_link::ServerState;
+use airhand_link::net::Report;
 use airhand_proto::signal::Peer;
 use serde::Serialize;
 use tokio::sync::watch;
-
-use crate::problem::Problem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -15,17 +15,6 @@ pub enum Mode {
     Host,
     /// 控制端
     Controller,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "state", rename_all = "lowercase")]
-pub enum ServerState {
-    Connecting,
-    Connected,
-    /// 断开的原因（类型，由托盘 / 控制台按各自的界面语言显示）
-    Disconnected {
-        reason: Problem,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,4 +62,10 @@ impl HubExt for StatusHub {
             changed
         });
     }
+}
+
+/// 把与服务器的连接状态写进 `hub`（给 [`airhand_link::net::Reconnect`] 和控制端服务用）
+pub fn server_reporter(hub: &StatusHub) -> Report {
+    let hub = hub.clone();
+    Arc::new(move |s| hub.set_server(s))
 }

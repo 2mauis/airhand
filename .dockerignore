@@ -1,6 +1,13 @@
-target
-client
-assets
+# 构建上下文是仓库根目录，中转服务器（server/Dockerfile）和网页控制台（web/Dockerfile）共用这一份。
+# （按 Dockerfile 分开的 web/Dockerfile.dockerignore 只有 Docker BuildKit 支持，Podman / Buildah 不认，所以不用。）
+# 各镜像只 COPY 自己需要的目录，上下文里多出来的小文件不影响构建缓存。
+.git
+**/target
 **/node_modules
 **/*.md
-.git
+assets
+data
+client/dist
+# 桌面客户端的 Rust 部分，两个镜像都用不到
+client/src-tauri
+web/.env

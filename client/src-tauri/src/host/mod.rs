@@ -12,6 +12,8 @@ pub(crate) mod x11;
 
 use std::time::Duration;
 
+use airhand_link::ServerState;
+use airhand_link::net::{self, Reconnect};
 use airhand_proto::framing::{read_msg, write_msg};
 use airhand_proto::session::ByeReason;
 use airhand_proto::signal::{ClientMsg, Reclaim, ServerMsg};
@@ -22,8 +24,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{info, warn};
 
-use crate::net::{self, Reconnect};
-use crate::status::{Controller, ServerState, StatusHub};
+use crate::config;
+use crate::status::{Controller, StatusHub};
 
 /// 在"每显示器 DPI 感知"上下文中执行（线程级）。
 ///
@@ -83,7 +85,7 @@ impl Drop for HostService {
 
 async fn run(hub: StatusHub, mut cmds: mpsc::UnboundedReceiver<HostCmd>) {
     let mut reclaim: Option<Reclaim> = None;
-    let mut reconnect = Reconnect::new(hub.clone());
+    let mut reconnect = Reconnect::new(crate::status::server_reporter(&hub));
     loop {
         reconnect.begin();
         let result = connect_once(&hub, &mut reclaim, &mut cmds).await;
@@ -101,7 +103,7 @@ async fn connect_once(
     reclaim: &mut Option<Reclaim>,
     cmds: &mut mpsc::UnboundedReceiver<HostCmd>,
 ) -> Result<()> {
-    let mut sig = net::connect_signal(Role::Host).await?;
+    let mut sig = net::connect_signal(&config::link(), Role::Host).await?;
     write_msg(&mut sig.send, &ClientMsg::Register { reclaim: *reclaim }).await?;
 
     // 独立的读任务，保证 select 中的接收是取消安全的

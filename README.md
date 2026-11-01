@@ -6,7 +6,7 @@
 
 ---
 
-Airhand is a single program that is both the **host** (the computer being controlled) and the **controller** (the computer you control it from). It runs on **Windows** and **Linux** (X11 desktops). A small relay server, deployed with one Docker Compose command, handles signaling and forwards traffic.
+Airhand is a single program that is both the **host** (the computer being controlled) and the **controller** (the computer you control it from). It runs on **Windows** and **Linux** (X11 desktops). A small relay server, deployed with one Docker Compose command, handles signaling and forwards traffic. The controller can also be deployed with Docker Compose as a **web console** that you use from a browser.
 
 > **Status:** under active development. The protocol still changes between versions, so the clients and the server must be built from the same version (a mismatch is detected and reported, see [Protocol versions](#protocol-versions)).
 
@@ -14,6 +14,7 @@ Airhand is a single program that is both the **host** (the computer being contro
 
 - **Host by default**: after launch there is only a tray icon, no window, and no WebView is started
 - **Controller console**: control **several computers at once**, switch between them, or watch them all in a multi-screen overview
+- **Web console**: start the controller with Docker Compose and open one port in a browser; nothing to install on the computer you control from (see [Web console](#web-console-docker))
 - **Low latency, low bandwidth**: hardware **AV1 / HEVC / H.264** encoding, no frames when the screen is still, adaptive bitrate, the cursor moves locally with no lag
 - **Audio**: the host's system sound is streamed to the controller, with optional A/V sync for watching video
 - **Practical tools**: two-way clipboard sync, typing the clipboard as keystrokes, system shortcuts (Win, Alt+Tab, Ctrl+Shift+Esc…), multiple monitors, fullscreen with keyboard lock
@@ -26,6 +27,7 @@ Airhand is a single program that is both the **host** (the computer being contro
 - [Quick start](#quick-start)
 - [Usage](#usage)
 - [Server configuration](#server-configuration)
+- [Web console (Docker)](#web-console-docker)
 - [Building the client](#building-the-client)
 - [How it works](#how-it-works)
 - [Security](#security)
@@ -53,6 +55,8 @@ Airhand is a single program that is both the **host** (the computer being contro
    ```
 
 3. **Run it on both computers.** On the remote one, right-click the tray icon to see its 6-digit **control code**. On yours, choose **Switch to controller** in the tray menu and enter the code.
+
+   If you'd rather not install the client on the computer you control from, use the [web console](#web-console-docker) instead: `cd web && AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<fingerprint> docker compose up -d`, then open it in a browser.
 
 ## Usage
 
@@ -103,6 +107,43 @@ Environment variables (see `docker-compose.yml`):
 
 The image is based on distroless, runs as a non-root user, and is about 28 MB.
 
+## Web console (Docker)
+
+The controller can also run in a container: start it with Docker Compose and open one port in a browser to get the console, with nothing to install or build on the computer you control from. It's the same console as the desktop one (several sessions, multi-screen overview, quality, sound, clipboard…); the computers being controlled still run the Airhand client.
+
+```bash
+cd web
+AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<relay certificate fingerprint> docker compose up -d
+# or: cp .env.example .env, edit it, then just docker compose up -d
+```
+
+Then open it in a browser:
+
+- On the computer running the container: `http://localhost:8080`
+- From other computers: `https://<this computer's address>:8080`
+
+The same port speaks both HTTP and HTTPS. Browsers only offer WebCodecs video decoding on secure pages (HTTPS or localhost), so use https:// from other computers (opened over http://, the page links you to the https address). The certificate is a self-signed one generated on first start and kept in a data volume; the first time, the browser warns about it, and you continue to the site. Needs Chrome / Edge, Safari 16.4+ or Firefox 130+.
+
+Environment variables (see `web/docker-compose.yml` and `web/.env.example`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `AIRHAND_SERVER` | (required) | Relay server address `host:port` |
+| `AIRHAND_SERVER_FP` | empty | Relay certificate fingerprint. Empty means the certificate is **not verified**; for development only (the console shows "Not pinned") |
+| `AIRHAND_NAME` | `Airhand Web` | The name shown in the host's tray under who is controlling it |
+| `AIRHAND_WEB_PASSWORD` | empty | Access password: the browser shows a login prompt, any user name works. Empty means anyone who can reach the port can use the console (connecting to a computer still needs its control code) |
+| `AIRHAND_WEB_PORT` | `8080` | Port published on the Docker host |
+| `AIRHAND_WEB_CERT_NAMES` | `localhost` | Names / IPs written into the generated HTTPS certificate (comma-separated). List the address you actually use if you want the OS to trust the certificate |
+| `AIRHAND_WEB_CERT` / `AIRHAND_WEB_KEY` | `/data/cert.pem` / `/data/key.pem` | HTTPS certificate paths; mount your own certificate here to use it |
+| `RUST_LOG` | `info` | Log level |
+
+- Each browser tab is a separate console with its own connection to the relay; closing or reloading the tab disconnects its sessions (the browser asks first while there are sessions). If the connection to the web service drops, the page reconnects and the sessions resume on their own
+- Frames are acknowledged only once the browser has them, so the host's in-flight frame control covers the service-to-browser link too, and a slow link there doesn't make frames pile up. The latency in the toolbar is the service-host round trip plus the browser-service round trip, so run the service close to the browser (on the same LAN, for example)
+- The clipboard is the browser's: text copied on the remote computer is written to this computer's clipboard (while the page is in front); text copied here is sent when you come back to the page, which needs the browser's permission to read the clipboard (Chrome / Edge ask the first time). Firefox doesn't let pages read the clipboard on their own, so there it only syncs from the remote side
+- Outside fullscreen the browser keeps some shortcuts (Ctrl+W, Ctrl+T…) for itself; in fullscreen Chrome / Edge lock the keyboard, so the Win key, Alt+Tab and the like go to the remote computer
+- Behind a reverse proxy (for your own domain and certificate): proxy to the container's `http://…:8080`, forward WebSockets (`/ws`) and keep the `Host` header (or set `X-Forwarded-Host`), otherwise the WebSocket is rejected as cross-site. A sub-path works too
+- The image is based on distroless, runs as a non-root user, and is about 30 MB. It only needs outbound UDP (to the relay) and this one inbound TCP port
+
 ## Building the client
 
 Requirements: Rust (stable), Node.js 20+, CMake (to build libopus).
@@ -116,7 +157,7 @@ Requirements: Rust (stable), Node.js 20+, CMake (to build libopus).
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
   ```
 
-The server address and certificate fingerprint are **compiled into the program**: set `AIRHAND_SERVER` and `AIRHAND_SERVER_FP` at build time (as in [Quick start](#quick-start)), or change the defaults in `client/src-tauri/src/config.rs`. Without `AIRHAND_SERVER` the client connects to `127.0.0.1:4433`.
+The server address and certificate fingerprint are **compiled into the program**: set `AIRHAND_SERVER` and `AIRHAND_SERVER_FP` at build time (as in [Quick start](#quick-start)), or change the defaults in `client/src-tauri/src/config.rs`. Without `AIRHAND_SERVER` the client connects to `127.0.0.1:4433`. A malformed fingerprint (it must be 64 hex digits; `:` and spaces are allowed) fails the build.
 
 > When `AIRHAND_SERVER_FP` is empty the **server certificate is not verified**, which leaves you open to man-in-the-middle attacks. Use that for development only; the console then shows "Not pinned" at the top left.
 
@@ -139,7 +180,7 @@ npm run tauri build
 ### Architecture
 
 ```
- Host (Windows; Linux: see table)        airhand-server (Docker)                  Controller (Tauri)
+ Host (Windows; Linux: see table)        airhand-server (Docker)                  Controller (Tauri / web)
 ┌───────────────────────────┐            ┌───────────────────────────┐            ┌───────────────────────────┐
 │ DXGI capture (GPU)        │            │ Control-code registry     │            │ WebCodecs HW decode       │
 │ SIMD scale + NV12 convert │  QUIC/TLS  │ Session pairing           │  QUIC/TLS  │ Low-latency Canvas        │
@@ -151,12 +192,16 @@ npm run tauri build
 
 The first bidirectional stream on every QUIC connection is the **control stream** (signaling). For each remote-control session both sides open another bidirectional stream; the server pairs them by session ID and from then on **only forwards bytes, it never parses the video**. Every message is a `u32` length prefix followed by a postcard-encoded payload.
 
+The web console splits the controller on the right in two: the QUIC connection and session handling run in `airhand-web` (the container), while decoding, rendering and input capture stay in the browser, with one WebSocket in between. Packets are forwarded to the browser unchanged (with a 4-byte session number in front), and the browser acknowledges the frames.
+
 | Directory | Contents |
 |---|---|
 | `crates/airhand-proto` | Protocol: signaling, session messages, framing |
+| `crates/airhand-link` | The client side of the relay link: QUIC, certificate pinning, reconnects, UI-independent controller sessions, `Problem`. Shared by the desktop client and the web console |
 | `server/` | Relay server (quinn + rustls) and its `Dockerfile` |
-| `client/src-tauri/` | Client, Rust side: host `host/`, controller `controller/`, tray, networking |
-| `client/src/` | Console UI (React 19 + TypeScript, no UI library); strings in `client/src/locales/` |
+| `web/` | Web console service (axum: static files + WebSocket, HTTP and HTTPS on one port), its `Dockerfile` and `docker-compose.yml`. A separate Cargo workspace, like `client/src-tauri/` |
+| `client/src-tauri/` | Desktop client, Rust side: host `host/`, tray, console window and commands |
+| `client/src/` | Console UI (React 19 + TypeScript, no UI library), shared by the desktop and web consoles, which differ only in `client/src/lib/backend/`; strings in `client/src/locales/` |
 | `assets/icon.svg` | Application icon source |
 
 How each host stage is implemented on the two platforms:
@@ -220,6 +265,7 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 - The console's WebView needs a data directory: it lives in a random subdirectory of the temp directory, runs in private mode (no cookies or cache saved), and is deleted when the window closes or the program exits. If the process is killed, leftovers are removed on the next start
 - On Linux, the few things that can only be handed over as files (the tray icon for AppIndicator, WebKitGTK's GStreamer plugin cache) live in a random per-process directory under `XDG_RUNTIME_DIR` (a RAM disk) that is removed on exit, including on SIGTERM / SIGINT. The Mesa / NVIDIA on-disk shader caches are turned off
 - Controller settings live in memory only
+- All of the above is about the desktop client. The web console is a service you deploy: it keeps its self-signed HTTPS certificate in a data volume, and the browser also keeps settings in memory only (plus a session cookie when a password is set)
 
 ## Security
 
@@ -228,6 +274,7 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 - Getting a control code back after a reconnect requires a random secret, so nobody else can claim it
 - The host's tray always shows who is controlling the computer; disconnect them or change the code with one click
 - The relay server can see the content of session streams (TLS ends at the server), so run it on a machine you trust
+- Web console: the WebSocket only accepts pages from the same site (so other websites can't connect through your browser); an access password can be set (HTTP Basic login, then an HttpOnly, SameSite=Strict cookie; wrong passwords are answered with a delay); use HTTPS from other computers. The web console sees the picture too, so run it on a machine you trust. Everyone using it reaches the relay from that machine's IP, so they share the brute-force allowance
 
 ## Known limitations
 
@@ -237,13 +284,17 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 - Without elevated privileges on Windows, UAC prompts and the lock screen can't be captured or controlled (they are on the secure desktop; that would need a SYSTEM service), and `Ctrl+Alt+Del` can't be injected. On Linux the lock screen is similar (the screensaver grabs the keyboard and mouse)
 - The clipboard syncs text only, not files
 - Audio flows from host to controller only; the controller's microphone isn't forwarded. Audio is captured after the volume control, so a muted host sends silence
+- Web console: reloading or closing the tab disconnects its sessions; in Firefox, text copied locally isn't synced to the remote side automatically; outside fullscreen some shortcuts (Ctrl+W…) can't reach the remote computer
 
 ## Development
 
 ### Tests
 
 ```bash
-# repository root: protocol + server
+# repository root: protocol + link library + server
+cargo test
+
+# web/: web console (WebSocket protocol, password, HTTPS certificate)
 cargo test
 
 # client/: UI (jitter buffer and A/V sync simulations, H.264 conversion, UI strings)
@@ -283,6 +334,17 @@ cargo run --release --example encode_bench
 ```
 
 Use release builds when judging smoothness or A/V sync: debug builds scale very slowly (4K → 1080p takes about 0.5 s per frame).
+
+### Web console
+
+```bash
+# build the UI, then start the service in web/ (connects to a server on 127.0.0.1:4433, serves ../client/dist); open http://localhost:8080
+(cd client && npm run build)
+cd web && cargo run
+# while working on the UI: npm run dev in client/ and open http://localhost:1420 (/ws is proxied to airhand-web on port 8080)
+```
+
+The WebSocket protocol between the browser and the service is described at the top of `web/src/console.rs`.
 
 ### Linux / WSL
 

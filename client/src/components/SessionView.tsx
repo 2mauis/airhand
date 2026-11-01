@@ -1,4 +1,3 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { type MsgKey, t, useT } from "../lib/i18n";
@@ -85,15 +84,14 @@ export function SessionView({ s }: { s: RemoteSession }) {
   const closeMenu = useCallback(() => setMenu(null), []);
   const toggleMenu = (m: Menu) => setMenu((cur) => (cur === m ? null : m));
 
-  // 退出全屏（例如按了系统快捷键）时同步状态
-  useEffect(() => {
-    const w = getCurrentWindow();
-    const un = w.onResized(async () => {
-      const fs = await w.isFullscreen();
-      if (!fs && store.get().immersive) store.setImmersive(false);
-    });
-    return () => void un.then((f) => f());
-  }, []);
+  // 窗口退出全屏（例如按了系统快捷键）时同步状态
+  useEffect(
+    () =>
+      api.onWindowFullscreenExit(() => {
+        if (store.get().immersive) store.setImmersive(false);
+      }),
+    [],
+  );
 
   useEffect(() => {
     if (!toast) return;
@@ -112,7 +110,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
       keyboardApi()?.unlock?.();
       if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
     }
-    await getCurrentWindow().setFullscreen(next).catch(() => {});
+    await api.setWindowFullscreen(next).catch(() => {});
     s.focus();
   };
 
@@ -122,7 +120,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
       if (!document.fullscreenElement && store.get().immersive) {
         keyboardApi()?.unlock?.();
         store.setImmersive(false);
-        void getCurrentWindow().setFullscreen(false).catch(() => {});
+        void api.setWindowFullscreen(false).catch(() => {});
       }
     };
     document.addEventListener("fullscreenchange", onChange);
@@ -265,7 +263,9 @@ export function SessionView({ s }: { s: RemoteSession }) {
                 <label className="dd-item toggle">
                   <span>
                     {t("session.clipSync")}
-                    <span className="muted small block">{t("session.clipSyncHint")}</span>
+                    <span className="muted small block">
+                      {t(api.kind === "web" ? "session.clipSyncHintWeb" : "session.clipSyncHint")}
+                    </span>
                   </span>
                   <input
                     type="checkbox"

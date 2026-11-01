@@ -6,7 +6,7 @@
 
 ---
 
-Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑）和**控制端**（你用来操作的电脑），支持 **Windows** 和 **Linux**（X11 桌面）。另有一个很小的中转服务器，用 Docker Compose 一条命令部署，负责信令和转发。
+Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑）和**控制端**（你用来操作的电脑），支持 **Windows** 和 **Linux**（X11 桌面）。另有一个很小的中转服务器，用 Docker Compose 一条命令部署，负责信令和转发。控制端也可以用 Docker Compose 部署成**网页控制台**，在浏览器里使用。
 
 > **状态：**开发中。协议在版本之间还会变化，客户端和服务器需要用同一个版本构建（版本不一致时会检测出来并提示，见[协议版本](#协议版本)）。
 
@@ -14,6 +14,7 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
 
 - **默认是被控端**：启动后只有一个托盘图标，没有窗口，也不启动 WebView
 - **控制台**：**同时控制多台电脑**，随时切换，或者在多屏总览里同时看所有画面
+- **网页控制台**：控制端用 Docker Compose 启动，浏览器打开一个端口就能用，操作的电脑上什么都不用装（见[网页控制台](#网页控制台docker)）
 - **低延迟、省带宽**：硬件 **AV1 / HEVC / H.264** 编码，画面不变就不发帧，自适应码率，鼠标指针在本地移动、没有延迟
 - **声音**：被控端的系统声音同步到控制端，看视频时可以打开音画同步
 - **实用工具**：剪贴板双向同步、以键盘输入方式发送剪贴板、系统快捷键（Win、Alt+Tab、Ctrl+Shift+Esc 等）、多显示器、全屏时锁定键盘
@@ -26,6 +27,7 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
 - [快速开始](#快速开始)
 - [使用](#使用)
 - [服务端配置](#服务端配置)
+- [网页控制台（Docker）](#网页控制台docker)
 - [构建客户端](#构建客户端)
 - [工作原理](#工作原理)
 - [安全](#安全)
@@ -53,6 +55,8 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
    ```
 
 3. **两台电脑上都运行它**。在被控的电脑上右键托盘图标，看到 6 位**控制码**；在你自己的电脑上从托盘菜单选择**切换为控制端**，输入控制码。
+
+   不想在操作的电脑上装客户端的话，也可以用[网页控制台](#网页控制台docker)：`cd web && AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<指纹> docker compose up -d`，然后用浏览器打开。
 
 ## 使用
 
@@ -103,6 +107,43 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
 
 镜像基于 distroless、以非 root 用户运行，约 28 MB。
 
+## 网页控制台（Docker）
+
+控制端也可以跑在容器里：用 Docker Compose 启动，浏览器打开一个端口就是控制台，操作的电脑上不用安装或构建任何东西。界面和桌面版的控制台完全一样（多会话、多屏总览、画质、声音、剪贴板……）；被控的电脑仍然运行 Airhand 客户端。
+
+```bash
+cd web
+AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<服务器证书指纹> docker compose up -d
+# 也可以 cp .env.example .env，改好后直接 docker compose up -d
+```
+
+然后用浏览器打开：
+
+- 运行容器的这台电脑：`http://localhost:8080`
+- 其它电脑：`https://<这台电脑的地址>:8080`
+
+同一个端口同时支持 HTTP 和 HTTPS。浏览器只在安全的页面（HTTPS 或 localhost）上提供 WebCodecs 视频解码，所以从其它电脑访问要用 https://（用 http:// 打开时页面会给出 https 的链接）。证书是第一次启动时生成的自签名证书，保存在数据卷里，浏览器第一次会提示不安全，确认继续即可。需要 Chrome / Edge、Safari 16.4+ 或 Firefox 130+。
+
+环境变量（见 `web/docker-compose.yml` 和 `web/.env.example`）：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `AIRHAND_SERVER` | （必填） | 中转服务器地址 `host:port` |
+| `AIRHAND_SERVER_FP` | 空 | 中转服务器的证书指纹。留空则**不校验证书**，只适合开发环境（控制台显示"未固定证书"） |
+| `AIRHAND_NAME` | `Airhand Web` | 被控端托盘里"谁在控制"显示的名称 |
+| `AIRHAND_WEB_PASSWORD` | 空 | 访问密码：浏览器弹出登录框，用户名随意。留空则任何能访问这个端口的人都能使用控制台（连接每台电脑仍然需要它的控制码） |
+| `AIRHAND_WEB_PORT` | `8080` | 映射到宿主机的端口 |
+| `AIRHAND_WEB_CERT_NAMES` | `localhost` | 自动生成 HTTPS 证书时写入的域名 / IP（逗号分隔）。想把证书导入系统信任时，填上实际访问用的地址 |
+| `AIRHAND_WEB_CERT` / `AIRHAND_WEB_KEY` | `/data/cert.pem` / `/data/key.pem` | HTTPS 证书路径，用自己的证书时挂载进来 |
+| `RUST_LOG` | `info` | 日志级别 |
+
+- 每个浏览器标签页是一个独立的控制台，有自己到中转服务器的连接；关闭或刷新标签页会断开它的会话（有会话时浏览器会先确认）。和网页服务的连接断了会自动重连，会话随后自动恢复
+- 画面要等浏览器收到后才确认，被控端的在途帧控制因此把"服务 → 浏览器"这段网络也算进去，这段网络慢时画面不会越积越多。工具栏显示的延迟 = 服务到被控端的往返 + 浏览器到服务的往返，所以服务最好部署在离浏览器近的地方（例如同一个局域网）
+- 剪贴板用的是浏览器的剪贴板：对方复制的文本写进本机剪贴板（页面在前台时）；本机复制的文本在回到这个页面时发给对方，需要浏览器允许读取剪贴板（Chrome / Edge 第一次会询问）。Firefox 不允许网页自动读取剪贴板，只能从对方同步过来
+- 不全屏时，Ctrl+W、Ctrl+T 等快捷键会被浏览器拦截；全屏时 Chrome / Edge 会锁定键盘，Win、Alt+Tab 等也发给远端
+- 放在反向代理后面（例如用自己的域名和证书）：代理到容器的 `http://…:8080`，需要转发 WebSocket（`/ws`）并保留 `Host` 头（或设置 `X-Forwarded-Host`），否则会被当成跨站请求拒绝。可以放在子路径下
+- 镜像基于 distroless、以非 root 用户运行，约 30 MB。只需要出站的 UDP（到中转服务器）和入站的这一个 TCP 端口
+
 ## 构建客户端
 
 需要：Rust（stable）、Node.js 20+、CMake（编译 libopus）。
@@ -116,7 +157,7 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
   ```
 
-服务器地址和证书指纹**编译进程序**：构建时设置 `AIRHAND_SERVER` 和 `AIRHAND_SERVER_FP`（同[快速开始](#快速开始)），或者修改 `client/src-tauri/src/config.rs` 里的默认值。不设置 `AIRHAND_SERVER` 时连接 `127.0.0.1:4433`。
+服务器地址和证书指纹**编译进程序**：构建时设置 `AIRHAND_SERVER` 和 `AIRHAND_SERVER_FP`（同[快速开始](#快速开始)），或者修改 `client/src-tauri/src/config.rs` 里的默认值。不设置 `AIRHAND_SERVER` 时连接 `127.0.0.1:4433`。指纹的格式不对（不是 64 位十六进制，允许用 `:` 或空格分隔）时构建会直接报错。
 
 > `AIRHAND_SERVER_FP` 留空时**不校验服务器证书**，无法防止中间人攻击，只适合开发环境；这时控制台左上角会显示"未固定证书"。
 
@@ -139,7 +180,7 @@ npm run tauri build
 ### 架构
 
 ```
- 被控端 (Windows，Linux 见下表)       airhand-server (Docker)                 控制端 (Tauri)
+ 被控端 (Windows，Linux 见下表)       airhand-server (Docker)                 控制端 (Tauri / 网页)
 ┌──────────────────────┐            ┌──────────────────────┐            ┌──────────────────────┐
 │ DXGI 桌面复制 (GPU)   │            │ 控制码注册 / 找回     │            │ WebCodecs 硬件解码    │
 │ SIMD 缩放 + NV12 转换 │  QUIC/TLS  │ 会话配对              │  QUIC/TLS  │ Canvas 低延迟渲染     │
@@ -151,12 +192,16 @@ npm run tauri build
 
 每条 QUIC 连接上的第一条双向流是**控制流**（信令）。每建立一个远控会话，双方各再开一条双向流，服务器按会话 ID 把两条流配对，之后**只转发字节、不解析画面**。每条消息是 `u32` 长度前缀加 postcard 编码的内容。
 
+网页控制台把右边的控制端拆成两半：QUIC 连接和会话管理在 `airhand-web`（容器）里，解码、渲染、输入采集仍在浏览器里，两者之间是一条 WebSocket。画面原样转发给浏览器（每个数据包前面加 4 字节的会话编号），浏览器收到后回确认。
+
 | 目录 | 内容 |
 |---|---|
 | `crates/airhand-proto` | 协议：信令、会话消息、帧格式 |
+| `crates/airhand-link` | 客户端到中转服务器的链路：QUIC 连接、证书固定、断线重连，与界面无关的控制端会话，`Problem`。桌面客户端和网页控制台共用 |
 | `server/` | 中转服务器（quinn + rustls）及其 `Dockerfile` |
-| `client/src-tauri/` | 客户端 Rust 部分：被控端 `host/`、控制端 `controller/`、托盘、网络 |
-| `client/src/` | 控制台界面（React 19 + TypeScript，不依赖 UI 库）；文案在 `client/src/locales/` |
+| `web/` | 网页控制台服务（axum：静态网页 + WebSocket，HTTP / HTTPS 同一端口）及其 `Dockerfile`、`docker-compose.yml`。和 `client/src-tauri/` 一样是独立的 Cargo 工作区 |
+| `client/src-tauri/` | 桌面客户端 Rust 部分：被控端 `host/`、托盘、控制台窗口和命令 |
+| `client/src/` | 控制台界面（React 19 + TypeScript，不依赖 UI 库），桌面版和网页版共用，区别只在 `client/src/lib/backend/`；文案在 `client/src/locales/` |
 | `assets/icon.svg` | 应用图标源文件 |
 
 被控端各环节在两个平台上的实现：
@@ -220,6 +265,7 @@ npm run tauri build
 - 控制台的 WebView 需要数据目录：放在临时目录下的随机子目录，开启隐私模式（不保存 Cookie 和缓存），关闭窗口或退出程序时删除；进程被强制结束时，下次启动会清理残留
 - Linux 上几样只能以文件形式交出去的东西（交给 AppIndicator 的托盘图标、WebKitGTK 的 GStreamer 插件缓存）放在 `XDG_RUNTIME_DIR`（内存盘）里本进程专用的随机目录，退出时删除（收到 SIGTERM / SIGINT 也一样）；Mesa / NVIDIA 的着色器磁盘缓存直接关闭
 - 控制端的设置只保存在内存里
+- 以上说的是桌面客户端。网页控制台是部署在服务器上的服务：它把自签名的 HTTPS 证书存在数据卷里，浏览器那边也只在内存里保存设置（登录密码时会有一个会话 Cookie）
 
 ## 安全
 
@@ -228,6 +274,7 @@ npm run tauri build
 - 重连后取回控制码需要随机密钥，别人无法冒领
 - 被控端在托盘里随时能看到谁在控制本机，可以一键断开或更换控制码
 - 中转服务器能看到会话流的内容（TLS 在服务器终止），请部署在你信任的机器上
+- 网页控制台：WebSocket 只接受同一个网站的页面（防止别的网站在你的浏览器里偷偷连上来）；可以设置访问密码（HTTP Basic 登录，之后是 HttpOnly、SameSite=Strict 的 Cookie，密码错误时延迟回应）；从其它电脑访问请用 HTTPS。网页控制台同样能看到画面，请部署在你信任的机器上。所有人都通过这台机器的 IP 连中转服务器，防暴力猜码的额度也是大家共用的
 
 ## 已知限制
 
@@ -237,13 +284,17 @@ npm run tauri build
 - Windows 上不以管理员身份运行时，无法采集或操作 UAC 弹窗和锁屏界面（它们在安全桌面上，需要以 SYSTEM 服务运行），也无法注入 `Ctrl+Alt+Del`。Linux 的锁屏同理（屏保程序会独占键鼠）
 - 剪贴板只同步文本，不同步文件
 - 声音只从被控端传到控制端，不转发控制端的麦克风；采集的是音量调节之后的声音，被控端静音时传过来的也是静音
+- 网页控制台：刷新或关闭标签页会断开会话；Firefox 里本机剪贴板不能自动同步给对方；浏览器不全屏时部分快捷键（Ctrl+W 等）发不到远端
 
 ## 开发
 
 ### 测试
 
 ```bash
-# 仓库根目录：协议 + 服务器
+# 仓库根目录：协议 + 链路库 + 服务器
+cargo test
+
+# web/：网页控制台（WebSocket 协议、访问密码、HTTPS 证书）
 cargo test
 
 # client/：界面（抖动缓冲和音画同步仿真、H.264 格式转换、界面文案）
@@ -283,6 +334,17 @@ cargo run --release --example encode_bench
 ```
 
 测画面流畅度或音画同步时请用 release 构建：调试构建缩放很慢（4K → 1080p 每帧约 0.5 秒）。
+
+### 网页控制台
+
+```bash
+# 先构建界面，再在 web/ 里启动服务（默认连接 127.0.0.1:4433 的服务器，网页取自 ../client/dist），浏览器打开 http://localhost:8080
+(cd client && npm run build)
+cd web && cargo run
+# 修改界面时：在 client/ 里 npm run dev，浏览器打开 http://localhost:1420（/ws 会转给 8080 端口上的 airhand-web）
+```
+
+`web/src/console.rs` 开头写了浏览器和服务之间的 WebSocket 协议。
 
 ### Linux / WSL
 

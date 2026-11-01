@@ -1,28 +1,60 @@
 //! 控制端服务：维护与服务器的连接（自动重连），管理多个并发会话。
+//!
+//! 与界面无关：会话的画面和事件交给 [`SessionUi`]。控制台可以和本服务在同一台电脑上（桌面版），
+//! 也可以是经网络连过来的浏览器（网页版），两者的区别见 [`Frontend`]。
 
-pub mod session;
+mod session;
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use airhand_proto::framing::{read_msg, write_msg};
-use airhand_proto::session::{ControllerMsg, InputEvent, QualitySettings};
+use airhand_proto::session::{ControllerMsg, InputEvent, MAX_CLIPBOARD_TEXT, QualitySettings};
 use airhand_proto::signal::{ClientMsg, ConnectError, ServerMsg, SessionGrant};
 use airhand_proto::{MAX_SIGNAL_MSG, Role, SessionHeader};
 use anyhow::{Result, anyhow};
 use quinn::Connection;
 use serde::Serialize;
-use tauri::async_runtime::JoinHandle;
-use tauri::ipc::{Channel, InvokeResponseBody};
+use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{info, warn};
 
-use crate::net::{self, Reconnect};
-use crate::problem::Problem;
-use crate::status::{HubExt, ServerState, StatusHub};
-use session::{SessionEvent, SessionIo};
+use crate::net::{self, LinkConfig, Reconnect, Report};
+use crate::{Problem, ServerState};
+pub use session::{HEADER_LEN, NoticeView, SessionEvent, SessionUi, UiClosed};
+
+/// 桌面版检查本机剪贴板变化的间隔
+pub const CLIPBOARD_POLL: Duration = Duration::from_millis(300);
+
+/// 本机剪贴板的双向同步（桌面版；实现见客户端的 `clipboard.rs`）。
+pub trait ClipboardSync: Send + 'static {
+    /// 每隔 [`CLIPBOARD_POLL`] 调用一次：本机剪贴板有新文本（且不是对端刚写入的）时返回它
+    fn poll(&mut self) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>>;
+    /// 写入被控端复制的文本
+    fn apply(&self, text: String);
+}
+
+/// 控制台在哪里。
+pub enum Frontend {
+    /// 桌面控制台，与本服务在同一台电脑上：收到画面立即确认，并同步这台电脑的剪贴板
+    Desktop {
+        clipboard: Box<dyn ClipboardSync>,
+        /// 是否同步剪贴板（之后可用 [`ControllerService::set_clipboard_sync`] 切换）
+        sync: bool,
+    },
+    /// 浏览器，经网络连到本服务（网页控制台）：
+    ///
+    /// * 画面由浏览器收到后确认（[`ControllerService::ack`]），被控端的在途帧控制因此把浏览器这一段网络也算进去，
+    ///   这段网络慢的时候画面不会在中间越积越多；
+    /// * 剪贴板是浏览器的：被控端复制的文本作为 [`SessionEvent::Clipboard`] 交给浏览器，
+    ///   浏览器复制的文本用 [`ControllerService::send_clipboard`] 发给被控端。
+    Browser,
+}
 
 type Pending = Arc<Mutex<HashMap<u32, oneshot::Sender<Result<SessionGrant, ConnectError>>>>>;
 
@@ -35,12 +67,14 @@ struct Live {
 
 struct SessionHandle {
     tx: mpsc::UnboundedSender<ControllerMsg>,
-    task: tokio::task::AbortHandle,
-    clipboard: Arc<AtomicBool>,
+    task: AbortHandle,
+    /// 桌面版：是否同步剪贴板
+    clipboard: Option<Arc<AtomicBool>>,
 }
 
-#[derive(Default)]
 struct Inner {
+    cfg: Arc<LinkConfig>,
+    rt: Handle,
     live: Mutex<Option<Live>>,
     sessions: Mutex<HashMap<u32, SessionHandle>>,
     next_req: AtomicU32,
@@ -62,9 +96,18 @@ pub struct SessionInfo {
 }
 
 impl ControllerService {
-    pub fn start(hub: StatusHub) -> Self {
-        let inner = Arc::new(Inner::default());
-        let task = tauri::async_runtime::spawn(run(inner.clone(), hub));
+    /// 在 `rt` 上启动服务：连接服务器并在掉线后自动重连，连接状态的变化通过 `report` 通知。
+    /// 服务被 drop 时断开所有会话和连接。
+    pub fn start(cfg: Arc<LinkConfig>, rt: Handle, report: Report) -> Self {
+        let inner = Arc::new(Inner {
+            cfg,
+            rt: rt.clone(),
+            live: Mutex::default(),
+            sessions: Mutex::default(),
+            next_req: AtomicU32::new(0),
+            next_sid: AtomicU32::new(0),
+        });
+        let task = rt.spawn(run(inner.clone(), report));
         Self { inner, task }
     }
 
@@ -72,9 +115,8 @@ impl ControllerService {
         &self,
         code: u32,
         settings: QualitySettings,
-        video: Channel<InvokeResponseBody>,
-        events: Channel<SessionEvent>,
-        clipboard_sync: bool,
+        ui: Arc<dyn SessionUi>,
+        frontend: Frontend,
     ) -> Result<SessionInfo, Problem> {
         let live = self
             .inner
@@ -112,17 +154,26 @@ impl ControllerService {
 
         let sid = self.inner.next_sid.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::unbounded_channel();
-        let inner = self.inner.clone();
-        let tx2 = tx.clone();
-        let clipboard = Arc::new(AtomicBool::new(clipboard_sync));
-        let io = SessionIo {
+        let (mode, clipboard) = match frontend {
+            Frontend::Desktop { clipboard, sync } => {
+                let enabled = Arc::new(AtomicBool::new(sync));
+                let mode = session::Mode::Desktop {
+                    clip: Arc::new(tokio::sync::Mutex::new(clipboard)),
+                    enabled: enabled.clone(),
+                };
+                (mode, Some(enabled))
+            }
+            Frontend::Browser => (session::Mode::Browser, None),
+        };
+        let io = session::SessionIo {
             send,
             recv,
-            video,
-            events,
-            clipboard: clipboard.clone(),
+            ui,
+            mode,
         };
-        let handle = tokio::spawn(async move {
+        let inner = self.inner.clone();
+        let tx2 = tx.clone();
+        let handle = self.inner.rt.spawn(async move {
             session::run(sid, io, tx2, rx).await;
             inner.sessions.lock().unwrap().remove(&sid);
         });
@@ -169,10 +220,26 @@ impl ControllerService {
         self.send(sid, ControllerMsg::Audio { enabled })
     }
 
+    /// 浏览器收到了这一帧（[`Frontend::Browser`]）。确认是累积的：确认第 n 帧也就确认了之前所有的帧
+    pub fn ack(&self, sid: u32, seq: u32) -> Result<(), Problem> {
+        self.send(sid, ControllerMsg::Ack { seq })
+    }
+
+    /// 把浏览器复制的文本发给被控端（[`Frontend::Browser`]）
+    pub fn send_clipboard(&self, sid: u32, text: String) -> Result<(), Problem> {
+        if text.is_empty() || text.len() > MAX_CLIPBOARD_TEXT {
+            return Ok(());
+        }
+        self.send(sid, ControllerMsg::Clipboard { text })
+    }
+
+    /// 打开 / 关闭剪贴板同步（[`Frontend::Desktop`]；网页版由浏览器自己决定发不发）
     pub fn set_clipboard_sync(&self, sid: u32, enabled: bool) -> Result<(), Problem> {
         let sessions = self.inner.sessions.lock().unwrap();
         let s = sessions.get(&sid).ok_or(Problem::NoSession)?;
-        s.clipboard.store(enabled, Ordering::Relaxed);
+        if let Some(c) = &s.clipboard {
+            c.store(enabled, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -182,7 +249,7 @@ impl ControllerService {
                 s.tx.send(ControllerMsg::Input(vec![InputEvent::ReleaseAll]));
             // 给写任务一点时间把"释放按键"发出去
             let task = s.task;
-            tokio::spawn(async move {
+            self.inner.rt.spawn(async move {
                 tokio::time::sleep(Duration::from_millis(150)).await;
                 task.abort();
             });
@@ -206,12 +273,12 @@ impl Drop for ControllerService {
     }
 }
 
-async fn run(inner: Arc<Inner>, hub: StatusHub) {
-    let mut reconnect = Reconnect::new(hub.clone());
+async fn run(inner: Arc<Inner>, report: Report) {
+    let mut reconnect = Reconnect::new(report.clone());
     loop {
         reconnect.begin();
         // 控制端不会主动要求重连：控制流正常结束也算掉线
-        let result = connect_once(&inner, &hub)
+        let result = connect_once(&inner, &report)
             .await
             .and_then(|()| Err(anyhow!("the server closed the control stream")));
         let live = inner.live.lock().unwrap().take();
@@ -223,8 +290,8 @@ async fn run(inner: Arc<Inner>, hub: StatusHub) {
     }
 }
 
-async fn connect_once(inner: &Arc<Inner>, hub: &StatusHub) -> Result<()> {
-    let sig = net::connect_signal(Role::Controller).await?;
+async fn connect_once(inner: &Arc<Inner>, report: &Report) -> Result<()> {
+    let sig = net::connect_signal(&inner.cfg, Role::Controller).await?;
     let (tx, mut rx) = mpsc::unbounded_channel::<ClientMsg>();
     let pending: Pending = Arc::default();
     *inner.live.lock().unwrap() = Some(Live {
@@ -232,7 +299,7 @@ async fn connect_once(inner: &Arc<Inner>, hub: &StatusHub) -> Result<()> {
         tx,
         pending: pending.clone(),
     });
-    hub.set_server(ServerState::Connected);
+    report(ServerState::Connected);
     info!("controller connected to the server");
 
     let mut send = sig.send;

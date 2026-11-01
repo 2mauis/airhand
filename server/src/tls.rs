@@ -2,7 +2,8 @@
 //!
 //! 首次启动时如果证书不存在，会生成一张自签名证书写入数据卷，并在日志中打印其
 //! SHA-256 指纹。把指纹填入客户端 `client/src-tauri/src/config.rs`（或构建时的
-//! `AIRHAND_SERVER_FP` 环境变量）即可启用证书固定，防止中间人攻击。
+//! `AIRHAND_SERVER_FP` 环境变量），以及网页控制台的 `AIRHAND_SERVER_FP` 环境变量，
+//! 即可启用证书固定，防止中间人攻击。
 
 use std::path::Path;
 

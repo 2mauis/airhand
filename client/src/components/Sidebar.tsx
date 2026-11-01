@@ -12,6 +12,7 @@ export function Sidebar() {
   const view = useStore((s) => s.view);
   const server = useStore((s) => s.server);
   const app = useStore((s) => s.app);
+  const web = api.kind === "web";
 
   const serverLabel =
     server.state === "connected"
@@ -73,15 +74,22 @@ export function Sidebar() {
       <div className="sidebar-footer">
         <div className="me-row">
           <div className="me">
-            <div className="me-name">{app?.hostname || t("common.thisComputer")}</div>
-            <div className="muted small">{t("sidebar.version", { version: app?.version ?? "—" })}</div>
+            <div className="me-name" title={web ? t("sidebar.nameHintWeb") : undefined}>
+              {app?.hostname || t("common.thisComputer")}
+            </div>
+            <div className="muted small">
+              {t(web ? "sidebar.versionWeb" : "sidebar.version", { version: app?.version ?? "—" })}
+            </div>
           </div>
           <LangSwitch />
         </div>
-        <button className="ghost-btn" title={t("sidebar.toHostHint")} onClick={() => void api.switchToHost()}>
-          <IconSwap size={16} />
-          <span>{t("sidebar.toHost")}</span>
-        </button>
+        {/* 网页版没有被控端模式 */}
+        {!web && (
+          <button className="ghost-btn" title={t("sidebar.toHostHint")} onClick={() => void api.switchToHost()}>
+            <IconSwap size={16} />
+            <span>{t("sidebar.toHost")}</span>
+          </button>
+        )}
       </div>
     </aside>
   );
@@ -93,7 +101,7 @@ const LANGS: { id: Lang; label: string }[] = [
   { id: "en", label: "EN" },
 ];
 
-function LangSwitch() {
+export function LangSwitch() {
   const lang = useLang();
   const choose = (l: Lang) => {
     setLang(l);

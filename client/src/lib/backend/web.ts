@@ -1,0 +1,361 @@
+// 网页版：浏览器打开 airhand-web 的端口，控制端服务跑在那台机器上（web/src/console.rs）。
+//
+// 命令、事件和画面都走同一条 WebSocket（协议见 console.rs）：
+// * 命令 `{"id", "cmd", ...参数}`；画面确认、输入事件这类高频消息不带 id，不等回复；
+// * 画面是二进制：前 4 字节是会话的 ch（connect 时由这里选），后面与桌面版的数据包相同；
+// * 每收到一帧画面就回 ack，被控端的在途帧控制因此把浏览器这段网络也算进去；
+// * 剪贴板在浏览器里同步（navigator.clipboard），规则与桌面版相同：只同步连接之后的变化，并抑制回声；
+// * 显示的延迟 = 控制端服务到被控端的往返 + 浏览器到控制端服务的往返。
+import type { AppInfo, Backend, Problem, ServerState, SessionEvent, SessionInfo, SessionSink } from "../api";
+import { getLang } from "../i18n";
+
+type Incoming =
+  | { type: "reply"; id: number; ok?: unknown; err?: Problem }
+  | { type: "server"; state: ServerState }
+  | { type: "event"; ch: number; event: SessionEvent };
+
+interface Chan {
+  sink: SessionSink;
+  /** connect 返回之后才知道 */
+  sid: number | null;
+  /** 是否同步剪贴板 */
+  clipboard: boolean;
+  /** 双方已经一致的剪贴板文本；null 表示还没读到过本机剪贴板（第一次读到的内容不发送） */
+  synced: string | null;
+  /** sid 还不知道时收到的最新一帧，知道之后补发确认（确认是累积的） */
+  unacked: number | null;
+}
+
+/** 与 airhand-web 的连接断了 */
+const LOST: Problem = { kind: "consoleLost" };
+/** 与 airhand_proto::session::MAX_CLIPBOARD_TEXT 相同（按字符数粗略限制，服务端还会按字节检查） */
+const MAX_CLIPBOARD = 1 << 20;
+const RECONNECT_MAX_MS = 5000;
+const PING_MS = 2000;
+const CLIPBOARD_POLL_MS = 1000;
+/** 二进制消息：ch(4) + 数据包头(24) */
+const MIN_BINARY = 4 + 24;
+
+class WebConsole implements Backend {
+  readonly kind = "web" as const;
+
+  private ws: WebSocket | null = null;
+  private retries = 0;
+  private nextId = 1;
+  private nextCh = 1;
+  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Problem) => void }>();
+  private openWaiters: (() => void)[] = [];
+  private chans = new Map<number, Chan>();
+  private status: ServerState = { state: "connecting" };
+  private statusListeners = new Set<(s: ServerState) => void>();
+  /** 浏览器到 airhand-web 的往返时间（毫秒，平滑后） */
+  private rtt: number | null = null;
+  /** 最近一次读到 / 写入的本机剪贴板文本 */
+  private clipSeen: string | null = null;
+  /** 页面没有焦点时浏览器不让写剪贴板：先记下，回到页面时再写 */
+  private clipToWrite: string | null = null;
+  private clipBusy = false;
+
+  constructor() {
+    this.open();
+    window.setInterval(() => void this.ping(), PING_MS);
+    window.setInterval(() => {
+      if (document.hasFocus()) void this.syncClipboard(false);
+    }, CLIPBOARD_POLL_MS);
+    // 在别的程序里复制完切回来：马上同步
+    window.addEventListener("focus", () => void this.syncClipboard(false));
+  }
+
+  // ───────────────────────── 连接 ─────────────────────────
+
+  private open() {
+    const url = new URL("ws", location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.search = "";
+    url.hash = "";
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    this.ws = ws;
+    ws.onopen = () => {
+      this.retries = 0;
+      const waiters = this.openWaiters;
+      this.openWaiters = [];
+      for (const w of waiters) w();
+    };
+    ws.onmessage = (e: MessageEvent<unknown>) => {
+      if (this.ws === ws) this.onMessage(e.data);
+    };
+    // 出错之后总会触发 close
+    ws.onclose = () => {
+      if (this.ws === ws) this.onClose();
+    };
+  }
+
+  private onClose() {
+    this.ws = null;
+    this.rtt = null;
+    for (const p of this.pending.values()) p.reject(LOST);
+    this.pending.clear();
+    // 服务那边的会话随这条连接一起结束了：告诉正在进行的会话，它们会自己重试
+    const chans = [...this.chans.values()];
+    this.chans.clear();
+    for (const c of chans) if (c.sid !== null) c.sink.event({ type: "closed", reason: LOST, retry: true });
+    this.setStatus({ state: "disconnected", reason: LOST });
+    const delay = Math.min(500 * 2 ** this.retries, RECONNECT_MAX_MS);
+    this.retries++;
+    window.setTimeout(() => this.open(), delay);
+  }
+
+  private whenOpen(): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) return Promise.resolve();
+    return new Promise((resolve) => this.openWaiters.push(resolve));
+  }
+
+  private socket(): WebSocket | null {
+    return this.ws?.readyState === WebSocket.OPEN ? this.ws : null;
+  }
+
+  private call<T>(cmd: string, args: object = {}): Promise<T> {
+    const ws = this.socket();
+    if (!ws) return Promise.reject(LOST);
+    const id = this.nextId++;
+    return new Promise<T>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      ws.send(JSON.stringify({ id, cmd, ...args }));
+    });
+  }
+
+  /** 不需要回复的命令 */
+  private notify(cmd: string, args: object): Promise<void> {
+    const ws = this.socket();
+    if (!ws) return Promise.reject(LOST);
+    ws.send(JSON.stringify({ cmd, ...args }));
+    return Promise.resolve();
+  }
+
+  private setStatus(s: ServerState) {
+    this.status = s;
+    for (const l of this.statusListeners) l(s);
+  }
+
+  private async ping() {
+    if (!this.socket()) return;
+    const t0 = performance.now();
+    try {
+      await this.call("ping");
+    } catch {
+      return;
+    }
+    const ms = performance.now() - t0;
+    this.rtt = this.rtt === null ? ms : this.rtt * 0.7 + ms * 0.3;
+  }
+
+  // ───────────────────────── 收到的消息 ─────────────────────────
+
+  private onMessage(data: unknown) {
+    if (data instanceof ArrayBuffer) {
+      this.onBinary(data);
+      return;
+    }
+    if (typeof data !== "string") return;
+    let msg: Incoming;
+    try {
+      msg = JSON.parse(data) as Incoming;
+    } catch {
+      return;
+    }
+    switch (msg.type) {
+      case "reply": {
+        const p = this.pending.get(msg.id);
+        if (!p) return;
+        this.pending.delete(msg.id);
+        if (msg.err !== undefined) p.reject(msg.err);
+        else p.resolve(msg.ok);
+        return;
+      }
+      case "server":
+        this.setStatus(msg.state);
+        return;
+      case "event":
+        this.onEvent(msg.ch, msg.event);
+        return;
+    }
+  }
+
+  private onBinary(buf: ArrayBuffer) {
+    if (buf.byteLength < MIN_BINARY) return;
+    const dv = new DataView(buf);
+    const chan = this.chans.get(dv.getUint32(0, true));
+    if (!chan) return;
+    // 画面（kind=1）：收到就确认，seq 在数据包的 [4..8]
+    if (dv.getUint8(4) === 1) {
+      const seq = dv.getUint32(8, true);
+      if (chan.sid !== null) void this.notify("ack", { sid: chan.sid, seq }).catch(() => {});
+      else chan.unacked = seq;
+    }
+    chan.sink.packet(new Uint8Array(buf, 4));
+  }
+
+  private onEvent(ch: number, ev: SessionEvent) {
+    const chan = this.chans.get(ch);
+    if (!chan) return;
+    switch (ev.type) {
+      case "clipboard":
+        this.remoteClipboard(chan, ev.text);
+        return;
+      case "stats":
+        // 被控端测的是它到 airhand-web 的往返，再加上浏览器这一段
+        if (ev.rttMs !== null && this.rtt !== null) ev = { ...ev, rttMs: ev.rttMs + this.rtt };
+        break;
+      case "closed":
+        this.chans.delete(ch);
+        break;
+    }
+    chan.sink.event(ev);
+  }
+
+  // ───────────────────────── 剪贴板 ─────────────────────────
+
+  /** `ask`：没有权限时请求权限（只在用户操作时这样做，浏览器会弹出询问） */
+  private async readClipboard(ask: boolean): Promise<string | null> {
+    if (!navigator.clipboard?.readText) return null;
+    if (!ask) {
+      try {
+        const p = await navigator.permissions.query({ name: "clipboard-read" as PermissionName });
+        if (p.state !== "granted") return null;
+      } catch {
+        // 不支持查询这个权限（例如 Firefox）：只在用户操作时读
+        return null;
+      }
+    }
+    try {
+      return await navigator.clipboard.readText();
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      this.clipSeen = text;
+      if (this.clipToWrite === text) this.clipToWrite = null;
+    } catch {
+      this.clipToWrite = text;
+    }
+  }
+
+  /** 被控端复制了文本 */
+  private remoteClipboard(chan: Chan, text: string) {
+    if (!chan.clipboard) return;
+    chan.synced = text;
+    void this.writeClipboard(text);
+  }
+
+  /** 本机剪贴板有变化就发给打开了同步的会话 */
+  private async syncClipboard(ask: boolean) {
+    if (this.clipToWrite !== null && document.hasFocus()) await this.writeClipboard(this.clipToWrite);
+    const chans = [...this.chans.values()];
+    if (this.clipBusy || !chans.some((c) => c.clipboard && c.sid !== null)) return;
+    this.clipBusy = true;
+    try {
+      const text = await this.readClipboard(ask);
+      if (text === null || text === "" || text.length > MAX_CLIPBOARD) return;
+      this.clipSeen = text;
+      for (const c of this.chans.values()) {
+        if (c.synced === null) {
+          c.synced = text;
+        } else if (c.sid !== null && c.synced !== text) {
+          // 关闭同步的会话也要记下，否则重新打开时会把旧内容发过去
+          c.synced = text;
+          if (c.clipboard) void this.notify("clipboard", { sid: c.sid, text }).catch(() => {});
+        }
+      }
+    } finally {
+      this.clipBusy = false;
+    }
+  }
+
+  // ───────────────────────── Backend ─────────────────────────
+
+  async appInfo(): Promise<AppInfo> {
+    // 页面刚打开时 WebSocket 可能还没连上（或者服务暂时不在）：等连上再问
+    for (;;) {
+      await this.whenOpen();
+      try {
+        const info = await this.call<Omit<AppInfo, "lang">>("appInfo");
+        return { ...info, lang: getLang() };
+      } catch (e) {
+        if (e !== LOST) throw e;
+      }
+    }
+  }
+
+  serverStatus = async () => this.status;
+
+  onServerStatus(cb: (s: ServerState) => void) {
+    this.statusListeners.add(cb);
+    return () => void this.statusListeners.delete(cb);
+  }
+
+  async connect(code: string, settings: object, sink: SessionSink, clipboard: boolean): Promise<SessionInfo> {
+    const ch = this.nextCh++;
+    const chan: Chan = { sink, sid: null, clipboard, synced: this.clipSeen, unacked: null };
+    this.chans.set(ch, chan);
+    try {
+      const info = await this.call<SessionInfo>("connect", { code, settings, ch });
+      chan.sid = info.sid;
+      if (chan.unacked !== null) {
+        void this.notify("ack", { sid: info.sid, seq: chan.unacked }).catch(() => {});
+        chan.unacked = null;
+      }
+      return info;
+    } catch (e) {
+      if (this.chans.get(ch) === chan) this.chans.delete(ch);
+      throw e;
+    }
+  }
+
+  async clipboardSync(sid: number, enabled: boolean) {
+    const chan = [...this.chans.values()].find((c) => c.sid === sid);
+    if (!chan) return;
+    chan.clipboard = enabled;
+    if (enabled) {
+      // 用户刚打开同步：这时可以请求读剪贴板的权限。现有内容不发送，只同步之后的变化
+      const text = await this.readClipboard(true);
+      if (text !== null) {
+        chan.synced = text;
+        this.clipSeen = text;
+      }
+    }
+  }
+
+  audio = (sid: number, enabled: boolean) => this.call<void>("audio", { sid, enabled });
+
+  async localClipboardText() {
+    const text = await this.readClipboard(true);
+    if (text === null) throw { kind: "clipboardBlocked" } satisfies Problem;
+    return text;
+  }
+
+  input = (sid: number, events: unknown[]) => this.notify("input", { sid, events });
+  settings = (sid: number, settings: object) => this.call<void>("settings", { sid, settings });
+  keyframe = (sid: number) => this.call<void>("keyframe", { sid });
+  selectDisplay = (sid: number, index: number) => this.call<void>("display", { sid, index });
+
+  disconnect(sid: number) {
+    for (const [ch, c] of this.chans) if (c.sid === sid) this.chans.delete(ch);
+    return this.notify("disconnect", { sid });
+  }
+
+  // 网页版没有被控端模式、托盘和窗口
+  switchToHost = async () => {};
+  setLanguage = async () => {};
+  onLangChanged = () => () => {};
+  setWindowFullscreen = async () => {};
+  onWindowFullscreenExit = () => () => {};
+}
+
+export function webBackend(): Backend {
+  return new WebConsole();
+}

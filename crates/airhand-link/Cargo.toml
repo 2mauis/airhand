@@ -1,0 +1,22 @@
+[package]
+name = "airhand-link"
+description = "Airhand client side of the relay link: QUIC with certificate pinning and reconnects, UI-independent controller sessions"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# 桌面客户端（client/src-tauri）和网页控制台（web/）共用，不依赖任何 GUI 库。
+# 两者都是独立的 Cargo 工作区；这个库和 airhand-proto 一样属于根目录的工作区（在仓库根目录 cargo test）
+[dependencies]
+airhand-proto = { path = "../airhand-proto" }
+anyhow = "1"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rand = "0.9"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"] }
+tracing = "0.1"
+
+[dev-dependencies]
+serde_json = "1"
