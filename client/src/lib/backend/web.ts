@@ -6,13 +6,23 @@
 // * 每收到一帧画面就回 ack，被控端的在途帧控制因此把浏览器这段网络也算进去；
 // * 剪贴板在浏览器里同步（navigator.clipboard），规则与桌面版相同：只同步连接之后的变化，并抑制回声；
 // * 显示的延迟 = 控制端服务到被控端的往返 + 浏览器到控制端服务的往返。
-import type { AppInfo, Backend, Problem, ServerState, SessionEvent, SessionInfo, SessionSink } from "../api";
+import type {
+  AppInfo,
+  Backend,
+  Problem,
+  ResumeToken,
+  ServerState,
+  SessionEvent,
+  SessionInfo,
+  SessionSink,
+} from "../api";
 import { getLang } from "../i18n";
 
 type Incoming =
   | { type: "reply"; id: number; ok?: unknown; err?: Problem }
   | { type: "server"; state: ServerState }
-  | { type: "event"; ch: number; event: SessionEvent };
+  | { type: "event"; ch: number; event: SessionEvent }
+  | { type: "hostOnline"; code: number };
 
 interface Chan {
   sink: SessionSink;
@@ -48,6 +58,7 @@ class WebConsole implements Backend {
   private chans = new Map<number, Chan>();
   private status: ServerState = { state: "connecting" };
   private statusListeners = new Set<(s: ServerState) => void>();
+  private onlineListeners = new Set<(code: number) => void>();
   /** 浏览器到 airhand-web 的往返时间（毫秒，平滑后） */
   private rtt: number | null = null;
   /** 最近一次读到 / 写入的本机剪贴板文本 */
@@ -179,6 +190,9 @@ class WebConsole implements Backend {
       case "event":
         this.onEvent(msg.ch, msg.event);
         return;
+      case "hostOnline":
+        for (const l of this.onlineListeners) l(msg.code);
+        return;
     }
   }
 
@@ -298,12 +312,23 @@ class WebConsole implements Backend {
     return () => void this.statusListeners.delete(cb);
   }
 
-  async connect(code: string, settings: object, sink: SessionSink, clipboard: boolean): Promise<SessionInfo> {
+  onHostOnline(cb: (code: number) => void) {
+    this.onlineListeners.add(cb);
+    return () => void this.onlineListeners.delete(cb);
+  }
+
+  async connect(
+    code: string,
+    resume: ResumeToken | null,
+    settings: object,
+    sink: SessionSink,
+    clipboard: boolean,
+  ): Promise<SessionInfo> {
     const ch = this.nextCh++;
     const chan: Chan = { sink, sid: null, clipboard, synced: this.clipSeen, unacked: null };
     this.chans.set(ch, chan);
     try {
-      const info = await this.call<SessionInfo>("connect", { code, settings, ch });
+      const info = await this.call<SessionInfo>("connect", { code, resume, settings, ch });
       chan.sid = info.sid;
       if (chan.unacked !== null) {
         void this.notify("ack", { sid: info.sid, seq: chan.unacked }).catch(() => {});

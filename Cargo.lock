@@ -42,6 +42,7 @@ dependencies = [
 name = "airhand-server"
 version = "0.1.0"
 dependencies = [
+ "airhand-link",
  "airhand-proto",
  "anyhow",
  "quinn",

@@ -185,6 +185,46 @@ mod tests {
                 matches!(back, ServerMsg::Incoming { session_id: 9, peer: ref p } if *p == peer)
             );
         }
+
+        // 重连：带凭证的请求、带凭证的会话授权、"不在线"、"重新上线了"
+        let token = [7u8; 16];
+        let wire = encode(&ClientMsg::Connect {
+            req_id: 4,
+            code: 123_456,
+            resume: Some(token),
+        })
+        .unwrap();
+        let back: ClientMsg = read_msg(&mut &wire[..], 1024, &mut buf)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            back,
+            ClientMsg::Connect { req_id: 4, code: 123_456, resume: Some(t) } if t == token
+        ));
+        for m in [
+            ServerMsg::ConnectResult {
+                req_id: 5,
+                result: Ok(SessionGrant {
+                    session_id: 1,
+                    host_name: "PC".into(),
+                    host_os: "Windows".into(),
+                    resume: token,
+                }),
+            },
+            ServerMsg::ConnectResult {
+                req_id: 6,
+                result: Err(ConnectError::Offline),
+            },
+            ServerMsg::HostOnline { code: 123_456 },
+        ] {
+            let wire = encode(&m).unwrap();
+            let back: ServerMsg = read_msg(&mut &wire[..], 1024, &mut buf)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(format!("{back:?}"), format!("{m:?}"));
+        }
     }
 
     /// 版本握手的消息永远不能变（见 signal 模块说明）。这个测试锁定它们的编码：

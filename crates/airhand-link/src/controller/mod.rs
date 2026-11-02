@@ -2,6 +2,14 @@
 //!
 //! 与界面无关：会话的画面和事件交给 [`SessionUi`]。控制台可以和本服务在同一台电脑上（桌面版），
 //! 也可以是经网络连过来的浏览器（网页版），两者的区别见 [`Frontend`]。
+//!
+//! # 被控端掉线后的重连
+//!
+//! 会话断了由控制台决定是否重连（再调用一次 [`ControllerService::connect`]）。连上时得到的重连凭证
+//!（[`SessionInfo::resume`]，见 `airhand_proto::signal` 模块说明）由控制台保管，重连时带上：
+//! 这样的重连不会被服务器当成猜码而限速。被控端不在线时 `connect` 返回 [`Problem::HostOffline`]，
+//! 被控端重新上线时服务器通知，本服务调用 [`HostOnline`]，控制台这时再连一次即可，等待期间不需要反复尝试。
+//! 与服务器的连接断过之后服务器不再记得谁在等谁，控制台在重新连上服务器时再连一次（还不在线的话会重新登记）。
 
 mod session;
 
@@ -14,7 +22,7 @@ use std::time::Duration;
 
 use airhand_proto::framing::{read_msg, write_msg};
 use airhand_proto::session::{ControllerMsg, InputEvent, MAX_CLIPBOARD_TEXT, QualitySettings};
-use airhand_proto::signal::{ClientMsg, ConnectError, ServerMsg, SessionGrant};
+use airhand_proto::signal::{ClientMsg, ConnectError, ResumeToken, ServerMsg, SessionGrant};
 use airhand_proto::{MAX_SIGNAL_MSG, Role, SessionHeader};
 use anyhow::{Result, anyhow};
 use quinn::Connection;
@@ -56,6 +64,9 @@ pub enum Frontend {
     Browser,
 }
 
+/// 服务器通知：控制码为 `code` 的被控端重新上线了，在等它的会话（[`Problem::HostOffline`]）现在重连
+pub type HostOnline = Arc<dyn Fn(u32) + Send + Sync>;
+
 type Pending = Arc<Mutex<HashMap<u32, oneshot::Sender<Result<SessionGrant, ConnectError>>>>>;
 
 #[derive(Clone)]
@@ -79,6 +90,7 @@ struct Inner {
     sessions: Mutex<HashMap<u32, SessionHandle>>,
     next_req: AtomicU32,
     next_sid: AtomicU32,
+    host_online: HostOnline,
 }
 
 pub struct ControllerService {
@@ -93,12 +105,19 @@ pub struct SessionInfo {
     pub code: String,
     pub host_name: String,
     pub host_os: String,
+    /// 重连凭证：这个会话断了之后重连时交给 [`ControllerService::connect`]
+    pub resume: ResumeToken,
 }
 
 impl ControllerService {
-    /// 在 `rt` 上启动服务：连接服务器并在掉线后自动重连，连接状态的变化通过 `report` 通知。
-    /// 服务被 drop 时断开所有会话和连接。
-    pub fn start(cfg: Arc<LinkConfig>, rt: Handle, report: Report) -> Self {
+    /// 在 `rt` 上启动服务：连接服务器并在掉线后自动重连，连接状态的变化通过 `report` 通知，
+    /// 在等的被控端上线了通过 `host_online` 通知。服务被 drop 时断开所有会话和连接。
+    pub fn start(
+        cfg: Arc<LinkConfig>,
+        rt: Handle,
+        report: Report,
+        host_online: HostOnline,
+    ) -> Self {
         let inner = Arc::new(Inner {
             cfg,
             rt: rt.clone(),
@@ -106,14 +125,17 @@ impl ControllerService {
             sessions: Mutex::default(),
             next_req: AtomicU32::new(0),
             next_sid: AtomicU32::new(0),
+            host_online,
         });
         let task = rt.spawn(run(inner.clone(), report));
         Self { inner, task }
     }
 
+    /// `resume`：重连时带上之前连上这个控制码时得到的凭证（[`SessionInfo::resume`]），第一次连接时为 `None`
     pub async fn connect(
         &self,
         code: u32,
+        resume: Option<ResumeToken>,
         settings: QualitySettings,
         ui: Arc<dyn SessionUi>,
         frontend: Frontend,
@@ -129,7 +151,11 @@ impl ControllerService {
         let (otx, orx) = oneshot::channel();
         live.pending.lock().unwrap().insert(req_id, otx);
         live.tx
-            .send(ClientMsg::Connect { req_id, code })
+            .send(ClientMsg::Connect {
+                req_id,
+                code,
+                resume,
+            })
             .map_err(|_| server_gone())?;
         let grant = match tokio::time::timeout(Duration::from_secs(10), orx).await {
             Ok(Ok(Ok(g))) => g,
@@ -191,6 +217,7 @@ impl ControllerService {
             code: airhand_proto::format_code(code),
             host_name: grant.host_name,
             host_os: grant.host_os,
+            resume: grant.resume,
         })
     }
 
@@ -304,6 +331,7 @@ async fn connect_once(inner: &Arc<Inner>, report: &Report) -> Result<()> {
 
     let mut send = sig.send;
     let mut recv = sig.recv;
+    let inner = inner.clone();
     let writer = async move {
         while let Some(m) = rx.recv().await {
             write_msg(&mut send, &m).await?;
@@ -318,6 +346,10 @@ async fn connect_once(inner: &Arc<Inner>, report: &Report) -> Result<()> {
                     if let Some(tx) = pending.lock().unwrap().remove(&req_id) {
                         let _ = tx.send(result);
                     }
+                }
+                ServerMsg::HostOnline { code } => {
+                    info!(code, "a host we were waiting for is back");
+                    (inner.host_online)(code);
                 }
                 other => warn!("ignoring server message: {other:?}"),
             }

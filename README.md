@@ -84,6 +84,7 @@ Tray → **Switch to controller** opens the console. Closing the console window 
 - Toolbar: monitor switch, **Quality**, shortcuts, clipboard (two-way sync / type as keystrokes), sound (mute / A/V sync), actual size (1:1), fullscreen, disconnect
 - In fullscreen the console tries to lock the keyboard, so system shortcuts such as the Win key and Alt+Tab go to the remote computer
 - Network hiccups reconnect automatically. If the user at the host disconnects you, the console says so and doesn't reconnect
+- If the remote computer goes offline (shut down, asleep, network gone), the console shows "Waiting for the remote computer to come back" and reconnects as soon as it's back with its old code. It doesn't keep retrying in the meantime, and the server doesn't mistake the reconnects for code guessing
 
 **Quality panel**: presets from Data saver (720p / 24 fps / 1.2 Mbps) through Balanced (1080p / 30 fps / 4 Mbps), Smooth (1080p / 60 fps / 8 Mbps) and HD (1440p / 60 fps / 16 Mbps) to Original (native resolution / 60 fps / 30 Mbps), or set the resolution cap, frame rate (15–120), bitrate cap (0.5–50 Mbps), codec and adaptive bitrate yourself. The console only offers codecs this computer can hardware-decode; if the host has no matching hardware encoder it falls back automatically, and the toolbar shows the encoder actually in use.
 
@@ -206,7 +207,7 @@ npm run tauri build
 └───────────────────────────┘            └───────────────────────────┘            └───────────────────────────┘
 ```
 
-The first bidirectional stream on every QUIC connection is the **control stream** (signaling). For each remote-control session both sides open another bidirectional stream; the server pairs them by session ID and from then on **only forwards bytes, it never parses the video**. Every message is a `u32` length prefix followed by a postcard-encoded payload.
+The first bidirectional stream on every QUIC connection is the **control stream** (signaling). For each remote-control session both sides open another bidirectional stream; the server pairs them by session ID and from then on **only forwards bytes, it never parses the video**. Every message is a `u32` length prefix followed by a postcard-encoded payload. When a controller reconnects it presents the resume token it got when it connected; if the host is offline the server remembers the request and sends `HostOnline` when the host is back (see "Resume tokens" in `crates/airhand-proto/src/signal.rs`).
 
 The web console splits the controller on the right in two: the QUIC connection and session handling run in `airhand-web` (the container), while decoding, rendering and input capture stay in the browser, with one WebSocket in between. Packets are forwarded to the browser unchanged (with a 4-byte session number in front), and the browser acknowledges the frames.
 
@@ -289,6 +290,7 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 
 - TLS 1.3 throughout (QUIC); the client verifies the server by **certificate fingerprint pinning**
 - Brute-force protection: at most 20 failed attempts per IP (IPv6 grouped by /64) per 10 minutes, and each failure adds a 400 ms delay
+- Resume tokens: when a controller connects, the server gives it a token derived from the host's code and secret (it can't be computed or reversed without the secret), and the controller presents it when reconnecting. Requests with a token don't count as failures and aren't rate limited, so however long a host stays offline, automatic reconnects can't lock the controller (or a web console sharing one IP) out. With a wrong token the server always answers "offline", revealing nothing about whether the code exists, so tokens can't be used to guess codes. A token stops working when the host changes its code
 - Getting a control code back after a reconnect requires a random secret, so nobody else can claim it
 - The host's tray always shows who is controlling the computer; disconnect them or change the code with one click
 - The relay server can see the content of session streams (TLS ends at the server), so run it on a machine you trust

@@ -46,7 +46,15 @@ export const store = {
     listeners.add(fn);
     return () => listeners.delete(fn);
   },
-  setServer: (server: ServerState) => set({ server }),
+  setServer: (server: ServerState) => {
+    const was = state.server.state;
+    set({ server });
+    if (server.state === "connected" && was !== "connected") for (const s of state.sessions) s.serverConnected();
+  },
+  /** 在等的被控端重新上线了（见 RemoteSession.hostOnline） */
+  hostOnline: (code: number) => {
+    for (const s of state.sessions) s.hostOnline(code);
+  },
   setApp: (app: AppInfo) => set({ app }),
   setDecoders: (decoders: Codec[]) => set({ decoders }),
   setView: (view: View) => set({ view, immersive: view === "new" || view === "grid" ? false : state.immersive }),

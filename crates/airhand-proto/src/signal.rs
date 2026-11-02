@@ -9,6 +9,19 @@
 //! 为了让**任何版本**的客户端和服务器都能互相告知"版本不一致"，这三条消息的编码永远不能改变：
 //! 它们必须是各自枚举的前几个变体（序号 0 / 0 / 1），字段也不能增删。
 //! 其它消息可以随 [`crate::PROTOCOL_VERSION`] 自由修改。`framing` 模块的测试锁定了它们的编码。
+//!
+//! # 重连凭证（resume tokens）
+//!
+//! 控制端连上被控端时，服务器在 [`SessionGrant::resume`] 里给一个重连凭证（服务器由被控端的控制码和密钥算出，
+//! 没有密钥算不出来，也不能反推出密钥）。被控端掉线后，控制端带着凭证重连（[`ClientMsg::Connect::resume`]）：
+//!
+//! * 带凭证的请求不算猜码，也不受限速影响；
+//! * 凭证有效且被控端在线时照常建立会话；其它情况（被控端不在线、凭证不对、控制码不存在）**一律**回答
+//!   [`ConnectError::Offline`]，不透露控制码是否存在，所以凭证不能用来猜码；
+//! * 回答 `Offline` 之后，服务器记下这个请求：被控端用这个控制码重新上线、并且凭证对得上时，
+//!   发 [`ServerMsg::HostOnline`]，控制端收到后马上重连。等待期间控制端不需要反复尝试。
+//!
+//! 凭证跟着被控端的控制码走：被控端取回原来的控制码（包括服务器重启之后）时凭证仍然有效，换了控制码就失效了。
 
 use std::net::IpAddr;
 
@@ -31,8 +44,17 @@ pub enum ClientMsg {
     /// 被控端申请控制码。断线重连时携带上次的控制码与密钥，以便取回同一个控制码。
     Register { reclaim: Option<Reclaim> },
     /// 控制端请求连接某个控制码对应的被控端。
-    Connect { req_id: u32, code: u32 },
+    ///
+    /// `resume`：之前连上这个控制码时得到的重连凭证（见模块说明的"重连凭证"），第一次连接时为 `None`。
+    Connect {
+        req_id: u32,
+        code: u32,
+        resume: Option<ResumeToken>,
+    },
 }
+
+/// 重连凭证（见模块说明）。对客户端来说是不透明的，原样带回即可
+pub type ResumeToken = [u8; 16];
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct Reclaim {
@@ -57,6 +79,9 @@ pub enum ServerMsg {
     },
     /// 通知被控端：有控制端发起会话，请打开会话流。
     Incoming { session_id: u64, peer: Peer },
+    /// 通知控制端：它在等的被控端（收到过 [`ConnectError::Offline`]）重新上线了，可以重连。
+    /// 每次 `Offline` 回答最多换来一次通知；控制端与服务器的连接断了要重新请求。
+    HostOnline { code: u32 },
 }
 
 /// 发起会话的控制端
@@ -72,6 +97,8 @@ pub struct SessionGrant {
     pub session_id: u64,
     pub host_name: String,
     pub host_os: String,
+    /// 重连凭证，被控端掉线后重连时带上
+    pub resume: ResumeToken,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,4 +109,6 @@ pub enum ConnectError {
     RateLimited,
     /// 对方会话数已满
     Busy,
+    /// 对方暂时不在线，上线时会收到 [`ServerMsg::HostOnline`]（只回答带凭证的请求，见模块说明）
+    Offline,
 }

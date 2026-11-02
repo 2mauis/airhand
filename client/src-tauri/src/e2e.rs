@@ -87,6 +87,7 @@ async fn e2e_roundtrip() {
         &ClientMsg::Connect {
             req_id: 1,
             code: wrong,
+            resume: None,
         },
     )
     .await
@@ -107,9 +108,16 @@ async fn e2e_roundtrip() {
     );
 
     // 正确控制码
-    write_msg(&mut sig.send, &ClientMsg::Connect { req_id: 2, code })
-        .await
-        .unwrap();
+    write_msg(
+        &mut sig.send,
+        &ClientMsg::Connect {
+            req_id: 2,
+            code,
+            resume: None,
+        },
+    )
+    .await
+    .unwrap();
     let r: ServerMsg = read_msg(&mut sig.recv, MAX_SIGNAL_MSG, &mut buf)
         .await
         .unwrap()

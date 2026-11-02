@@ -44,6 +44,8 @@ pub enum Problem {
     HostBusy,
     /// 服务器没有及时回应连接请求
     ServerTimeout,
+    /// 对方暂时不在线（重连时才会遇到：服务器确认过是之前连上的那台），对方重新上线后自动重连
+    HostOffline,
 
     // ── 会话 ──
     /// 被控端结束了会话（会话流关闭）
@@ -117,6 +119,7 @@ impl fmt::Display for Problem {
             Problem::RateLimited => f.write_str("too many attempts"),
             Problem::HostBusy => f.write_str("the host has reached its session limit"),
             Problem::ServerTimeout => f.write_str("the server didn't answer in time"),
+            Problem::HostOffline => f.write_str("the host is offline, waiting for it to come back"),
             Problem::HostEnded => f.write_str("the host ended the session"),
             Problem::HostUnresponsive => f.write_str("the host stopped responding"),
             Problem::Kicked => f.write_str("the user at the host disconnected all controllers"),
@@ -138,6 +141,7 @@ impl From<ConnectError> for Problem {
             ConnectError::NotFound => Problem::CodeNotFound,
             ConnectError::RateLimited => Problem::RateLimited,
             ConnectError::Busy => Problem::HostBusy,
+            ConnectError::Offline => Problem::HostOffline,
         }
     }
 }

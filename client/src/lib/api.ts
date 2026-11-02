@@ -55,6 +55,8 @@ export type Problem =
   | { kind: "rateLimited" }
   | { kind: "hostBusy" }
   | { kind: "serverTimeout" }
+  /** 重连时对方不在线（服务器确认过是之前连上的那台）：对方重新上线时会收到 onHostOnline */
+  | { kind: "hostOffline" }
   // 会话
   | { kind: "hostEnded" }
   | { kind: "hostUnresponsive" }
@@ -96,11 +98,18 @@ export interface AppInfo {
   lang: Lang;
 }
 
+/**
+ * 重连凭证（与 airhand_proto::signal::ResumeToken 对应，16 个字节）：连上时得到，会话断了之后重连时原样带上。
+ * 带凭证的重连不会被服务器当成猜控制码而限速；对方不在线时回答 hostOffline，对方回来时通知 onHostOnline
+ */
+export type ResumeToken = number[];
+
 export interface SessionInfo {
   sid: number;
   code: string;
   hostName: string;
   hostOs: string;
+  resume: ResumeToken;
 }
 
 export type SessionEvent =
@@ -155,7 +164,16 @@ export interface Backend {
   serverStatus(): Promise<ServerState>;
   /** 返回取消订阅的函数 */
   onServerStatus(cb: (s: ServerState) => void): () => void;
-  connect(code: string, settings: QualitySettings, sink: SessionSink, clipboard: boolean): Promise<SessionInfo>;
+  /** `resume`：重连时带上之前连上时得到的凭证，第一次连接时为 null */
+  connect(
+    code: string,
+    resume: ResumeToken | null,
+    settings: QualitySettings,
+    sink: SessionSink,
+    clipboard: boolean,
+  ): Promise<SessionInfo>;
+  /** 在等的被控端（connect 返回过 hostOffline）重新上线了，参数是控制码（数字）。返回取消订阅的函数 */
+  onHostOnline(cb: (code: number) => void): () => void;
   clipboardSync(sid: number, enabled: boolean): Promise<void>;
   audio(sid: number, enabled: boolean): Promise<void>;
   /** 读取本机剪贴板文本（用于"作为按键输入"） */

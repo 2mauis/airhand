@@ -16,3 +16,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 rand = "0.9"
 sha2 = "0.10"
+
+[dev-dependencies]
+# 测试用真实的客户端链路（QUIC + 握手）连进程内的服务器
+airhand-link = { path = "../crates/airhand-link" }

@@ -16,6 +16,7 @@ import {
   type MouseButton,
   type Problem,
   type QualitySettings,
+  type ResumeToken,
   type SessionEvent,
 } from "./api";
 import { AudioPlayer } from "./audio";
@@ -26,7 +27,8 @@ import { RECOVERS, type SessionNotice } from "./messages";
 import { CODEC_LABEL } from "./presets";
 import { store } from "./store";
 
-export type SessionState = "connecting" | "live" | "reconnecting" | "closed";
+/** waiting = 对方掉线了，等它重新上线（服务器会通知，见 hostOnline） */
+export type SessionState = "connecting" | "live" | "reconnecting" | "waiting" | "closed";
 export type ScaleMode = "fit" | "native";
 
 export interface Stats {
@@ -51,6 +53,14 @@ const BUTTONS: MouseButton[] = ["Left", "Middle", "Right", "Back", "Forward"];
 const MOVE_INTERVAL_MS = 8;
 const BACKGROUND_FPS = 5;
 const MAX_RETRIES = 30;
+/** 等对方上线时，保险起见每隔这么久也试一次（正常情况下服务器会在对方上线时马上通知） */
+const WAIT_CHECK_MS = 60_000;
+/** 没连上服务器（网页版还有控制端服务）时多久试一次；连上时马上会试（serverConnected） */
+const NO_SERVER_RETRY_MS = 5_000;
+/** 服务器的明确回答：自动重试只会被当成在猜控制码 */
+const GIVE_UP = new Set<Problem["kind"]>(["codeNotFound", "rateLimited", "invalidCode", "notController"]);
+/** 与服务器（网页版还有控制端服务）的连接断了：等重新连上再试，不计入重试次数 */
+const NO_SERVER = new Set<Problem["kind"]>(["notConnected", "serverLost", "serverUnreachable", "consoleLost"]);
 /** 二进制包头长度，见 crates/airhand-link/src/controller/session.rs */
 const HEADER_LEN = 24;
 /** 等待显示的画面帧太多（异常情况）时全部立即解码 */
@@ -130,6 +140,15 @@ export class RemoteSession {
   private gen = 0;
   private disposed = false;
   private retryTimer: number | undefined;
+  /** 控制码（数字），用来认出 hostOnline 通知 */
+  private readonly codeNum: number;
+  /** 重连凭证：连上过就有，重连时带上（对方换了控制码就作废） */
+  private resume: ResumeToken | null = null;
+  /** start() 还没有结果 */
+  private attempting = false;
+  /** 最近一次开始连接、最近一次收到对方上线通知的时刻 */
+  private attemptAt = 0;
+  private onlineAt = -1;
 
   // 解码
   private decoder: VideoDecoder | null = null;
@@ -179,6 +198,7 @@ export class RemoteSession {
 
   constructor(code: string, settings: QualitySettings) {
     this.code = code;
+    this.codeNum = Number(code.replace(/\D/g, ""));
     this.settings = settings;
     this.canvas = document.createElement("canvas");
     this.canvas.className = "remote-canvas";
@@ -233,11 +253,19 @@ export class RemoteSession {
     // 在连接之前清掉旧提示：被控端紧跟在 Hello 后面发的提示可能比 connect 的返回值先到
     this.notice = null;
     this.audioError = null;
-    const info = await api.connect(this.code, this.settings, sink, this.clipboardSync);
+    this.attempting = true;
+    this.attemptAt = performance.now();
+    let info;
+    try {
+      info = await api.connect(this.code, this.resume, this.settings, sink, this.clipboardSync);
+    } finally {
+      if (gen === this.gen) this.attempting = false;
+    }
     if (gen !== this.gen || this.disposed) {
       void api.disconnect(info.sid);
       return;
     }
+    this.resume = info.resume;
     this.sid = info.sid;
     this.hostName = info.hostName;
     this.hostOs = info.hostOs;
@@ -251,30 +279,73 @@ export class RemoteSession {
     this.emit();
   }
 
+  /**
+   * 会话断了 / 重连失败之后：按原因决定什么时候再试。
+   *
+   * 重连都带着凭证，服务器不会把它们当成猜控制码，对方不在线时回答 hostOffline 并在对方上线时通知，
+   * 所以等对方的时候不用反复尝试，也不限次数。
+   */
   private scheduleRetry(reason: Problem | null) {
     if (this.disposed) return;
     this.sid = null;
     this.syncAudio();
     this.closedReason = reason;
-    if (this.retries >= MAX_RETRIES) {
+    clearTimeout(this.retryTimer);
+    const kind = reason?.kind;
+    let delay: number;
+    if (kind === "hostOffline") {
+      this.state = "waiting";
+      this.retries = 0;
+      // 上线通知和 connect 的回答不走同一条通道，可能先到：这次连接开始之后收到过通知就马上再试
+      delay = this.onlineAt >= this.attemptAt ? 0 : WAIT_CHECK_MS;
+    } else if (kind && GIVE_UP.has(kind)) {
       this.state = "closed";
       this.emit();
       return;
+    } else if (kind && NO_SERVER.has(kind)) {
+      this.state = "reconnecting";
+      delay = NO_SERVER_RETRY_MS;
+    } else {
+      if (this.retries >= MAX_RETRIES) {
+        this.state = "closed";
+        this.emit();
+        return;
+      }
+      this.state = "reconnecting";
+      delay = Math.min(1000 * 2 ** Math.min(this.retries, 3), 8000);
+      this.retries++;
     }
-    this.state = "reconnecting";
     this.emit();
-    const delay = Math.min(1000 * 2 ** Math.min(this.retries, 3), 8000);
-    this.retries++;
+    this.retryTimer = window.setTimeout(() => this.retryNow(), delay);
+  }
+
+  private retryNow() {
     clearTimeout(this.retryTimer);
-    this.retryTimer = window.setTimeout(() => {
-      this.start().catch((e) => this.scheduleRetry(toProblem(e)));
-    }, delay);
+    this.retryTimer = undefined;
+    if (this.disposed || this.attempting) return;
+    this.start().catch((e) => this.scheduleRetry(toProblem(e)));
+  }
+
+  /** 服务器通知：控制码为 `code` 的被控端重新上线了 */
+  hostOnline(code: number) {
+    if (code !== this.codeNum || this.disposed) return;
+    this.onlineAt = performance.now();
+    if (this.state === "waiting") this.retryNow();
+  }
+
+  /** 与服务器（重新）连上了：服务器不记得断线前谁在等谁，在等的会话马上再试一次 */
+  serverConnected() {
+    const kind = this.closedReason?.kind;
+    if (this.state === "waiting" || (this.state === "reconnecting" && kind && NO_SERVER.has(kind))) this.retryNow();
   }
 
   /** 手动重连（关闭状态下） */
   reconnect() {
+    if (this.disposed) return;
     this.retries = 0;
-    this.scheduleRetry(this.closedReason);
+    this.state = "reconnecting";
+    this.emit();
+    this.retryNow();
   }
 
   dispose() {
@@ -352,6 +423,8 @@ export class RemoteSession {
           this.sid = null;
           this.syncAudio();
           this.closedReason = ev.reason;
+          // 对方换了控制码：凭证跟着旧控制码作废，之后手动重连就是普通的连接请求
+          if (ev.reason.kind === "codeChanged") this.resume = null;
           this.state = "closed";
           this.emit();
         }

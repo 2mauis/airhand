@@ -16,13 +16,14 @@ export function tauriBackend(): Backend {
     appInfo: () => invoke<AppInfo>("app_info"),
     serverStatus: () => invoke<ServerState>("server_status"),
     onServerStatus: (cb) => unlistenLater(listen<ServerState>("server-status", (e) => cb(e.payload))),
-    connect: (code, settings, sink, clipboard) => {
+    connect: (code, resume, settings, sink, clipboard) => {
       const video = new Channel<ArrayBuffer>();
       video.onmessage = (buf) => sink.packet(new Uint8Array(buf));
       const events = new Channel<SessionEvent>();
       events.onmessage = (ev) => sink.event(ev);
-      return invoke<SessionInfo>("ctrl_connect", { code, settings, video, events, clipboard });
+      return invoke<SessionInfo>("ctrl_connect", { code, resume, settings, video, events, clipboard });
     },
+    onHostOnline: (cb) => unlistenLater(listen<number>("host-online", (e) => cb(e.payload))),
     clipboardSync: (sid, enabled) => invoke("ctrl_clipboard", { sid, enabled }),
     audio: (sid, enabled) => invoke("ctrl_audio", { sid, enabled }),
     localClipboardText: () => invoke<string>("clipboard_text"),

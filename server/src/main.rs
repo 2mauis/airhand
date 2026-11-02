@@ -20,6 +20,7 @@ use airhand_proto::ALPN;
 use anyhow::{Context, Result};
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Endpoint, ServerConfig, TransportConfig, VarInt};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing::info;
 
 fn env_or(key: &str, default: &str) -> String {
@@ -46,6 +47,24 @@ pub fn transport_config() -> TransportConfig {
     // BBR：在有随机丢包的网络（Wi-Fi/跨境）上比 Cubic 更能维持吞吐，且排队延迟更低
     t.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     t
+}
+
+pub fn server_config(
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<ServerConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .context("the certificate and private key don't match")?;
+    tls.alpn_protocols = vec![ALPN.to_vec()];
+    tls.max_early_data_size = 0;
+
+    let mut cfg = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
+    cfg.transport_config(Arc::new(transport_config()));
+    Ok(cfg)
 }
 
 #[tokio::main]
@@ -77,19 +96,7 @@ async fn main() -> Result<()> {
         "(to enable certificate pinning, set AIRHAND_SERVER_FP to this fingerprint when building the client and when starting the web console)"
     );
 
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_no_client_auth()
-        .with_single_cert(cert.chain, cert.key)
-        .context("the certificate and private key don't match")?;
-    tls.alpn_protocols = vec![ALPN.to_vec()];
-    tls.max_early_data_size = 0;
-
-    let mut server_config = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?));
-    server_config.transport_config(Arc::new(transport_config()));
-
-    let endpoint = Endpoint::server(server_config, listen)
+    let endpoint = Endpoint::server(server_config(cert.chain, cert.key)?, listen)
         .with_context(|| format!("can't listen on {listen}"))?;
     info!("Airhand server started on udp://{listen}, up to {max_sessions} sessions per host");
 

@@ -388,6 +388,17 @@ export function SessionView({ s }: { s: RemoteSession }) {
                   </button>
                 </div>
               </div>
+            ) : s.state === "waiting" ? (
+              <div className="overlay-card">
+                <span className="spinner large" />
+                <div className="overlay-title">{t("session.waiting")}</div>
+                <div className="muted small">{t("session.waitingHint")}</div>
+                <div className="overlay-actions">
+                  <button className="ghost-btn" onClick={() => store.remove(s.id)}>
+                    {t("session.close")}
+                  </button>
+                </div>
+              </div>
             ) : (
               <div className="overlay-card">
                 <span className="spinner large" />

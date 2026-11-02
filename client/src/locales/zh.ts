@@ -11,6 +11,7 @@ export default {
   "common.disconnected": "已断开",
   "common.disconnect": "断开",
   "common.reconnecting": "正在重连…",
+  "common.waiting": "等待对方上线",
   "common.thisComputer": "本机",
 
   // 侧边栏
@@ -114,6 +115,8 @@ export default {
   "session.close": "关闭",
   "session.reconnecting": "正在重新连接…",
   "session.connecting": "正在连接…",
+  "session.waiting": "等待对方重新上线…",
+  "session.waitingHint": "对方已离线，重新上线后会自动连接",
   "session.attempt": "第 {n} 次尝试",
   "session.noClipboard": "本机剪贴板没有文本",
   "session.typed": "已键入 {n} 个字符",
@@ -191,6 +194,7 @@ export default {
   "problem.rateLimited": "尝试过于频繁，请稍后再试",
   "problem.hostBusy": "对方当前会话数已满",
   "problem.serverTimeout": "服务器响应超时",
+  "problem.hostOffline": "对方已离线",
   // 会话
   "problem.hostEnded": "对方结束了会话",
   "problem.hostUnresponsive": "对方电脑无响应",

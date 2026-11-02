@@ -11,6 +11,7 @@
 //!   * `{"type": "reply", "id": 1, "ok": 结果}` 或 `{"type": "reply", "id": 1, "err": Problem}`
 //!   * `{"type": "server", "state": ServerState}`：与中转服务器的连接状态，有变化就发
 //!   * `{"type": "event", "ch": 3, "event": SessionEvent}`：会话事件
+//!   * `{"type": "hostOnline", "code": 123456}`：在等的被控端上线了（见 `airhand_link::controller::HostOnline`）
 //! * 二进制：`ch u32 LE | 数据包`，数据包与桌面版相同（见 `airhand_link::controller::HEADER_LEN`）
 //!
 //! `ch` 是浏览器在 `connect` 时自己选的编号（相当于桌面版的 Tauri Channel）：会话的第一批数据
@@ -24,11 +25,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use airhand_link::controller::{
-    ControllerService, Frontend, SessionEvent, SessionInfo, SessionUi, UiClosed,
+    ControllerService, Frontend, HostOnline, SessionEvent, SessionInfo, SessionUi, UiClosed,
 };
 use airhand_link::net::Report;
 use airhand_link::{Problem, ServerState};
 use airhand_proto::session::{InputEvent, QualitySettings};
+use airhand_proto::signal::ResumeToken;
 use anyhow::{anyhow, bail};
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -65,6 +67,9 @@ enum Call {
     ServerStatus,
     Connect {
         code: String,
+        /// 重连凭证（上次连上时 connect 回复里的 resume），第一次连接时不带
+        #[serde(default)]
+        resume: Option<ResumeToken>,
         settings: QualitySettings,
         ch: u32,
     },
@@ -129,6 +134,9 @@ enum Out<'a> {
     Event {
         ch: u32,
         event: &'a SessionEvent,
+    },
+    HostOnline {
+        code: u32,
     },
 }
 
@@ -287,10 +295,17 @@ async fn run(socket: WebSocket, app: Arc<App>, peer: SocketAddr) {
             }
         })
     };
+    let host_online: HostOnline = {
+        let out = out.clone();
+        Arc::new(move |code| {
+            let _ = out.json(&Out::HostOnline { code });
+        })
+    };
     let svc = Arc::new(ControllerService::start(
         app.link.clone(),
         Handle::current(),
         report,
+        host_online,
     ));
     let mut console = Console {
         app,
@@ -367,10 +382,15 @@ impl Console {
                 hostname: &self.app.link.name,
             }),
             Call::ServerStatus => to_value(&*self.state.borrow()),
-            Call::Connect { code, settings, ch } => {
+            Call::Connect {
+                code,
+                resume,
+                settings,
+                ch,
+            } => {
                 let (svc, out) = (self.svc.clone(), self.out.clone());
                 self.tasks.spawn(async move {
-                    let r = connect(&svc, &out, &code, settings, ch).await;
+                    let r = connect(&svc, &out, &code, resume, settings, ch).await;
                     out.reply(req.id, r.and_then(to_value));
                 });
                 // 顺便回收已经结束的
@@ -398,6 +418,7 @@ async fn connect(
     svc: &ControllerService,
     out: &Outbox,
     code: &str,
+    resume: Option<ResumeToken>,
     settings: QualitySettings,
     ch: u32,
 ) -> Result<SessionInfo, Problem> {
@@ -406,7 +427,8 @@ async fn connect(
         ch,
         out: out.clone(),
     });
-    svc.connect(code, settings, ui, Frontend::Browser).await
+    svc.connect(code, resume, settings, ui, Frontend::Browser)
+        .await
 }
 
 #[cfg(test)]
@@ -424,11 +446,26 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(r.id, Some(7));
-        let Call::Connect { code, settings, ch } = r.call else {
+        let Call::Connect {
+            code,
+            resume,
+            settings,
+            ch,
+        } = r.call
+        else {
             panic!("{:?}", r.call)
         };
-        assert_eq!((code.as_str(), ch), ("123 456", 3));
+        assert_eq!((code.as_str(), ch, resume), ("123 456", 3, None));
         assert_eq!((settings.fps, settings.codec), (60, Codec::AV1));
+
+        // 重连：带上凭证
+        let token = [7u8; 16];
+        let r: Request = serde_json::from_value(json!({
+            "id": 8, "cmd": "connect", "code": "123456", "ch": 4, "resume": token,
+            "settings": { "fps": 30, "bitrate_kbps": 4000, "max_short": 0, "adaptive": false, "codec": "H264" }
+        }))
+        .unwrap();
+        assert!(matches!(r.call, Call::Connect { resume: Some(t), .. } if t == token));
 
         // 不带 id：不回复
         let r: Request = serde_json::from_value(json!({
@@ -491,6 +528,18 @@ mod tests {
                 event: &SessionEvent::Clipboard { text: "x".into() }
             }),
             json!({ "type": "event", "ch": 3, "event": { "type": "clipboard", "text": "x" } })
+        );
+        assert_eq!(
+            v(&Out::HostOnline { code: 123_456 }),
+            json!({ "type": "hostOnline", "code": 123_456 })
+        );
+        assert_eq!(
+            v(&Out::Reply {
+                id: 3,
+                ok: None,
+                err: Some(Problem::HostOffline)
+            }),
+            json!({ "type": "reply", "id": 3, "err": { "kind": "hostOffline" } })
         );
     }
 

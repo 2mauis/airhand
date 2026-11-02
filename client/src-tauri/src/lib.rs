@@ -24,10 +24,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use airhand_link::controller::{
-    ControllerService, Frontend, SessionEvent, SessionInfo, SessionUi, UiClosed,
+    ControllerService, Frontend, HostOnline, SessionEvent, SessionInfo, SessionUi, UiClosed,
 };
 use airhand_link::{Problem, ServerState};
 use airhand_proto::session::{InputEvent, QualitySettings};
+use airhand_proto::signal::ResumeToken;
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -87,10 +88,16 @@ fn switch_services(app: &AppHandle, mode: Mode) {
                 host::macos::request_permissions();
             }
             Mode::Controller => {
+                // 在等的被控端上线了：告诉控制台，等它的会话马上重连
+                let handle = app.clone();
+                let host_online: HostOnline = Arc::new(move |code| {
+                    let _ = handle.emit_to(CONSOLE, "host-online", code);
+                });
                 sv.controller = Some(Arc::new(ControllerService::start(
                     config::link(),
                     tauri::async_runtime::handle().inner().clone(),
                     status::server_reporter(&state.hub),
+                    host_online,
                 )))
             }
         }
@@ -301,6 +308,7 @@ impl SessionUi for ConsoleUi {
 async fn ctrl_connect(
     state: tauri::State<'_, AppState>,
     code: String,
+    resume: Option<ResumeToken>,
     settings: QualitySettings,
     video: Channel<InvokeResponseBody>,
     events: Channel<SessionEvent>,
@@ -313,7 +321,7 @@ async fn ctrl_connect(
         clipboard: Box::new(clipboard::ClipSync::new()),
         sync: clipboard,
     };
-    svc.connect(code, settings, ui, frontend).await
+    svc.connect(code, resume, settings, ui, frontend).await
 }
 
 #[tauri::command]

@@ -31,6 +31,7 @@ function Console() {
     void api.serverStatus().then(store.setServer);
     void supportedDecoders().then(store.setDecoders);
     const unStatus = api.onServerStatus(store.setServer);
+    const unOnline = api.onHostOnline(store.hostOnline);
     // 屏蔽 WebView 自带的刷新/查找/打印等快捷键，避免误触
     const block = (e: KeyboardEvent) => {
       if (e.key === "F5" || ((e.ctrlKey || e.metaKey) && ["r", "p", "f", "g", "j", "u"].includes(e.key.toLowerCase()))) {
@@ -49,6 +50,7 @@ function Console() {
     window.addEventListener("beforeunload", confirmLeave);
     return () => {
       unStatus();
+      unOnline();
       unLang();
       window.removeEventListener("keydown", block);
       window.removeEventListener("contextmenu", noMenu);

@@ -127,7 +127,9 @@ function SessionItem({ s, active }: { s: RemoteSession; active: boolean }) {
       ? `${Math.round(s.stats.fps)} fps · ${s.stats.rttMs != null ? `${Math.round(s.stats.rttMs)} ms` : "—"}`
       : s.state === "reconnecting"
         ? t("common.reconnecting")
-        : s.state === "connecting"
+        : s.state === "waiting"
+          ? t("common.waiting")
+          : s.state === "connecting"
           ? t("common.connecting")
           : t("common.disconnected");
   return (
