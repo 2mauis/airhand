@@ -15,7 +15,7 @@ services:
     ports:
       - "${AIRHAND_WEB_PORT:-8080}:8080" # HTTP 和 HTTPS 共用这一个端口（TCP）
     volumes:
-      - data:/data # 网页的自签名 HTTPS 证书（保持不变，浏览器就不会每次都提示）
+      - ./data:/data # 网页的自签名 HTTPS 证书（保持不变，浏览器就不会每次都提示）
     environment:
       # 中转服务器地址（host:port，UDP）
       AIRHAND_SERVER: ${AIRHAND_SERVER:?set AIRHAND_SERVER to the relay server address, e.g. relay.example.com:4433}
@@ -33,6 +33,3 @@ services:
       options:
         max-size: 10m
         max-file: "3"
-
-volumes:
-  data:
