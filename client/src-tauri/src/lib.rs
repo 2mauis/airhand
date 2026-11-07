@@ -239,9 +239,9 @@ fn on_console_destroyed(app: &AppHandle) {
 
 pub(crate) fn on_menu(app: &AppHandle, id: &str) {
     match id {
-        "to_controller" => set_mode(app, Mode::Controller),
+        // Windows 安装版从被控端模式打开控制台时，也要启动控制端服务，不能只创建窗口。
+        "to_controller" | "console" => set_mode(app, Mode::Controller),
         "to_host" => set_mode(app, Mode::Host),
-        "console" => open_console(app),
         "lang_zh" => set_lang(app, Lang::Zh),
         "lang_en" => set_lang(app, Lang::En),
         "kick_all" | "new_code" => {
