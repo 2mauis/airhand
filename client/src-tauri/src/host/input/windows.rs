@@ -1,6 +1,11 @@
 //! Windows `SendInput` 注入。
+//!
+//! 注入在一个专用线程上进行：`SendInput` 只对调用线程所在的桌面有效，这个线程每次注入前都切到当前的输入桌面
+//!（UAC 确认框、锁屏所在的安全桌面也一样，见 [`crate::host::desktop`]）。所有会话共用这个线程，事件按顺序注入。
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
+use std::sync::mpsc;
 
 use airhand_proto::session::{DisplayInfo, InputEvent, MouseButton};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -184,9 +189,23 @@ impl WinInjector {
         if self.batch.is_empty() {
             return;
         }
-        crate::host::dpi_aware(|| unsafe {
-            SendInput(&self.batch, std::mem::size_of::<INPUT>() as i32);
-        });
-        self.batch.clear();
+        let _ = INJECTOR.send(std::mem::take(&mut self.batch));
     }
 }
+
+/// 注入线程（第一次使用时启动，随进程退出）
+static INJECTOR: LazyLock<mpsc::Sender<Vec<INPUT>>> = LazyLock::new(|| {
+    let (tx, rx) = mpsc::channel::<Vec<INPUT>>();
+    std::thread::Builder::new()
+        .name("airhand-input".into())
+        .spawn(move || {
+            while let Ok(batch) = rx.recv() {
+                crate::host::desktop::follow();
+                crate::host::dpi_aware(|| unsafe {
+                    SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
+                });
+            }
+        })
+        .expect("spawn input thread");
+    tx
+});

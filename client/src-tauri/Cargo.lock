@@ -25,6 +25,7 @@ dependencies = [
  "airhand-proto",
  "anyhow",
  "arboard",
+ "base64 0.23.1",
  "block2",
  "bytes",
  "dispatch2",
@@ -47,9 +48,11 @@ dependencies = [
  "quinn",
  "rand 0.9.5",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
+ "toml_edit 0.25.17+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "windows",
@@ -4192,6 +4195,7 @@ dependencies = [
  "indexmap 2.14.2",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

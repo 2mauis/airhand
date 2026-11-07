@@ -13,7 +13,7 @@ async fn main() {
         let st = rx.borrow_and_update().clone();
         println!(
             "server: {:?} code: {:?} controllers: {:?}",
-            st.server, st.code, st.controllers
+            st.host.server, st.host.code, st.host.controllers
         );
         if rx.changed().await.is_err() {
             break;

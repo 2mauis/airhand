@@ -3,6 +3,8 @@
 pub(crate) mod audio;
 pub mod capture;
 pub(crate) mod clock;
+#[cfg(windows)]
+pub(crate) mod desktop;
 pub mod encoder;
 mod input;
 #[cfg(target_os = "macos")]
@@ -94,6 +96,7 @@ pub struct HostService {
 }
 
 impl HostService {
+    /// 启动被控端，状态写进 `hub` 的 [`AppStatus::host`](crate::status::AppStatus::host)。
     pub fn start(hub: StatusHub) -> Self {
         clock::init();
         let (cmd, rx) = mpsc::unbounded_channel();
@@ -103,6 +106,12 @@ impl HostService {
 
     pub fn send(&self, c: HostCmd) {
         let _ = self.cmd.send(c);
+    }
+
+    /// 向被控端发命令的另一个入口（系统服务里的被控端经命名管道收到托盘的命令）
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn commands(&self) -> mpsc::UnboundedSender<HostCmd> {
+        self.cmd.clone()
     }
 }
 
@@ -114,16 +123,25 @@ impl Drop for HostService {
 }
 
 async fn run(hub: StatusHub, mut cmds: mpsc::UnboundedReceiver<HostCmd>) {
-    let mut reclaim: Option<Reclaim> = None;
-    let mut reconnect = Reconnect::new(crate::status::server_reporter(&hub));
+    // 保存过的控制码（Windows 的 config.toml）：第一次连接就取回它
+    let mut reclaim: Option<Reclaim> = config::settings().code();
+    let mut reconnect = Reconnect::new(crate::status::host_reporter(&hub));
     loop {
         reconnect.begin();
         let result = connect_once(&hub, &mut reclaim, &mut cmds).await;
         hub.send_modify(|s| {
-            s.code = None;
-            s.controllers.clear();
+            s.host.code = None;
+            s.host.controllers.clear();
         });
         reconnect.end("host", result).await;
+    }
+}
+
+/// 保存控制码（没有配置文件的平台什么也不做）。写不进去只是下次启动时换一个控制码，不影响这次运行
+async fn save_code(code: Option<Reclaim>) {
+    let r = tokio::task::spawn_blocking(move || config::save_code(code)).await;
+    if let Ok(Err(e)) = r {
+        warn!("can't save the control code: {e:#}");
     }
 }
 
@@ -134,7 +152,14 @@ async fn connect_once(
     cmds: &mut mpsc::UnboundedReceiver<HostCmd>,
 ) -> Result<()> {
     let mut sig = net::connect_signal(&config::link(), Role::Host).await?;
-    write_msg(&mut sig.send, &ClientMsg::Register { reclaim: *reclaim }).await?;
+    write_msg(
+        &mut sig.send,
+        &ClientMsg::Register {
+            reclaim: *reclaim,
+            keep: config::persistent(),
+        },
+    )
+    .await?;
 
     // 独立的读任务，保证 select 中的接收是取消安全的
     let (tx, mut rx) = mpsc::channel::<ServerMsg>(16);
@@ -158,13 +183,17 @@ async fn connect_once(
         bail!("registration failed: {first:?}");
     };
     if reclaim.is_some_and(|r| r.code != code) {
-        info!("the previous control code expired, got a new one");
+        info!("the previous control code isn't available anymore, got a new one");
     }
-    *reclaim = Some(Reclaim { code, secret });
+    let got = Reclaim { code, secret };
+    if *reclaim != Some(got) {
+        save_code(Some(got)).await;
+    }
+    *reclaim = Some(got);
     info!(code, "host connected to the server");
     hub.send_modify(|s| {
-        s.code = Some(code);
-        s.server = ServerState::Connected;
+        s.host.code = Some(code);
+        s.host.server = ServerState::Connected;
     });
 
     let mut sessions: JoinSet<u64> = JoinSet::new();
@@ -175,7 +204,7 @@ async fn connect_once(
             msg = rx.recv() => match msg {
                 Some(ServerMsg::Incoming { session_id, peer }) => {
                     info!(session_id, name = %peer.name, ip = %peer.ip, "controller wants to connect");
-                    hub.send_modify(|s| s.controllers.push(Controller { session_id, peer }));
+                    hub.send_modify(|s| s.host.controllers.push(Controller { session_id, peer }));
                     let (conn, kick) = (sig.conn.clone(), kick_tx.subscribe());
                     sessions.spawn(async move {
                         let _ = session::run(conn, session_id, kick).await;
@@ -190,11 +219,11 @@ async fn connect_once(
             },
             Some(done) = sessions.join_next() => {
                 if let Ok(id) = done {
-                    hub.send_modify(|s| s.controllers.retain(|c| c.session_id != id));
+                    hub.send_modify(|s| s.host.controllers.retain(|c| c.session_id != id));
                 }
             }
             Some(cmd) = cmds.recv() => {
-                info!(?cmd, "tray command");
+                info!(?cmd, "command from the tray");
                 kick_tx.send_replace(match cmd {
                     HostCmd::KickAll => ByeReason::Kicked,
                     HostCmd::NewCode => ByeReason::CodeChanged,
@@ -205,7 +234,17 @@ async fn connect_once(
                         while sessions.join_next().await.is_some() {}
                     })
                     .await;
+                    // 解除服务器上的绑定，并忘掉保存的控制码（万一重新注册之前就退出了，下次启动也不会再用旧码）
+                    let release = async {
+                        write_msg(&mut sig.send, &ClientMsg::Release).await?;
+                        // 服务器处理完 Release 才会读到控制流结束、断开连接
+                        let _ = sig.send.finish();
+                        sig.conn.closed().await;
+                        anyhow::Ok(())
+                    };
+                    let _ = tokio::time::timeout(Duration::from_secs(2), release).await;
                     *reclaim = None;
+                    save_code(None).await;
                     sig.conn.close(quinn::VarInt::from_u32(0), b"new code");
                     return Ok(());
                 }

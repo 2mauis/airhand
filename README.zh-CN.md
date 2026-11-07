@@ -8,17 +8,20 @@
 
 Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑）和**控制端**（你用来操作的电脑），支持 **Windows**、**macOS**（13 及以上）和 **Linux**（X11 桌面）。另有一个很小的中转服务器，用 Docker Compose 一条命令部署，负责信令和转发。控制端也可以用 Docker Compose 部署成**网页控制台**，在浏览器里使用。
 
+Windows 上的 Airhand 需要安装，被控端作为系统服务运行：锁屏、登录界面和 UAC 确认框也能远程操作，控制码固定不变。
+
 > **状态：**开发中。协议在版本之间还会变化，客户端和服务器需要用同一个版本构建（版本不一致时会检测出来并提示，见[协议版本](#协议版本)）。
 
 ## 功能
 
 - **默认是被控端**：启动后只有一个托盘图标，没有窗口，也不启动 WebView
+- **Windows 系统服务**：锁屏、登录界面和 UAC 确认框也能看到、能操作；**控制码固定不变**；可以开机自动启动（见 [Windows 安装版](#windows-安装版)）
 - **控制台**：**同时控制多台电脑**，随时切换，或者在多屏总览里同时看所有画面
 - **网页控制台**：控制端用 Docker Compose 启动，浏览器打开一个端口就能用，操作的电脑上什么都不用装（见[网页控制台](#网页控制台docker)）
 - **低延迟、省带宽**：硬件 **AV1 / HEVC / H.264** 编码，画面不变就不发帧，自适应码率，鼠标指针在本地移动、没有延迟
 - **声音**：被控端的系统声音同步到控制端，看视频时可以打开音画同步
 - **实用工具**：剪贴板双向同步、以键盘输入方式发送剪贴板、系统快捷键（Win、Alt+Tab、Ctrl+Shift+Esc 等）、多显示器、全屏时锁定键盘
-- **零文件**：没有配置文件，不在磁盘上留下任何东西（见[下文](#零文件)）
+- **不留痕迹**：macOS 和 Linux 上没有配置文件，不往磁盘上写任何东西；Windows 上只有安装目录里的 `config.toml`，卸载时和系统服务一起删除（见[下文](#磁盘上的文件)）
 - **默认安全**：TLS 1.3 + 证书指纹固定，控制码防暴力猜测
 - **中英双语**：跟随系统语言，可以随时切换
 
@@ -50,11 +53,13 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
    npm install
    $env:AIRHAND_SERVER    = "relay.example.com:4433"
    $env:AIRHAND_SERVER_FP = "<第 1 步记下的指纹>"
-   npm run tauri build -- --no-bundle
-   # → client/src-tauri/target/release/airhand.exe（单个文件，约 9 MB）
+   npm run tauri build
+   # → client/src-tauri/target/release/bundle/nsis/Airhand_<版本>_x64-setup.exe（安装程序）
    ```
 
-3. **两台电脑上都运行它**。在被控的电脑上右键托盘图标，看到 6 位**控制码**；在你自己的电脑上从托盘菜单选择**切换为控制端**，输入控制码。
+   Windows 上装好之后也可以在安装目录的 `config.toml` 里修改服务器地址和指纹（见 [Windows 安装版](#windows-安装版)）。
+
+3. **两台电脑上都装上它**（Windows 运行安装程序，需要管理员权限）。在被控的电脑上右键托盘图标，看到 6 位**控制码**；在你自己的电脑上从托盘菜单选择**打开控制台**（macOS / Linux 是**切换为控制端**），输入控制码。
 
    不想在操作的电脑上装客户端的话，也可以用[网页控制台](#网页控制台docker)：`cd web && AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<指纹> docker compose up -d`，然后用浏览器打开。
 
@@ -62,23 +67,42 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
 
 ### 被控端（默认）
 
-双击运行，右下角（macOS 是屏幕顶部的菜单栏，Linux 是顶栏 / 任务栏的状态区）出现托盘图标：灰色表示没连上服务器，彩色表示已连接。右键（macOS 上单击）菜单里有：
+双击运行（Windows 要先安装，见 [Windows 安装版](#windows-安装版)），右下角（macOS 是屏幕顶部的菜单栏，Linux 是顶栏 / 任务栏的状态区）出现托盘图标：灰色表示没连上服务器，彩色表示已连接。右键（macOS 上单击）菜单里有：
 
 - 当前模式、服务器状态
 - **控制码**和"复制控制码"
 - 正在控制本机的控制端，以及**断开所有控制端**
 - **更换控制码**：旧码立即失效，已连接的控制端会被断开
-- 切换为控制端 / 语言 / 退出
+- 打开控制台、**开机自动启动**（Windows）/ 切换为控制端（macOS、Linux）/ 语言 / 退出
 
-掉线后会按指数退避自动重连，并且**取回原来的控制码**（服务器重启后也能取回）。被控端离线后 10 分钟内，它的控制码不会分配给别人。
+掉线后会按指数退避自动重连，并且**取回原来的控制码**（服务器重启后也能取回）。Windows 上控制码是**固定的**：保存在 `config.toml` 里，服务器为这台电脑一直保留它，离线多久都不会分给别人（180 天没有上线才释放），所以重启、升级之后都不变，直到你主动更换。macOS 和 Linux 每次启动都分配新的控制码，被控端离线后 10 分钟内它的控制码不会分配给别人。
 
 > Linux 的托盘图标走 AppIndicator：Ubuntu、KDE、Xfce 等开箱即用，原版 GNOME 需要装 "AppIndicator and KStatusNotifierItem Support" 扩展。没有 AppIndicator 库时程序照常作为被控端运行，控制码打印在日志（stderr）里。
 
 > macOS 上被控端需要两项系统权限：**屏幕与系统录音**（采集画面和声音）和**辅助功能**（操作键盘鼠标）。第一次启动时系统会弹窗询问；没有授权时菜单里会有提示，点一下就打开"系统设置 → 隐私与安全性"里对应的页面；连上来的控制端也会看到对方缺少哪一项权限（按控制端自己的语言显示），对方授权后提示自动消失。授予"屏幕与系统录音"后需要重新打开 Airhand。Airhand 平时只在菜单栏里，打开控制台时才出现在程序坞中。
 
+### Windows 安装版
+
+Windows 上用安装程序安装（装到 `C:\Program Files\Airhand`，所有用户共用，需要管理员权限）。被控端作为系统服务 **Airhand** 运行：以 SYSTEM 身份运行在当前坐在屏幕前的用户的会话里，所以锁屏、登录界面和 UAC 确认框上也能照常控制，切换用户时也会跟过去。托盘图标是一个普通程序，显示服务的状态、操作服务：
+
+- 打开 Airhand 时启动服务；托盘里**退出**时停止服务（和以前一样，退出后本机不能再被控制）；服务停止（或者被卸载）时托盘也随之退出
+- **开机自动启动**（托盘菜单，默认开启）：开机时启动服务，登录之前就能被控制；登录后出现托盘图标
+- 安装目录里的 `config.toml`（安装时生成，里面有注释）：
+
+  | 键 | 说明 |
+  |---|---|
+  | `server` | 中转服务器 `host:port`；不设置时使用编译进程序的地址 |
+  | `server_fp` | 中转服务器的证书指纹；`""` 表示不校验（只适合开发环境）；不设置时使用编译进程序的指纹 |
+  | `autostart` | 开机自动启动（托盘菜单里也可以切换） |
+  | `[code]` | 服务器分配的控制码，以及取回它用的密钥（用 DPAPI 加密，只有这台电脑上的 Airhand 能解开）。删掉 `code` 和 `secret` 就会重新分配 |
+
+  用管理员身份修改，然后重新启动 Airhand（退出，再打开）。Airhand 保存控制码、开机自动启动时会保留你改过的内容和注释
+- **卸载**（设置 → 应用）会停止并删除服务、开机启动项、`config.toml` 和程序，不留下任何东西。在旧版本上安装新版本时保留 `config.toml`（也就保留了控制码），选择"先卸载旧版本"也一样
+- 没有安装的 `airhand.exe` 不能直接运行：发布版会提示运行安装程序。调试构建（`npm run tauri dev`）和 macOS、Linux 一样在托盘进程里运行被控端，`config.toml` 放在程序旁边（`client/src-tauri/target/debug/`）
+
 ### 控制端
 
-托盘 →**切换为控制端**，打开控制台。关闭控制台窗口会回到被控端模式。
+托盘 →**切换为控制端**，打开控制台。关闭控制台窗口会回到被控端模式。Windows 上这一项是**打开控制台**：控制台打开期间，服务里的被控端照常运行。
 
 - 输入 6 位控制码连接（可以直接粘贴 `123 456`）。可以连任意多台，在左侧列表切换，或者打开**多屏总览**
 - 工具栏：显示器切换、**画质**、快捷键、剪贴板（双向同步 / 以键盘输入方式发送）、声音（静音 / 音画同步）、1:1 原始大小、全屏、断开
@@ -96,7 +120,7 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
 
 ## 服务端配置
 
-服务器监听 **UDP 4433**。首次启动时会在 `docker-compose.yml` 同目录的 `data/` 下生成自签名证书，**请保留这个目录**：客户端靠证书指纹认出服务器。
+服务器监听 **UDP 4433**。首次启动时会在 `docker-compose.yml` 同目录的 `data/` 下生成自签名证书，**请保留这个目录**：客户端靠证书指纹认出服务器，Windows 被控端固定的控制码也记在这里的 SQLite 数据库里（`airhand.db`，服务器运行时旁边还有 `-wal`、`-shm` 两个文件）。
 
 环境变量（见 `docker-compose.yml`）：
 
@@ -105,6 +129,7 @@ Airhand 是一个程序，同时包含**被控端**（被远程控制的电脑�
 | `AIRHAND_LISTEN` | `0.0.0.0:4433` | 监听地址（UDP） |
 | `AIRHAND_CERT` / `AIRHAND_KEY` | `/data/cert.pem` / `/data/key.pem` | 证书路径，不存在时自动生成 |
 | `AIRHAND_CERT_NAMES` | `airhand,localhost` | 自动生成证书时写入的 SAN |
+| `AIRHAND_DB` | 证书旁边的 `airhand.db` | SQLite 数据库，存固定的控制码（控制码、被控端密钥的哈希、最后在线时间）。丢了它，离线的被控端的控制码就可能分给别人（没人占用的话仍然能取回）。打不开时服务器把控制码记在内存里，并在日志里报错 |
 | `AIRHAND_MAX_SESSIONS` | `4` | 每台被控端同时允许的控制端数量 |
 | `RUST_LOG` | `info` | 日志级别 |
 
@@ -161,11 +186,11 @@ AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<服务器证书指纹> 
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
   ```
 
-服务器地址和证书指纹**编译进程序**：构建时设置 `AIRHAND_SERVER` 和 `AIRHAND_SERVER_FP`（同[快速开始](#快速开始)），或者修改 `client/src-tauri/src/config.rs` 里的默认值。不设置 `AIRHAND_SERVER` 时连接 `127.0.0.1:4433`。指纹的格式不对（不是 64 位十六进制，允许用 `:` 或空格分隔）时构建会直接报错。
+服务器地址和证书指纹**编译进程序**：构建时设置 `AIRHAND_SERVER` 和 `AIRHAND_SERVER_FP`（同[快速开始](#快速开始)），或者修改 `client/src-tauri/src/config.rs` 里的默认值。不设置 `AIRHAND_SERVER` 时连接 `127.0.0.1:4433`。指纹的格式不对（不是 64 位十六进制，允许用 `:` 或空格分隔）时构建会直接报错。Windows 上它们只是默认值，`config.toml` 里的 `server`、`server_fp` 优先（那里的 `server_fp` 写错了会拒绝所有连接，而不是不校验）。
 
 > `AIRHAND_SERVER_FP` 留空时**不校验服务器证书**，无法防止中间人攻击，只适合开发环境；这时控制台左上角会显示"未固定证书"。
 
-**Windows**：`npm run tauri build -- --no-bundle` 生成 `client/src-tauri/target/release/airhand.exe`；去掉 `--no-bundle` 会额外生成 NSIS 安装包。
+**Windows**：`npm run tauri build` 生成 NSIS 安装程序 `client/src-tauri/target/release/bundle/nsis/Airhand_<版本>_x64-setup.exe`，为所有用户安装并注册系统服务（见 [Windows 安装版](#windows-安装版)；安装程序的附加步骤在 `client/src-tauri/windows/hooks.nsh`）。`-- --no-bundle` 只生成 `airhand.exe`，发布版没有安装时不能运行。
 
 - C 运行时是静态链接的，不需要装 VC++ 运行库
 - Media Foundation 是延迟加载的，Windows N 版（没装媒体功能包）也能运行，会改用软件编码
@@ -221,7 +246,7 @@ npm run tauri build
 | `client/src/` | 控制台界面（React 19 + TypeScript，不依赖 UI 库），桌面版和网页版共用，区别只在 `client/src/lib/backend/`；文案在 `client/src/locales/` |
 | `assets/icon.svg` | 应用图标源文件 |
 
-被控端各环节在三个平台上的实现：
+被控端各环节在三个平台上的实现（Windows 上它们运行在系统服务里，见 [Windows 服务](#windows-服务)）：
 
 | 环节 | Windows | macOS | Linux（X11） |
 |---|---|---|---|
@@ -232,6 +257,21 @@ npm run tauri build
 | 声音采集 | WASAPI 环回 | ScreenCaptureKit（系统混音） | PulseAudio / PipeWire 的输出监视器 |
 | 剪贴板 | 剪贴板序号检测变化 | NSPasteboard 变化计数 | XFIXES 选择所有者变化通知 |
 | 控制台界面 | WebView2 | WKWebView | WebKitGTK（WebCodecs 由 GStreamer 解码） |
+
+### Windows 服务
+
+同一个 `airhand.exe` 按命令行参数扮演不同的角色（`client/src-tauri/src/winsvc/`）：
+
+| 进程 | 身份 | 做什么 |
+|---|---|---|
+| `airhand.exe` | 登录的用户 | 托盘和控制台 |
+| `airhand.exe --service` | SYSTEM，会话 0 | 系统服务 Airhand：在控制台会话（物理屏幕前的那个会话）里启动被控端并看护它；控制台会话变了（切换用户、注销）就把它挪过去，退出了就重新启动 |
+| `airhand.exe --agent` | SYSTEM，控制台会话 | 被控端：连接服务器、采集、编码、注入键鼠、声音、剪贴板 |
+| `airhand.exe --install` / `--uninstall` / `--stop-service` | 管理员 | 安装程序调用 |
+
+- 桌面复制和 `SendInput` 只对调用线程所在的桌面有效。UAC 确认框、锁屏和登录界面在安全桌面 `Winlogon` 上，只有 SYSTEM 能打开；采集线程和注入线程在用之前先切到当前接收输入的桌面上（`client/src-tauri/src/host/desktop.rs`）
+- 托盘和被控端之间是每个会话一个的命名管道（`\\.\pipe\airhand-host-<会话>`），每行一条 JSON 消息。只有交互登录的用户能连接，不能再开一个同名管道实例冒充被控端，托盘还会核对管道属于 SYSTEM
+- 服务和被控端没有控制台：日志用 `OutputDebugString` 输出（见"开发"里的 [Windows 服务](#windows-服务-1)）
 
 ### 画面
 
@@ -276,9 +316,9 @@ npm run tauri build
 
 画到 Canvas 之后到屏幕真正亮起来的时间按 8 ms 估算（没有用摄像头实测）。
 
-### 零文件
+### 磁盘上的文件
 
-- 没有配置文件，服务器地址编译在程序里；日志只写到 stderr
+- macOS 和 Linux：没有配置文件，服务器地址编译在程序里。Windows：只有安装目录里的 `config.toml`（见 [Windows 安装版](#windows-安装版)），卸载时删除。日志从不写文件：写到 stderr，Windows 服务写到 `OutputDebugString`
 - 被控端模式**不创建 WebView**，不会产生任何文件
 - 单实例锁用的是内核对象而不是锁文件：Windows 是命名互斥量，Linux 是抽象命名空间的 Unix 套接字，macOS 是登记在 bootstrap 服务里的 Mach 端口名
 - 控制台的 WebView 需要数据目录：放在临时目录下的随机子目录，开启隐私模式（不保存 Cookie 和缓存），关闭窗口或退出程序时删除；进程被强制结束时，下次启动会清理残留。macOS 的 WKWebView 不需要数据目录，隐私模式下完全不写磁盘
@@ -292,6 +332,8 @@ npm run tauri build
 - 防暴力猜码：同一个 IP（IPv6 按 /64 合并）10 分钟内最多失败 20 次，每次失败额外延迟 400 ms
 - 重连凭证：连上被控端时服务器给控制端一个凭证（由被控端的控制码和密钥算出，算不出也反推不出密钥），重连时带上。带凭证的请求不算失败、不受限速影响，所以被控端离线再久，控制端的自动重连也不会把自己（或者共用一个 IP 的网页控制台）锁住；凭证不对时服务器一律回答“不在线”，不透露控制码是否存在，凭证不能用来猜码。被控端换了控制码，旧凭证就作废了
 - 重连后取回控制码需要随机密钥，别人无法冒领
+- 固定的控制码（Windows）：服务器只保存被控端密钥的哈希（在 `airhand.db` 里），拿到数据库也冒领不了控制码；被控端上的密钥用 SYSTEM 账户的 DPAPI 加密，把 `config.toml` 拷到别的电脑上也带不走控制码。**更换控制码**时服务器上的旧码随即释放
+- Windows 被控端以 SYSTEM 身份运行，才能操作 UAC 确认框和登录界面：拿到控制码的人就能以管理员权限控制这台电脑。只把控制码告诉信任的人；坐在电脑前的人随时能看到谁连着、断开他们、更换控制码或者退出 Airhand
 - 被控端在托盘里随时能看到谁在控制本机，可以一键断开或更换控制码
 - 中转服务器能看到会话流的内容（TLS 在服务器终止），请部署在你信任的机器上
 - 网页控制台：WebSocket 只接受同一个网站的页面（防止别的网站在你的浏览器里偷偷连上来）；可以设置访问密码（HTTP Basic 登录，之后是 HttpOnly、SameSite=Strict 的 Cookie，密码错误时延迟回应）；从其它电脑访问请用 HTTPS。网页控制台同样能看到画面，请部署在你信任的机器上。所有人都通过这台机器的 IP 连中转服务器，防暴力猜码的额度也是大家共用的
@@ -301,7 +343,8 @@ npm run tauri build
 - 被控端支持 Windows 和 Linux 的 **X11** 桌面。Wayland 下只能看到 / 操作 X11（XWayland）程序，原生 Wayland 窗口是黑的，控制端会提示改用 X11（Xorg）会话登录。完整的 Wayland 支持需要 xdg-desktop-portal 屏幕共享（每次都要本机用户确认），尚未实现
 - Linux 被控端只有 OpenH264 软件编码（还没接 VA-API / NVENC），选择 AV1 / HEVC 时会改用 H.264
 - Linux 控制端的解码依赖 WebKitGTK + GStreamer：H.264 需要 `gstreamer1.0-plugins-bad`（解析）和 `gstreamer1.0-libav` 或 openh264（解码）；AV1 / HEVC 取决于装了哪些 GStreamer 解码器。某种格式实际解不出画面时，控制端会改用 H.264
-- Windows 上不以管理员身份运行时，无法采集或操作 UAC 弹窗和锁屏界面（它们在安全桌面上，需要以 SYSTEM 服务运行），也无法注入 `Ctrl+Alt+Del`。Linux 的锁屏同理（屏保程序会独占键鼠）
+- Windows 被控端只在控制台会话（物理屏幕）里运行：远程桌面（RDP）会话不能被控制。还不能发送 `Ctrl+Alt+Del`（需要 `SendSAS`）。调试构建在托盘进程里运行被控端，没有 SYSTEM 权限，采集和操作不了 UAC 确认框和锁屏（这期间控制端会显示采集失败）
+- Linux 的锁屏无法操作（屏保程序会独占键鼠）
 - macOS 被控端需要"屏幕与系统录音"和"辅助功能"两项权限，只能由本机用户在系统设置里授予；macOS 15 起系统还会定期询问是否继续允许它录屏。登录界面和锁屏无法采集或操作
 - Mac 被控端不提供 AV1 编码（目前的 Apple 芯片只能硬件解码 AV1），控制台里的 AV1 会显示为不可用
 - macOS 控制端（WKWebView）不支持键盘锁定：全屏时 Command+Tab、Command+空格等系统快捷键仍由本机处理，请用工具栏的"发送快捷键"。较旧的 macOS 上 WKWebView 可能不支持 Opus 解码，这时控制台会提示无法播放远程声音
@@ -359,6 +402,19 @@ cargo run --release --example encode_bench
 ```
 
 测画面流畅度或音画同步时请用 release 构建：调试构建缩放很慢（4K → 1080p 每帧约 0.5 秒）。
+
+### Windows 服务
+
+调试构建在托盘进程里运行被控端，`npm run tauri dev` 不需要安装。要调试服务本身，可以装上安装程序，或者在管理员终端里直接注册某个构建：
+
+```powershell
+# client/src-tauri/
+target\release\airhand.exe --install       # 为这个 airhand.exe 注册并启动服务（在它旁边生成 config.toml）
+target\release\airhand.exe --stop-service  # 重新构建之前先停止：exe 正在使用
+target\release\airhand.exe --uninstall     # 删除服务和开机启动项
+```
+
+服务和被控端的日志用 `OutputDebugString` 输出：以管理员身份运行 Sysinternals 的 DebugView，勾选 Capture → Capture Global Win32。要改日志级别，在 `HKLM\SYSTEM\CurrentControlSet\Services\Airhand` 下新建多字符串值 `Environment`，写入 `AIRHAND_LOG=debug`，然后重启服务。服务装着的时候，从别处启动的调试构建仍然在自己的进程里运行被控端（有自己的 `config.toml` 和控制码）。
 
 ### 网页控制台
 

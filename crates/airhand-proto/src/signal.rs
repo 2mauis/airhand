@@ -22,6 +22,14 @@
 //!   发 [`ServerMsg::HostOnline`]，控制端收到后马上重连。等待期间控制端不需要反复尝试。
 //!
 //! 凭证跟着被控端的控制码走：被控端取回原来的控制码（包括服务器重启之后）时凭证仍然有效，换了控制码就失效了。
+//!
+//! # 固定控制码
+//!
+//! 被控端把控制码和密钥保存下来（Windows 安装版保存在安装目录的 `config.toml` 里）时，注册时带上
+//! [`ClientMsg::Register::keep`]：服务器把这个控制码**绑定**到这台被控端（只记密钥的哈希，存在服务器的 SQLite 数据库里），
+//! 被控端离线多久、服务器重启多少次，都不会把它分给别人，被控端上线时总能取回。很久（见服务器的
+//! `BINDING_TTL`）没有上线的绑定才会被清理。被控端更换控制码时先发 [`ClientMsg::Release`] 解除绑定。
+//! 不保存控制码的被控端（`keep = false`）和以前一样：掉线后控制码只保留一小段时间。
 
 use std::net::IpAddr;
 
@@ -42,7 +50,12 @@ pub enum ClientMsg {
         os: String,
     },
     /// 被控端申请控制码。断线重连时携带上次的控制码与密钥，以便取回同一个控制码。
-    Register { reclaim: Option<Reclaim> },
+    ///
+    /// `keep`：被控端会保存控制码（重启后也带着它来取回），服务器应该一直为它保留（见模块说明的"固定控制码"）。
+    Register {
+        reclaim: Option<Reclaim>,
+        keep: bool,
+    },
     /// 控制端请求连接某个控制码对应的被控端。
     ///
     /// `resume`：之前连上这个控制码时得到的重连凭证（见模块说明的"重连凭证"），第一次连接时为 `None`。
@@ -51,12 +64,14 @@ pub enum ClientMsg {
         code: u32,
         resume: Option<ResumeToken>,
     },
+    /// 被控端放弃当前的控制码（托盘"更换控制码"）：解除绑定，之后断开连接、不带 `reclaim` 重新注册。
+    Release,
 }
 
 /// 重连凭证（见模块说明）。对客户端来说是不透明的，原样带回即可
 pub type ResumeToken = [u8; 16];
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reclaim {
     pub code: u32,
     pub secret: [u8; 16],

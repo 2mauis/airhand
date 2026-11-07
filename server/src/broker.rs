@@ -1,7 +1,7 @@
 //! 信令与会话中转。
 //!
 //! 服务器只做三件事：
-//! 1. 为被控端分配 6 位控制码（断线重连可取回原控制码）；
+//! 1. 为被控端分配 6 位控制码（断线重连可取回原控制码；保存了控制码的被控端一直为它保留，见 [`crate::codes`]）；
 //! 2. 控制端按控制码发起会话时通知被控端；
 //! 3. 把双方的会话流配对后，以 `Bytes` 块为单位零拷贝透传。
 //!
@@ -31,7 +31,9 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-/// 被控端掉线后，控制码保留的时长（期间只有原设备能取回）。
+use crate::codes::Bindings;
+
+/// 被控端掉线后，控制码保留的时长（期间只有原设备能取回）。固定的控制码（`keep`）一直保留，见 [`crate::codes`]。
 const RESERVE_TTL: Duration = Duration::from_secs(10 * 60);
 /// 会话配对等待时长。
 const PENDING_TTL: Duration = Duration::from_secs(20);
@@ -44,11 +46,15 @@ const MAX_WAITING: usize = 32;
 
 pub struct Config {
     pub max_sessions_per_host: usize,
+    /// 固定控制码的绑定表文件，`None` 表示只在内存里
+    pub db: Option<std::path::PathBuf>,
 }
 
 struct HostEntry {
     conn_id: u64,
     secret: [u8; 16],
+    /// 被控端发过 [`ClientMsg::Release`]：断开后不再保留这个控制码
+    released: bool,
     name: String,
     os: String,
     tx: mpsc::UnboundedSender<ServerMsg>,
@@ -146,19 +152,23 @@ pub struct Broker {
     reserved: Mutex<HashMap<u32, Reserved>>,
     pending: Mutex<HashMap<u64, Pending>>,
     failures: Mutex<HashMap<IpAddr, Vec<Instant>>>,
-    /// 控制码 → 等它上线的控制端。加锁顺序：hosts → reserved → waiters
+    /// 固定的控制码。加锁顺序：hosts → reserved → bindings → waiters
+    bindings: Mutex<Bindings>,
+    /// 控制码 → 等它上线的控制端
     waiters: Mutex<HashMap<u32, Vec<Waiter>>>,
     next_conn: AtomicU64,
 }
 
 impl Broker {
     pub fn new(cfg: Config) -> Arc<Self> {
+        let bindings = Bindings::open(cfg.db.as_deref());
         Arc::new(Self {
             cfg,
             hosts: Mutex::default(),
             reserved: Mutex::default(),
             pending: Mutex::default(),
             failures: Mutex::default(),
+            bindings: Mutex::new(bindings),
             waiters: Mutex::default(),
             next_conn: AtomicU64::new(1),
         })
@@ -191,13 +201,20 @@ impl Broker {
                 v.retain(|t| now - *t < FAIL_WINDOW);
                 !v.is_empty()
             });
+            {
+                let hosts = self.hosts.lock().unwrap();
+                let mut bindings = self.bindings.lock().unwrap();
+                bindings.expire(|code| hosts.contains_key(&code));
+            }
         }
     }
 
-    pub fn stats(&self) -> (usize, usize) {
+    /// (在线的被控端, 等待配对的会话, 固定的控制码)
+    pub fn stats(&self) -> (usize, usize, usize) {
         (
             self.hosts.lock().unwrap().len(),
             self.pending.lock().unwrap().len(),
+            self.bindings.lock().unwrap().len(),
         )
     }
 
@@ -309,10 +326,15 @@ impl Broker {
         let mut registered = false;
         while let Some(msg) = read_msg::<_, ClientMsg>(&mut recv, MAX_SIGNAL_MSG, buf).await? {
             match msg {
-                ClientMsg::Register { reclaim } if !registered => {
-                    let code = self.register(conn, conn_id, &name, &os, &tx, reclaim);
+                ClientMsg::Register { reclaim, keep } if !registered => {
+                    let code = self.register(conn, conn_id, &name, &os, &tx, reclaim, keep);
                     registered = true;
-                    info!(%peer, conn_id, code, reclaimed = reclaim.is_some_and(|r| r.code == code), "host registered");
+                    info!(%peer, conn_id, code, keep, reclaimed = reclaim.is_some_and(|r| r.code == code), "host registered");
+                }
+                ClientMsg::Release if registered => {
+                    if let Some(code) = self.release(conn_id) {
+                        info!(%peer, conn_id, code, "host released its control code");
+                    }
                 }
                 other => warn!(%peer, "invalid message from host: {other:?}"),
             }
@@ -321,6 +343,8 @@ impl Broker {
     }
 
     /// 分配（或者还回原来的）控制码，发 `Registered`，并通知在等这个被控端的控制端。
+    /// `keep`：被控端保存了控制码，一直为它保留（绑定）。
+    #[allow(clippy::too_many_arguments)]
     fn register(
         &self,
         conn: &quinn::Connection,
@@ -329,9 +353,11 @@ impl Broker {
         os: &str,
         tx: &mpsc::UnboundedSender<ServerMsg>,
         reclaim: Option<Reclaim>,
+        keep: bool,
     ) -> u32 {
         let mut hosts = self.hosts.lock().unwrap();
         let mut reserved = self.reserved.lock().unwrap();
+        let mut bindings = self.bindings.lock().unwrap();
         let now = Instant::now();
         let mut rng = rand::rng();
 
@@ -349,8 +375,8 @@ impl Broker {
                     reserved.remove(&r.code);
                     chosen = Some((r.code, r.secret));
                 }
-            } else {
-                // 服务器重启过（或者保留期过了、控制码还没给别人），控制码空闲，直接还给原设备
+            } else if bindings.check(r.code, &r.secret) != Some(false) {
+                // 绑定给这台被控端的，或者控制码空闲（服务器重启过，或者保留期过了、还没给别人）：还给原设备
                 chosen = Some((r.code, r.secret));
             }
         }
@@ -359,17 +385,28 @@ impl Broker {
             let secret: [u8; 16] = rng.random();
             loop {
                 let code = rng.random_range(CODE_MIN..=CODE_MAX);
-                if !hosts.contains_key(&code) && !reserved.contains_key(&code) {
+                if !hosts.contains_key(&code)
+                    && !reserved.contains_key(&code)
+                    && !bindings.contains(code)
+                {
                     break (code, secret);
                 }
             }
         });
+        if keep {
+            bindings.bind(code, &secret);
+        } else if bindings.check(code, &secret) == Some(true) {
+            // 这台被控端不再保存控制码了
+            bindings.remove(code);
+        }
+        drop(bindings);
 
         hosts.insert(
             code,
             HostEntry {
                 conn_id,
                 secret,
+                released: false,
                 name: name.to_string(),
                 os: os.to_string(),
                 tx: tx.clone(),
@@ -404,6 +441,9 @@ impl Broker {
             .map(|(c, _)| *c);
         if let Some(code) = code {
             let h = hosts.remove(&code).unwrap();
+            if h.released {
+                return;
+            }
             self.reserved.lock().unwrap().insert(
                 code,
                 Reserved {
@@ -411,7 +451,18 @@ impl Broker {
                     until: Instant::now() + RESERVE_TTL,
                 },
             );
+            self.bindings.lock().unwrap().touch(code);
         }
+    }
+
+    /// 被控端放弃控制码：解除绑定，断开后也不保留。返回它的控制码
+    fn release(&self, conn_id: u64) -> Option<u32> {
+        let mut hosts = self.hosts.lock().unwrap();
+        let (code, h) = hosts.iter_mut().find(|(_, h)| h.conn_id == conn_id)?;
+        h.released = true;
+        let code = *code;
+        self.bindings.lock().unwrap().remove(code);
+        Some(code)
     }
 
     async fn controller_loop(
@@ -755,8 +806,12 @@ mod tests {
         assert!(!same_token(&t, &resume_token(123_456, &[2; 16])));
     }
 
-    /// 进程内的服务器（只监听 127.0.0.1）
+    /// 进程内的服务器（只监听 127.0.0.1），固定控制码只记在内存里
     async fn start() -> (Arc<Broker>, LinkConfig) {
+        start_with(None).await
+    }
+
+    async fn start_with(db: Option<std::path::PathBuf>) -> (Arc<Broker>, LinkConfig) {
         let ck = rcgen::generate_simple_self_signed(vec!["airhand".into()]).unwrap();
         let chain = vec![CertificateDer::from(ck.cert.der().to_vec())];
         let key = PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der()).into();
@@ -768,6 +823,7 @@ mod tests {
         let server = endpoint.local_addr().unwrap().to_string();
         let broker = Broker::new(Config {
             max_sessions_per_host: 8,
+            db,
         });
         let b = broker.clone();
         tokio::spawn(async move {
@@ -792,8 +848,16 @@ mod tests {
     }
 
     async fn register(cfg: &LinkConfig, reclaim: Option<Reclaim>) -> (Signal, Reclaim) {
+        register_with(cfg, reclaim, false).await
+    }
+
+    async fn register_with(
+        cfg: &LinkConfig,
+        reclaim: Option<Reclaim>,
+        keep: bool,
+    ) -> (Signal, Reclaim) {
         let mut sig = connect_signal(cfg, Role::Host).await.unwrap();
-        write_msg(&mut sig.send, &ClientMsg::Register { reclaim })
+        write_msg(&mut sig.send, &ClientMsg::Register { reclaim, keep })
             .await
             .unwrap();
         match next(&mut sig).await {
@@ -985,5 +1049,46 @@ mod tests {
         assert_eq!(again.code, id.code);
         assert!(matches!(next(&mut ctrl).await, ServerMsg::HostOnline { code } if code == id.code));
         assert!(ask(&mut ctrl, 2, id.code, Some(token)).await.is_ok());
+    }
+
+    /// 固定的控制码：服务器重启（只剩数据库里的绑定）之后，只有原来的被控端能取回，别人拿不走；
+    /// 被控端放弃（Release）后解除绑定，也不再保留
+    #[tokio::test]
+    async fn fixed_codes_are_never_handed_out() {
+        // 放在 target/ 里：两个服务器的后台任务在测试结束前一直开着数据库，Windows 上删不掉
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/test-tmp")
+            .join(format!("broker-{:016x}", rand::random::<u64>()));
+        let file = dir.join("airhand.db");
+        let (old, cfg) = start_with(Some(file.clone())).await;
+        let (host, id) = register_with(&cfg, None, true).await;
+        host.conn.close(VarInt::from_u32(0), b"");
+        wait_until("the host is gone", || old.stats().0 == 0).await;
+        drop((host, old));
+
+        let (broker, cfg) = start_with(Some(file.clone())).await;
+        assert_eq!(broker.stats().2, 1);
+        // 冒领：知道控制码、不知道密钥
+        let thief = Reclaim {
+            code: id.code,
+            secret: [0xEE; 16],
+        };
+        let (_thief, got) = register(&cfg, Some(thief)).await;
+        assert_ne!(got.code, id.code);
+        // 原来的被控端
+        let (mut host, again) = register_with(&cfg, Some(id), true).await;
+        assert_eq!(again, id);
+
+        // 放弃控制码：解除绑定，断开后不保留
+        write_msg(&mut host.send, &ClientMsg::Release)
+            .await
+            .unwrap();
+        wait_until("the binding is removed", || broker.stats().2 == 0).await;
+        host.conn.close(VarInt::from_u32(0), b"");
+        wait_until("the host is gone", || broker.stats().0 == 1).await;
+        assert!(!broker.reserved.lock().unwrap().contains_key(&id.code));
+        // 已经写进数据库（另开一个连接读）
+        assert!(!Bindings::open(Some(&file)).contains(id.code));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

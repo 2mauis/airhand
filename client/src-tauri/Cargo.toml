@@ -22,7 +22,11 @@ airhand-proto = { path = "../../crates/airhand-proto" }
 airhand-link = { path = "../../crates/airhand-link" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+# config.toml（Windows）：修改时保留用户的注释和格式
+toml_edit = "0.25"
+base64 = "0.23"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rand = "0.9"
 anyhow = "1"
@@ -48,6 +52,14 @@ windows = { version = "0.62", features = [
   "Win32_Graphics_Gdi",
   "Win32_Globalization",
   "Win32_System_Threading",
+  "Win32_System_Services",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Pipes",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_Security_Authorization",
+  "Win32_Security_Cryptography",
   "Win32_System_Performance",
   "Win32_System_Registry",
   "Win32_System_DataExchange",

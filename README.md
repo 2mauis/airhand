@@ -8,17 +8,20 @@
 
 Airhand is a single program that is both the **host** (the computer being controlled) and the **controller** (the computer you control it from). It runs on **Windows**, **macOS** (13 or later) and **Linux** (X11 desktops). A small relay server, deployed with one Docker Compose command, handles signaling and forwards traffic. The controller can also be deployed with Docker Compose as a **web console** that you use from a browser.
 
+On Windows Airhand is installed, and the host runs as a system service: the lock screen, the sign-in screen and UAC prompts can be controlled too, and the control code stays the same.
+
 > **Status:** under active development. The protocol still changes between versions, so the clients and the server must be built from the same version (a mismatch is detected and reported, see [Protocol versions](#protocol-versions)).
 
 ## Features
 
 - **Host by default**: after launch there is only a tray icon, no window, and no WebView is started
+- **Windows system service**: the lock screen, the sign-in screen and UAC prompts can be seen and controlled; the **control code is fixed**; optionally starts with Windows (see [Windows installation](#windows-installation))
 - **Controller console**: control **several computers at once**, switch between them, or watch them all in a multi-screen overview
 - **Web console**: start the controller with Docker Compose and open one port in a browser; nothing to install on the computer you control from (see [Web console](#web-console-docker))
 - **Low latency, low bandwidth**: hardware **AV1 / HEVC / H.264** encoding, no frames when the screen is still, adaptive bitrate, the cursor moves locally with no lag
 - **Audio**: the host's system sound is streamed to the controller, with optional A/V sync for watching video
 - **Practical tools**: two-way clipboard sync, typing the clipboard as keystrokes, system shortcuts (Win, Alt+Tab, Ctrl+Shift+Esc…), multiple monitors, fullscreen with keyboard lock
-- **Zero files**: no config file, nothing is left on disk (see [below](#zero-files))
+- **Leaves nothing behind**: on macOS and Linux there's no config file and nothing is written to disk; on Windows the only file is `config.toml` in the install directory, removed together with the service when uninstalling (see [below](#files-on-disk))
 - **Secure by default**: TLS 1.3 with certificate pinning, brute-force protection for control codes
 - **English and Simplified Chinese**: follows the system language, switchable at any time
 
@@ -50,11 +53,13 @@ Airhand is a single program that is both the **host** (the computer being contro
    npm install
    $env:AIRHAND_SERVER    = "relay.example.com:4433"
    $env:AIRHAND_SERVER_FP = "<fingerprint from step 1>"
-   npm run tauri build -- --no-bundle
-   # → client/src-tauri/target/release/airhand.exe (single file, ~9 MB)
+   npm run tauri build
+   # → client/src-tauri/target/release/bundle/nsis/Airhand_<version>_x64-setup.exe (installer)
    ```
 
-3. **Run it on both computers.** On the remote one, right-click the tray icon to see its 6-digit **control code**. On yours, choose **Switch to controller** in the tray menu and enter the code.
+   On Windows the address and fingerprint can also be changed after installing, in `config.toml` in the install directory (see [Windows installation](#windows-installation)).
+
+3. **Install it on both computers** (on Windows run the installer, which needs administrator rights). On the remote one, right-click the tray icon to see its 6-digit **control code**. On yours, choose **Open console** (**Switch to controller** on macOS / Linux) in the tray menu and enter the code.
 
    If you'd rather not install the client on the computer you control from, use the [web console](#web-console-docker) instead: `cd web && AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<fingerprint> docker compose up -d`, then open it in a browser.
 
@@ -62,23 +67,42 @@ Airhand is a single program that is both the **host** (the computer being contro
 
 ### Host (default)
 
-Double-click to run. A tray icon appears in the bottom-right corner (on macOS in the menu bar at the top of the screen, on Linux in the top bar / panel status area). Grey means not connected to the server, coloured means connected. The right-click menu (a plain click on macOS) contains:
+Double-click to run (on Windows install it first, see [Windows installation](#windows-installation)). A tray icon appears in the bottom-right corner (on macOS in the menu bar at the top of the screen, on Linux in the top bar / panel status area). Grey means not connected to the server, coloured means connected. The right-click menu (a plain click on macOS) contains:
 
 - Current mode and server status
 - The **control code** and "Copy control code"
 - Who is controlling this computer right now, and **Disconnect all controllers**
 - **Change control code**: the old code stops working immediately and connected controllers are disconnected
-- Switch to controller / Language / Quit
+- Open console and **Start with Windows** (Windows) / Switch to controller (macOS, Linux) / Language / Quit
 
-After a network drop the host reconnects automatically with exponential backoff and **gets its old control code back**, even after a server restart. A code is reserved for its host for 10 minutes after the host goes offline.
+After a network drop the host reconnects automatically with exponential backoff and **gets its old control code back**, even after a server restart. On Windows the code is **fixed**: it's saved in `config.toml`, and the server keeps it for this computer however long it stays offline (codes unused for 180 days are released), so it stays the same across restarts and upgrades until you change it. On macOS and Linux each start gets a new code, and the server keeps a code for its host for 10 minutes after the host goes offline.
 
 > On Linux the tray icon uses AppIndicator. It works out of the box on Ubuntu, KDE, Xfce and similar; stock GNOME needs the "AppIndicator and KStatusNotifierItem Support" extension. Without an AppIndicator library the program still runs as a host and prints the control code to the log (stderr).
 
 > On macOS the host needs two system permissions: **Screen & System Audio Recording** (to capture the screen and sound) and **Accessibility** (to control the keyboard and mouse). macOS asks on the first start; while one is missing, the menu says so, and clicking that item opens the matching page in System Settings → Privacy & Security. A connected controller is told which permission is missing too (in the controller's own language), and the message goes away once it is granted. After granting Screen & System Audio Recording, reopen Airhand. Airhand normally lives in the menu bar only and shows up in the Dock while the console is open.
 
+### Windows installation
+
+On Windows Airhand is installed with its installer (into `C:\Program Files\Airhand` for all users; needs administrator rights). The host runs as the system service **Airhand**, as SYSTEM in the session of whoever is at the screen, so it keeps working on the lock screen, the sign-in screen and UAC prompts, and follows when users are switched. The tray icon is an ordinary program that shows the service's status and controls it:
+
+- Opening Airhand starts the service; **Quit** in the tray stops it (as before, the computer can't be controlled after quitting); when the service stops (or is uninstalled) the tray icons close too
+- **Start with Windows** (tray menu, on by default): the service starts at boot, so the computer can be controlled before anyone signs in, and the tray icon appears after signing in
+- `config.toml` in the install directory (created on installation, with comments):
+
+  | Key | Description |
+  |---|---|
+  | `server` | Relay server `host:port`; without it, the address built into the program |
+  | `server_fp` | Relay certificate fingerprint; `""` turns verification off (development only); without it, the built-in fingerprint |
+  | `autostart` | Start with Windows (also in the tray menu) |
+  | `[code]` | The control code the server assigned, and the secret that gets it back (encrypted with DPAPI, only Airhand on this computer can read it). Delete `code` and `secret` to get a new code |
+
+  Edit it as administrator, then restart Airhand (Quit, then open it again). Airhand keeps your edits and comments when it saves the code or the autostart setting
+- **Uninstalling** (Settings → Apps) stops and removes the service, the startup entry, `config.toml` and the program; nothing is left behind. Installing a new version over an old one keeps `config.toml`, and with it the control code, even if you choose to uninstall the old version first
+- A bare `airhand.exe` doesn't run without being installed: release builds ask you to run the installer. Debug builds (`npm run tauri dev`) run the host inside the tray process, like on macOS and Linux, with `config.toml` next to the program (`client/src-tauri/target/debug/`)
+
 ### Controller
 
-Tray → **Switch to controller** opens the console. Closing the console window switches back to host mode.
+Tray → **Switch to controller** opens the console. Closing the console window switches back to host mode. On Windows the item is **Open console**: the host keeps running in the service while the console is open.
 
 - Enter a 6-digit control code to connect (pasting `123 456` works). Connect to as many computers as you like, switch between them in the left-hand list, or open the **Multi-screen overview**
 - Toolbar: monitor switch, **Quality**, shortcuts, clipboard (two-way sync / type as keystrokes), sound (mute / A/V sync), actual size (1:1), fullscreen, disconnect
@@ -96,7 +120,7 @@ Notices and errors from the other computer or the server are sent as message typ
 
 ## Server configuration
 
-The server listens on **UDP 4433**. On first start it generates a self-signed certificate in the `data/` directory next to `docker-compose.yml`. **Keep that directory**: clients recognise the server by the certificate's fingerprint.
+The server listens on **UDP 4433**. On first start it generates a self-signed certificate in the `data/` directory next to `docker-compose.yml`. **Keep that directory**: clients recognise the server by the certificate's fingerprint, and it holds the SQLite database with the fixed control codes of Windows hosts (`airhand.db`, plus its `-wal` / `-shm` files while the server runs).
 
 Environment variables (see `docker-compose.yml`):
 
@@ -105,6 +129,7 @@ Environment variables (see `docker-compose.yml`):
 | `AIRHAND_LISTEN` | `0.0.0.0:4433` | Listen address (UDP) |
 | `AIRHAND_CERT` / `AIRHAND_KEY` | `/data/cert.pem` / `/data/key.pem` | Certificate paths; generated automatically if missing |
 | `AIRHAND_CERT_NAMES` | `airhand,localhost` | SANs written into an auto-generated certificate |
+| `AIRHAND_DB` | `airhand.db` next to the certificate | SQLite database with the fixed control codes (code, hash of the host's secret, last seen). Without it, codes of hosts that are offline could go to other hosts (a host still gets its code back if nobody took it). If it can't be opened the server keeps the codes in memory and logs an error |
 | `AIRHAND_MAX_SESSIONS` | `4` | Max simultaneous controllers per host |
 | `RUST_LOG` | `info` | Log level |
 
@@ -161,11 +186,11 @@ Requirements: Rust (stable), Node.js 20+, CMake (to build libopus).
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
   ```
 
-The server address and certificate fingerprint are **compiled into the program**: set `AIRHAND_SERVER` and `AIRHAND_SERVER_FP` at build time (as in [Quick start](#quick-start)), or change the defaults in `client/src-tauri/src/config.rs`. Without `AIRHAND_SERVER` the client connects to `127.0.0.1:4433`. A malformed fingerprint (it must be 64 hex digits; `:` and spaces are allowed) fails the build.
+The server address and certificate fingerprint are **compiled into the program**: set `AIRHAND_SERVER` and `AIRHAND_SERVER_FP` at build time (as in [Quick start](#quick-start)), or change the defaults in `client/src-tauri/src/config.rs`. Without `AIRHAND_SERVER` the client connects to `127.0.0.1:4433`. A malformed fingerprint (it must be 64 hex digits; `:` and spaces are allowed) fails the build. On Windows these are only defaults: `server` and `server_fp` in `config.toml` override them (an invalid `server_fp` there refuses every connection rather than turning verification off).
 
 > When `AIRHAND_SERVER_FP` is empty the **server certificate is not verified**, which leaves you open to man-in-the-middle attacks. Use that for development only; the console then shows "Not pinned" at the top left.
 
-**Windows**: `npm run tauri build -- --no-bundle` produces `client/src-tauri/target/release/airhand.exe`. Drop `--no-bundle` to also get an NSIS installer.
+**Windows**: `npm run tauri build` produces the NSIS installer `client/src-tauri/target/release/bundle/nsis/Airhand_<version>_x64-setup.exe`, which installs for all users and registers the service (see [Windows installation](#windows-installation); the installer steps are in `client/src-tauri/windows/hooks.nsh`). `-- --no-bundle` only builds `airhand.exe`, which as a release build refuses to run until installed.
 
 - The C runtime is statically linked, so the VC++ redistributable isn't needed
 - Media Foundation is delay-loaded, so Windows N editions (without the Media Feature Pack) still run and use software encoding
@@ -221,7 +246,7 @@ The web console splits the controller on the right in two: the QUIC connection a
 | `client/src/` | Console UI (React 19 + TypeScript, no UI library), shared by the desktop and web consoles, which differ only in `client/src/lib/backend/`; strings in `client/src/locales/` |
 | `assets/icon.svg` | Application icon source |
 
-How each host stage is implemented on the three platforms:
+How each host stage is implemented on the three platforms (on Windows they run in the system service, see [Windows service](#windows-service)):
 
 | Stage | Windows | macOS | Linux (X11) |
 |---|---|---|---|
@@ -232,6 +257,21 @@ How each host stage is implemented on the three platforms:
 | Audio capture | WASAPI loopback | ScreenCaptureKit (system mix) | PulseAudio / PipeWire output monitor |
 | Clipboard | Change detection via the clipboard sequence number | NSPasteboard change count | XFIXES selection-owner change notifications |
 | Console UI | WebView2 | WKWebView | WebKitGTK (WebCodecs decoding via GStreamer) |
+
+### Windows service
+
+The same `airhand.exe` plays several roles depending on its command line (`client/src-tauri/src/winsvc/`):
+
+| Process | Runs as | Does |
+|---|---|---|
+| `airhand.exe` | the signed-in user | Tray and console |
+| `airhand.exe --service` | SYSTEM, session 0 | The Airhand service: starts the host in the console session (the one at the physical screen) and watches it; moves it when the console session changes (switching users, signing out) and restarts it if it exits |
+| `airhand.exe --agent` | SYSTEM, console session | The host: server connection, capture, encoding, input, audio, clipboard |
+| `airhand.exe --install` / `--uninstall` / `--stop-service` | administrator | Called by the installer |
+
+- Desktop Duplication and `SendInput` only work on the desktop the calling thread is on. UAC prompts, the lock screen and the sign-in screen are on the secure `Winlogon` desktop, which only SYSTEM can open; the capture and input threads switch to whichever desktop currently receives input before using it (`client/src-tauri/src/host/desktop.rs`)
+- The tray and the host talk over a named pipe per session (`\\.\pipe\airhand-host-<session>`), one JSON message per line. Only interactive users can connect, they can't open another instance of the pipe to impersonate the host, and the tray checks that the pipe belongs to SYSTEM
+- The service and the host have no console: they log with `OutputDebugString` (see [Windows service](#windows-service-1) under Development)
 
 ### Video
 
@@ -276,9 +316,9 @@ With **A/V sync** turned on (speaker menu in the toolbar):
 
 The delay from painting to the Canvas to the pixels lighting up is estimated at 8 ms (not measured with a camera).
 
-### Zero files
+### Files on disk
 
-- No config file; the server address is compiled in. Logs go to stderr only
+- macOS and Linux: no config file, the server address is compiled in. Windows: only `config.toml` in the install directory (see [Windows installation](#windows-installation)), removed when uninstalling. Logs never go to files: stderr, or `OutputDebugString` for the Windows service
 - Host mode **doesn't create a WebView**, so it creates no files at all
 - The single-instance lock is a kernel object, not a lock file: a named mutex on Windows, an abstract-namespace Unix socket on Linux, a Mach port name registered with the bootstrap server on macOS
 - The console's WebView needs a data directory: it lives in a random subdirectory of the temp directory, runs in private mode (no cookies or cache saved), and is deleted when the window closes or the program exits. If the process is killed, leftovers are removed on the next start. On macOS WKWebView needs no data directory and writes nothing to disk in private mode
@@ -292,6 +332,8 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 - Brute-force protection: at most 20 failed attempts per IP (IPv6 grouped by /64) per 10 minutes, and each failure adds a 400 ms delay
 - Resume tokens: when a controller connects, the server gives it a token derived from the host's code and secret (it can't be computed or reversed without the secret), and the controller presents it when reconnecting. Requests with a token don't count as failures and aren't rate limited, so however long a host stays offline, automatic reconnects can't lock the controller (or a web console sharing one IP) out. With a wrong token the server always answers "offline", revealing nothing about whether the code exists, so tokens can't be used to guess codes. A token stops working when the host changes its code
 - Getting a control code back after a reconnect requires a random secret, so nobody else can claim it
+- Fixed control codes (Windows): the server only stores a hash of the host's secret (in `airhand.db`), so the database can't be used to claim codes; on the host the secret is encrypted with DPAPI for the SYSTEM account, so a copied `config.toml` doesn't carry the code to another computer. **Change control code** releases the old code on the server
+- The Windows host runs as SYSTEM so that it can operate UAC prompts and the sign-in screen: whoever has the control code controls the computer with administrator rights. Give the code only to people you trust; whoever sits at the computer sees who is connected and can disconnect them, change the code or quit Airhand
 - The host's tray always shows who is controlling the computer; disconnect them or change the code with one click
 - The relay server can see the content of session streams (TLS ends at the server), so run it on a machine you trust
 - Web console: the WebSocket only accepts pages from the same site (so other websites can't connect through your browser); an access password can be set (HTTP Basic login, then an HttpOnly, SameSite=Strict cookie; wrong passwords are answered with a delay); use HTTPS from other computers. The web console sees the picture too, so run it on a machine you trust. Everyone using it reaches the relay from that machine's IP, so they share the brute-force allowance
@@ -301,7 +343,8 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 - The host supports Windows and Linux **X11** desktops. Under Wayland only X11 (XWayland) applications can be seen and controlled; native Wayland windows are black and the controller suggests logging in with an X11 (Xorg) session. Full Wayland support needs xdg-desktop-portal screen sharing (the local user has to confirm each time) and isn't implemented
 - The Linux host only has OpenH264 software encoding (no VA-API / NVENC yet); when AV1 / HEVC is selected it uses H.264
 - Decoding on a Linux controller relies on WebKitGTK + GStreamer: H.264 needs `gstreamer1.0-plugins-bad` (parsing) and `gstreamer1.0-libav` or openh264 (decoding); AV1 / HEVC depend on the installed GStreamer decoders. If a format turns out not to produce a picture, the controller switches to H.264
-- Without elevated privileges on Windows, UAC prompts and the lock screen can't be captured or controlled (they are on the secure desktop; that would need a SYSTEM service), and `Ctrl+Alt+Del` can't be injected. On Linux the lock screen is similar (the screensaver grabs the keyboard and mouse)
+- The Windows host only runs in the console session (the physical screen): Remote Desktop (RDP) sessions can't be controlled. `Ctrl+Alt+Del` can't be sent yet (it needs `SendSAS`). Debug builds run the host in the tray process, without SYSTEM rights, so they can't capture or control UAC prompts and the lock screen (the controller shows a capture error meanwhile)
+- On Linux the lock screen can't be controlled (the screensaver grabs the keyboard and mouse)
 - The macOS host needs the Screen & System Audio Recording and Accessibility permissions, which only the local user can grant in System Settings; since macOS 15 the system also asks again from time to time whether to keep allowing screen recording. The login window and the lock screen can't be captured or controlled
 - A Mac host doesn't offer AV1 (current Apple chips can only decode it in hardware), so AV1 shows as unavailable in the console
 - A macOS controller (WKWebView) can't lock the keyboard: in fullscreen, Command+Tab, Command+Space and the like are still handled locally, so use "Send shortcut" in the toolbar. WKWebView on older macOS versions may lack Opus decoding, in which case the console says remote audio can't be played
@@ -359,6 +402,19 @@ cargo run --release --example encode_bench
 ```
 
 Use release builds when judging smoothness or A/V sync: debug builds scale very slowly (4K → 1080p takes about 0.5 s per frame).
+
+### Windows service
+
+Debug builds run the host inside the tray process, so `npm run tauri dev` needs no installation. To work on the service itself, install the installer, or register a build directly from an administrator terminal:
+
+```powershell
+# client/src-tauri/
+target\release\airhand.exe --install       # register and start the service for this airhand.exe (creates config.toml next to it)
+target\release\airhand.exe --stop-service  # stop it before rebuilding: the exe is in use
+target\release\airhand.exe --uninstall     # remove the service and the startup entry
+```
+
+The service and the host log with `OutputDebugString`: run Sysinternals DebugView as administrator and enable Capture → Capture Global Win32. For a different log level, add `AIRHAND_LOG=debug` to the multi-string value `Environment` under `HKLM\SYSTEM\CurrentControlSet\Services\Airhand` and restart the service. While the service is installed, a debug build started from elsewhere still runs its own in-process host (with its own `config.toml` and control code).
 
 ### Web console
 

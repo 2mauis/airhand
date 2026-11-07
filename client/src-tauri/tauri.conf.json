@@ -24,7 +24,12 @@
     "shortDescription": "Remote desktop over QUIC",
     "longDescription": "Airhand is a high-performance remote desktop built on QUIC. One program is both the controller and the host: control several computers at once, with hardware video encoding (H.264 / HEVC / AV1) and audio.",
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true }
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": {
+        "installMode": "perMachine",
+        "languages": ["SimpChinese", "English"],
+        "installerHooks": "./windows/hooks.nsh"
+      }
     }
   }
 }

@@ -11,10 +11,10 @@ use std::fmt;
 
 use airhand_proto::session::ByeReason;
 use airhand_proto::signal::ConnectError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// 序列化为 `{ "kind": "serverLost", "detail": "..." }` 这样的 JSON。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",

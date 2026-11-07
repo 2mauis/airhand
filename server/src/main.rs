@@ -4,11 +4,13 @@
 //! * `AIRHAND_LISTEN`        监听地址，默认 `0.0.0.0:4433`（UDP）
 //! * `AIRHAND_CERT`          证书路径，默认 `/data/cert.pem`（不存在则自动生成）
 //! * `AIRHAND_KEY`           私钥路径，默认 `/data/key.pem`
+//! * `AIRHAND_DB`            SQLite 数据库（固定控制码的绑定表，见 [`codes`]），默认和证书放在同一个目录（`/data/airhand.db`）
 //! * `AIRHAND_CERT_NAMES`    自动生成证书时的 SAN，逗号分隔，默认 `airhand,localhost`
 //! * `AIRHAND_MAX_SESSIONS`  每台被控端最多同时被几个控制端连接，默认 4
 //! * `RUST_LOG`              日志级别，默认 `info`
 
 mod broker;
+mod codes;
 mod tls;
 
 use std::net::SocketAddr;
@@ -80,6 +82,13 @@ async fn main() -> Result<()> {
         .context("invalid AIRHAND_LISTEN")?;
     let cert_path = PathBuf::from(env_or("AIRHAND_CERT", "/data/cert.pem"));
     let key_path = PathBuf::from(env_or("AIRHAND_KEY", "/data/key.pem"));
+    let db_path = match std::env::var("AIRHAND_DB") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
+        _ => cert_path
+            .parent()
+            .map(|d| d.join("airhand.db"))
+            .unwrap_or_else(|| PathBuf::from("airhand.db")),
+    };
     let names: Vec<String> = env_or("AIRHAND_CERT_NAMES", "airhand,localhost")
         .split(',')
         .map(|s| s.trim().to_string())
@@ -93,7 +102,7 @@ async fn main() -> Result<()> {
     let cert = tls::load_or_generate(&cert_path, &key_path, &names)?;
     info!("Certificate SHA-256 fingerprint: {}", cert.fingerprint);
     info!(
-        "(to enable certificate pinning, set AIRHAND_SERVER_FP to this fingerprint when building the client and when starting the web console)"
+        "(to enable certificate pinning, set AIRHAND_SERVER_FP to this fingerprint when building the client and when starting the web console, or server_fp in config.toml of installed Windows clients)"
     );
 
     let endpoint = Endpoint::server(server_config(cert.chain, cert.key)?, listen)
@@ -102,6 +111,7 @@ async fn main() -> Result<()> {
 
     let broker = broker::Broker::new(broker::Config {
         max_sessions_per_host: max_sessions,
+        db: Some(db_path),
     });
     tokio::spawn(broker.clone().janitor());
     {
@@ -111,8 +121,8 @@ async fn main() -> Result<()> {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                let (hosts, pending) = broker.stats();
-                info!(hosts, pending, "online");
+                let (hosts, pending, fixed) = broker.stats();
+                info!(hosts, pending, fixed, "online");
             }
         });
     }

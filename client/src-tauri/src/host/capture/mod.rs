@@ -265,6 +265,9 @@ pub fn subscribe(index: u8, fps: u8) -> Subscription {
     Subscription { shared, id }
 }
 
+/// 连续打开失败这么多次（每次间隔 250 ms）才算采集失败
+const REPORT_AFTER: u32 = 4;
+
 fn capture_loop(shared: Arc<CaptureShared>) {
     info!(screen = shared.index, "capture started");
     raise_priority();
@@ -295,11 +298,14 @@ fn capture_loop(shared: Arc<CaptureShared>) {
                     if failures == 1 || failures.is_multiple_of(20) {
                         warn!(screen = shared.index, "can't open capture: {e:#}");
                     }
-                    // 缺少系统权限不算采集失败：会话已经用 Notice::MissingPermissions 告诉控制端了
+                    // 缺少系统权限不算采集失败：会话已经用 Notice::MissingPermissions 告诉控制端了。
+                    // 切换桌面（UAC 确认框、锁屏）时可能要重试几次才打得开，持续 1 秒以上才告诉控制端
                     let permission = super::missing_permission(&e);
-                    shared
-                        .slot
-                        .set_error((!permission).then(|| wire_detail(&e)));
+                    if permission || failures >= REPORT_AFTER {
+                        shared
+                            .slot
+                            .set_error((!permission).then(|| wire_detail(&e)));
+                    }
                     std::thread::sleep(Duration::from_millis(250));
                     continue;
                 }

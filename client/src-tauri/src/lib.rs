@@ -2,7 +2,10 @@
 //!
 //! * 启动后默认是**被控端**：只有托盘图标，没有任何窗口；
 //! * 托盘菜单可切换为**控制端**：打开现代化控制台，可同时控制多台电脑；
-//! * 没有配置文件，运行过程中不在磁盘上留下任何文件（见 [`ephemeral`]）；
+//! * Windows 需要安装：被控端作为系统服务运行（见 `winsvc`），托盘只负责显示和操作；
+//!   调试构建直接运行时被控端在本进程里运行。macOS / Linux 的被控端一直在本进程里运行；
+//! * 配置：Windows 是安装目录下的 `config.toml`（见 [`config`]）；macOS / Linux 没有配置文件，
+//!   运行过程中不在磁盘上留下任何文件（见 [`ephemeral`]）；
 //! * 界面支持中文 / 英文，默认跟随系统语言（见 [`i18n`]）。
 
 // 最先声明：其它模块都要用到 `tr!`
@@ -18,6 +21,8 @@ mod single_instance;
 pub mod status;
 mod sysinfo;
 mod tray;
+#[cfg(windows)]
+mod winsvc;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -34,9 +39,9 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tracing::{info, warn};
 
-use host::HostService;
+use host::{HostCmd, HostService};
 use i18n::Lang;
-use status::{Mode, StatusHub};
+use status::{HostStatus, Mode, StatusHub};
 
 const CONSOLE: &str = "main";
 
@@ -44,12 +49,36 @@ pub struct AppState {
     hub: StatusHub,
     services: Mutex<Services>,
     webview_dirs: Mutex<Vec<PathBuf>>,
+    /// Windows 安装版：被控端在系统服务里运行（托盘只负责显示和操作），切换模式不影响它
+    service_mode: bool,
 }
 
 #[derive(Default)]
 struct Services {
-    host: Option<HostService>,
+    host: Option<Hosting>,
     controller: Option<Arc<ControllerService>>,
+}
+
+/// 被控端在哪里运行
+enum Hosting {
+    /// 本进程里
+    InProcess(HostService),
+    /// Windows 安装版：系统服务里，托盘经命名管道和它通信
+    #[cfg(windows)]
+    Service(winsvc::ipc::AgentLink),
+}
+
+impl Hosting {
+    fn send(&self, cmd: HostCmd) {
+        match self {
+            Hosting::InProcess(h) => h.send(cmd),
+            #[cfg(windows)]
+            Hosting::Service(link) => link.send(match cmd {
+                HostCmd::KickAll => winsvc::ipc::ToAgent::KickAll,
+                HostCmd::NewCode => winsvc::ipc::ToAgent::NewCode,
+            }),
+        }
+    }
 }
 
 impl AppState {
@@ -65,28 +94,33 @@ impl AppState {
 
 // ───────────────────────────── 模式切换 ─────────────────────────────
 
-/// 切换后台服务（不涉及窗口）。
+/// 切换后台服务（不涉及窗口）。被控端在系统服务里运行时（Windows 安装版）只启停控制端。
 fn switch_services(app: &AppHandle, mode: Mode) {
     let state = app.state::<AppState>();
     let current = state.hub.borrow().mode;
     if current != mode {
         info!(?mode, "switching mode");
+        let in_process = !state.service_mode;
         let mut sv = state.services.lock().unwrap();
         // 先停止旧服务（Drop 即中止并断开连接），再启动新服务
-        sv.host = None;
         sv.controller = None;
+        if in_process {
+            sv.host = None;
+        }
         state.hub.send_modify(|s| {
             s.mode = mode;
-            s.server = ServerState::Connecting;
-            s.code = None;
-            s.controllers.clear();
+            s.controller = ServerState::Connecting;
+            if in_process {
+                s.host = HostStatus::default();
+            }
         });
         match mode {
-            Mode::Host => {
-                sv.host = Some(HostService::start(state.hub.clone()));
+            Mode::Host if in_process => {
+                sv.host = Some(Hosting::InProcess(HostService::start(state.hub.clone())));
                 #[cfg(target_os = "macos")]
                 host::macos::request_permissions();
             }
+            Mode::Host => {}
             Mode::Controller => {
                 // 在等的被控端上线了：告诉控制台，等它的会话马上重连
                 let handle = app.clone();
@@ -96,7 +130,7 @@ fn switch_services(app: &AppHandle, mode: Mode) {
                 sv.controller = Some(Arc::new(ControllerService::start(
                     config::link(),
                     tauri::async_runtime::handle().inner().clone(),
-                    status::server_reporter(&state.hub),
+                    status::controller_reporter(&state.hub),
                     host_online,
                 )))
             }
@@ -212,13 +246,33 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
         "lang_en" => set_lang(app, Lang::En),
         "kick_all" | "new_code" => {
             let cmd = if id == "kick_all" {
-                host::HostCmd::KickAll
+                HostCmd::KickAll
             } else {
-                host::HostCmd::NewCode
+                HostCmd::NewCode
             };
             if let Some(h) = &app.state::<AppState>().services.lock().unwrap().host {
                 h.send(cmd);
             }
+        }
+        #[cfg(windows)]
+        "autostart" => {
+            let state = app.state::<AppState>();
+            let current = state.hub.borrow().service.map(|s| s.autostart);
+            if let (Some(current), Some(Hosting::Service(link))) =
+                (current, &state.services.lock().unwrap().host)
+            {
+                link.send(winsvc::ipc::ToAgent::SetAutostart { on: !current });
+            }
+            // 勾选项被点击时系统会自动翻转勾选状态：重建菜单，以被控端确认后的设置为准
+            state.hub.send_modify(|_| {});
+        }
+        #[cfg(windows)]
+        "start_service" => {
+            std::thread::spawn(|| {
+                if let Err(e) = winsvc::start() {
+                    warn!("can't start the Airhand service: {e:#}");
+                }
+            });
         }
         #[cfg(target_os = "macos")]
         "perm_screen" => {
@@ -227,7 +281,7 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
         #[cfg(target_os = "macos")]
         "perm_input" => host::macos::open_privacy_settings(host::macos::PrivacyPane::Accessibility),
         "copy_code" => {
-            if let Some(code) = app.state::<AppState>().hub.borrow().code {
+            if let Some(code) = app.state::<AppState>().hub.borrow().host.code {
                 match clipboard::set_text(&format!("{code:06}")) {
                     Ok(()) => info!("control code copied"),
                     Err(e) => warn!("copying failed: {e}"),
@@ -236,6 +290,13 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
         }
         "quit" => {
             let state = app.state::<AppState>();
+            // Windows 安装版：退出 = 被控端也停止（和直接运行时一样，退出后本机不能再被控制）
+            #[cfg(windows)]
+            if state.service_mode
+                && let Err(e) = winsvc::stop()
+            {
+                warn!("can't stop the Airhand service: {e:#}");
+            }
             let mut sv = state.services.lock().unwrap();
             sv.host = None;
             sv.controller = None;
@@ -258,7 +319,7 @@ pub(crate) fn on_tray_left_click(app: &AppHandle) {
 #[serde(rename_all = "camelCase")]
 struct AppInfo {
     version: &'static str,
-    server: &'static str,
+    server: String,
     pinned: bool,
     hostname: String,
     lang: Lang,
@@ -268,8 +329,8 @@ struct AppInfo {
 fn app_info() -> AppInfo {
     AppInfo {
         version: config::VERSION,
-        server: config::SERVER_ADDR,
-        pinned: !config::SERVER_CERT_SHA256.is_empty(),
+        server: config::settings().server.clone(),
+        pinned: config::pinned(),
         hostname: sysinfo::host_identity().0,
         lang: i18n::current(),
     }
@@ -283,7 +344,7 @@ fn set_language(app: AppHandle, lang: Lang) {
 
 #[tauri::command]
 fn server_status(state: tauri::State<'_, AppState>) -> ServerState {
-    state.hub.borrow().server.clone()
+    state.hub.borrow().controller.clone()
 }
 
 /// 会话的画面和事件经 Tauri 的 Channel 交给控制台窗口
@@ -397,11 +458,26 @@ async fn switch_to_host(app: AppHandle) -> Result<(), Problem> {
 // ───────────────────────────── 入口 ─────────────────────────────
 
 pub fn run() {
+    // Windows：安装包和服务管理器用的命令行（--install、--service、--agent……）
+    #[cfg(windows)]
+    if let Some(code) = winsvc::cli() {
+        std::process::exit(code);
+    }
     init_logging();
     let Some(_instance) = single_instance::acquire() else {
         // 已经有一个实例在运行（托盘里），直接退出
         return;
     };
+    // Windows：安装好的 Airhand 由系统服务运行被控端；发布版必须安装，调试构建直接运行时被控端在本进程里运行
+    #[cfg(windows)]
+    let service_mode = winsvc::installed_here();
+    #[cfg(all(windows, not(debug_assertions)))]
+    if !service_mode {
+        winsvc::show_not_installed();
+        return;
+    }
+    #[cfg(not(windows))]
+    let service_mode = false;
     enable_dpi_awareness();
     // 先清理上次残留的目录，再创建本次的（同一个前缀）
     ephemeral::sweep_stale();
@@ -414,6 +490,7 @@ pub fn run() {
             hub: hub.clone(),
             services: Mutex::default(),
             webview_dirs: Mutex::default(),
+            service_mode,
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
@@ -438,8 +515,12 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             exit_on_signals(handle.clone());
             // 默认以被控端启动
-            app.state::<AppState>().services.lock().unwrap().host =
-                Some(HostService::start(hub.clone()));
+            let hosting = if service_mode {
+                start_service_link(&handle, &hub)
+            } else {
+                Hosting::InProcess(HostService::start(hub.clone()))
+            };
+            app.state::<AppState>().services.lock().unwrap().host = Some(hosting);
             // 仅调试构建：方便开发时直接进入控制端
             let dev_controller =
                 cfg!(debug_assertions) && std::env::var_os("AIRHAND_DEV_CONTROLLER").is_some();
@@ -463,7 +544,7 @@ pub fn run() {
                     let st = rx.borrow_and_update().clone();
                     tray::refresh(&handle, &st);
                     if st.mode == Mode::Controller {
-                        let _ = handle.emit_to(CONSOLE, "server-status", &st.server);
+                        let _ = handle.emit_to(CONSOLE, "server-status", &st.controller);
                     }
                     let cur = i18n::current();
                     if lang.replace(cur) != Some(cur) {
@@ -520,6 +601,33 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+/// Windows 安装版：被控端在系统服务里运行。打开 Airhand 时服务没有运行就启动它；服务停止后托盘也退出。
+#[cfg(windows)]
+fn start_service_link(app: &AppHandle, hub: &StatusHub) -> Hosting {
+    hub.send_modify(|s| {
+        s.service = Some(status::ServiceStatus {
+            connected: false,
+            running: false,
+            elsewhere: false,
+            autostart: config::settings().autostart,
+        })
+    });
+    std::thread::spawn(|| {
+        if let Err(e) = winsvc::start() {
+            warn!("can't start the Airhand service: {e:#}");
+        }
+    });
+    let app = app.clone();
+    Hosting::Service(winsvc::ipc::AgentLink::start(hub.clone(), move || {
+        app.exit(0)
+    }))
+}
+
+#[cfg(not(windows))]
+fn start_service_link(_app: &AppHandle, _hub: &StatusHub) -> Hosting {
+    unreachable!("the host only runs as a service on Windows")
 }
 
 /// macOS：用户在系统设置里授予 / 收回权限时刷新托盘菜单（菜单里有未授权的提示）。
@@ -598,7 +706,7 @@ fn exit_on_signals(app: AppHandle) {
     });
 }
 
-fn enable_dpi_awareness() {
+pub(crate) fn enable_dpi_awareness() {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::UI::HiDpi::{

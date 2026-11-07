@@ -16,6 +16,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 rand = "0.9"
 sha2 = "0.10"
+# 固定控制码的绑定表（见 src/codes.rs）。bundled：静态编译 SQLite，不依赖系统库（镜像是 distroless）
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 # 测试用真实的客户端链路（QUIC + 握手）连进程内的服务器

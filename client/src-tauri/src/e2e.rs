@@ -26,7 +26,7 @@ async fn wait_code(hub: &status::StatusHub) -> u32 {
     loop {
         {
             let st = rx.borrow_and_update();
-            if let (ServerState::Connected, Some(code)) = (&st.server, st.code) {
+            if let (ServerState::Connected, Some(code)) = (&st.host.server, st.host.code) {
                 return code;
             }
         }
@@ -426,9 +426,9 @@ async fn e2e_roundtrip() {
     // 会话结束后被控端应释放会话
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(
-        hub.borrow().controllers.is_empty(),
+        hub.borrow().host.controllers.is_empty(),
         "会话没有被清理: {:?}",
-        hub.borrow().controllers
+        hub.borrow().host.controllers
     );
 }
 
@@ -463,14 +463,14 @@ async fn e2e_reconnect_keeps_code() {
     let _ = server.wait();
     let t = Instant::now();
     let mut rx = hub.subscribe();
-    while matches!(rx.borrow_and_update().server, ServerState::Connected) {
+    while matches!(rx.borrow_and_update().host.server, ServerState::Connected) {
         let _ = tokio::time::timeout(Duration::from_secs(20), rx.changed()).await;
         assert!(t.elapsed() < Duration::from_secs(25), "没有检测到掉线");
     }
     println!(
         "检测到掉线，用时 {:.1}s: {:?}",
         t.elapsed().as_secs_f32(),
-        hub.borrow().server
+        hub.borrow().host.server
     );
 
     let mut server = spawn();
@@ -488,7 +488,7 @@ async fn e2e_reconnect_keeps_code() {
     let code3 = loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let st = hub.borrow().clone();
-        if let (ServerState::Connected, Some(c)) = (&st.server, st.code)
+        if let (ServerState::Connected, Some(c)) = (&st.host.server, st.host.code)
             && c != code2
         {
             break c;

@@ -1,4 +1,4 @@
-//! 系统托盘：图标 + 右键菜单（模式、服务器状态、控制码、切换模式、语言、退出）。
+//! 系统托盘：图标 + 右键菜单（模式、服务器状态、控制码、切换模式、开机自动启动、语言、退出）。
 
 use std::sync::OnceLock;
 
@@ -8,7 +8,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 use tauri::{AppHandle, Wry};
 
 use crate::i18n::{self, Lang};
-use crate::status::{AppStatus, Mode};
+use crate::status::{AppStatus, Mode, ServiceStatus};
 use airhand_link::{Problem, ServerState};
 
 const TRAY_ID: &str = "airhand";
@@ -104,6 +104,15 @@ fn label(app: &AppHandle, text: impl AsRef<str>) -> tauri::Result<MenuItem<Wry>>
     MenuItem::new(app, text, false, None::<&str>)
 }
 
+fn server_line(server: &ServerState) -> String {
+    match server {
+        ServerState::Connecting => tr!("服务器：连接中…", "Server: connecting…"),
+        ServerState::Connected => tr!("服务器：已连接 ●", "Server: connected ●"),
+        // 只显示原因的种类；详细的技术信息在日志里
+        ServerState::Disconnected { reason } => server_problem(reason),
+    }
+}
+
 fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
     let menu = Menu::new(app)?;
     menu.append(&label(
@@ -112,23 +121,98 @@ fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
     )?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
 
-    let mode = match st.mode {
-        Mode::Host => tr!("当前模式：被控端", "Mode: Host"),
-        Mode::Controller => tr!("当前模式：控制端", "Mode: Controller"),
-    };
-    menu.append(&label(app, mode)?)?;
-    let server = match &st.server {
-        ServerState::Connecting => tr!("服务器：连接中…", "Server: connecting…"),
-        ServerState::Connected => tr!("服务器：已连接 ●", "Server: connected ●"),
-        // 只显示原因的种类；详细的技术信息在日志里
-        ServerState::Disconnected { reason } => server_problem(reason),
-    };
-    menu.append(&label(app, server)?)?;
+    match st.service {
+        Some(svc) => service_items(app, &menu, st, svc)?,
+        None => {
+            let mode = match st.mode {
+                Mode::Host => tr!("当前模式：被控端", "Mode: Host"),
+                Mode::Controller => tr!("当前模式：控制端", "Mode: Controller"),
+            };
+            menu.append(&label(app, mode)?)?;
+            if st.mode == Mode::Host {
+                host_items(app, &menu, st)?;
+            } else {
+                menu.append(&label(app, server_line(&st.controller))?)?;
+            }
+            menu.append(&PredefinedMenuItem::separator(app)?)?;
+            match st.mode {
+                Mode::Host => {
+                    menu.append(&item(
+                        app,
+                        "to_controller",
+                        tr!("切换为控制端", "Switch to controller"),
+                    )?)?;
+                }
+                Mode::Controller => {
+                    menu.append(&item(app, "console", tr!("打开控制台", "Open console"))?)?;
+                    menu.append(&item(
+                        app,
+                        "to_host",
+                        tr!("切换为被控端", "Switch to host"),
+                    )?)?;
+                }
+            }
+        }
+    }
+    menu.append(&language_menu(app)?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&item(app, "quit", tr!("退出", "Quit"))?)?;
+    Ok(menu)
+}
 
-    if st.mode == Mode::Host {
+/// Windows 安装版：被控端在系统服务里一直运行，控制台随时可以打开
+fn service_items(
+    app: &AppHandle,
+    menu: &Menu<Wry>,
+    st: &AppStatus,
+    svc: ServiceStatus,
+) -> tauri::Result<()> {
+    if svc.connected {
+        host_items(app, menu, st)?;
+    } else if !svc.running {
+        menu.append(&label(
+            app,
+            tr!("被控端服务：未运行", "Host service: not running"),
+        )?)?;
+        menu.append(&item(
+            app,
+            "start_service",
+            tr!("启动被控端服务", "Start the host service"),
+        )?)?;
+    } else if svc.elsewhere {
+        menu.append(&label(
+            app,
+            tr!(
+                "被控端在屏幕前的另一个用户那里运行",
+                "The host runs for the other user at the screen"
+            ),
+        )?)?;
+    } else {
+        menu.append(&label(
+            app,
+            tr!("被控端服务：正在启动…", "Host service: starting…"),
+        )?)?;
+    }
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&item(app, "console", tr!("打开控制台", "Open console"))?)?;
+    menu.append(&CheckMenuItem::with_id(
+        app,
+        "autostart",
+        tr!("开机自动启动", "Start with Windows"),
+        svc.connected,
+        svc.autostart,
+        None::<&str>,
+    )?)?;
+    Ok(())
+}
+
+/// 被控端：服务器状态、控制码、正在控制本机的控制端
+fn host_items(app: &AppHandle, menu: &Menu<Wry>, st: &AppStatus) -> tauri::Result<()> {
+    menu.append(&label(app, server_line(&st.host.server))?)?;
+    {
         #[cfg(target_os = "macos")]
-        permission_items(app, &menu)?;
-        if let (ServerState::Connected, Some(code)) = (&st.server, st.code) {
+        permission_items(app, menu)?;
+        if let (ServerState::Connected, Some(code)) = (&st.host.server, st.host.code) {
             let code = airhand_proto::format_code(code);
             menu.append(&label(app, tr!("控制码：{code}", "Control code: {code}"))?)?;
             menu.append(&item(
@@ -145,13 +229,13 @@ fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
                 ),
             )?)?;
         }
-        if !st.controllers.is_empty() {
+        if !st.host.controllers.is_empty() {
             menu.append(&PredefinedMenuItem::separator(app)?)?;
             menu.append(&label(
                 app,
-                format!("⚠ {}", controlled_by(st.controllers.len())),
+                format!("⚠ {}", controlled_by(st.host.controllers.len())),
             )?)?;
-            for c in st.controllers.iter().take(5) {
+            for c in st.host.controllers.iter().take(5) {
                 let name = if c.peer.name.is_empty() {
                     tr!("未知设备", "Unknown device")
                 } else {
@@ -166,29 +250,7 @@ fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
             )?)?;
         }
     }
-
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
-    match st.mode {
-        Mode::Host => {
-            menu.append(&item(
-                app,
-                "to_controller",
-                tr!("切换为控制端", "Switch to controller"),
-            )?)?;
-        }
-        Mode::Controller => {
-            menu.append(&item(app, "console", tr!("打开控制台", "Open console"))?)?;
-            menu.append(&item(
-                app,
-                "to_host",
-                tr!("切换为被控端", "Switch to host"),
-            )?)?;
-        }
-    }
-    menu.append(&language_menu(app)?)?;
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&item(app, "quit", tr!("退出", "Quit"))?)?;
-    Ok(menu)
+    Ok(())
 }
 
 /// macOS：没有授予的权限各占一行，点击打开系统设置里对应的页面。
@@ -287,7 +349,13 @@ pub fn refresh(app: &AppHandle, st: &AppStatus) {
     if let Ok(menu) = build_menu(app, st) {
         let _ = tray.set_menu(Some(menu));
     }
-    let online = st.server == ServerState::Connected;
+    // Windows 安装版：没连上服务里的被控端时，被控端的状态没有意义
+    let host_known = st.service.is_none_or(|s| s.connected);
+    let online = if st.shows_host() {
+        host_known && st.host.server == ServerState::Connected
+    } else {
+        st.controller == ServerState::Connected
+    };
     let _ = tray.set_icon(Some(if online {
         icon_online()
     } else {
@@ -297,11 +365,24 @@ pub fn refresh(app: &AppHandle, st: &AppStatus) {
         let code = airhand_proto::format_code(code);
         tr!("控制码 {code}", "Control code {code}")
     };
-    let tip = match (st.mode, &st.server, st.code) {
-        (Mode::Host, ServerState::Connected, Some(code)) if !st.controllers.is_empty() => {
+    let (shown, server, code) = if st.shows_host() {
+        (Mode::Host, &st.host.server, st.host.code)
+    } else {
+        (Mode::Controller, &st.controller, None)
+    };
+    let controllers = st.host.controllers.len();
+    let tip = match (shown, server, code) {
+        (Mode::Host, _, _) if !host_known => match st.service {
+            Some(s) if s.running => tr!("Airhand · 被控端", "Airhand · Host"),
+            _ => tr!(
+                "Airhand · 被控端服务未运行",
+                "Airhand · Host service not running"
+            ),
+        },
+        (Mode::Host, ServerState::Connected, Some(code)) if controllers > 0 => {
             format!(
                 "Airhand · {}\n{}",
-                controlled_by(st.controllers.len()),
+                controlled_by(controllers),
                 code_line(code)
             )
         }

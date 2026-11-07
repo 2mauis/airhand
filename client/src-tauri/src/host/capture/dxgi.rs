@@ -1,7 +1,9 @@
 //! Windows DXGI Desktop Duplication 采集。
 //!
 //! * 画面由 GPU 合成后直接复制到 staging 纹理，只在桌面有变化时才产生新帧；
-//! * 优先使用 `DuplicateOutput1`（支持 HDR 桌面自动转换为 BGRA8）。
+//! * 优先使用 `DuplicateOutput1`（支持 HDR 桌面自动转换为 BGRA8）；
+//! * 打开前先切到当前的输入桌面（见 [`crate::host::desktop`]）：UAC 确认框、锁屏出现时桌面复制会中断
+//!   （`DXGI_ERROR_ACCESS_LOST`），重新打开时就跟着切过去了。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -121,6 +123,8 @@ unsafe impl Send for DxgiCapturer {}
 
 impl DxgiCapturer {
     pub fn open(index: u8) -> Result<Self> {
+        // 没有权限打开安全桌面时（不是以 SYSTEM 运行）留在原来的桌面上，DuplicateOutput 会报 E_ACCESSDENIED
+        crate::host::desktop::follow();
         let outs = outputs()?;
         let o = outs
             .get(index as usize)
@@ -152,10 +156,15 @@ impl DxgiCapturer {
             let dup = match o.output.cast::<IDXGIOutput5>() {
                 Ok(o5) => match o5.DuplicateOutput1(&device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM]) {
                     Ok(d) => d,
-                    Err(_) => o
-                        .output
-                        .DuplicateOutput(&device)
-                        .context("DuplicateOutput")?,
+                    Err(e) => {
+                        tracing::debug!(
+                            "DuplicateOutput1 failed ({}), trying DuplicateOutput",
+                            e.code()
+                        );
+                        o.output
+                            .DuplicateOutput(&device)
+                            .context("DuplicateOutput")?
+                    }
                 },
                 Err(_) => o
                     .output

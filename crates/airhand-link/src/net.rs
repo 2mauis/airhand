@@ -15,7 +15,7 @@ use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
@@ -82,7 +82,7 @@ pub fn parse_fingerprint(s: &str) -> Result<Option<[u8; 32]>> {
 }
 
 /// 与服务器的连接状态（托盘 / 控制台按各自的界面语言显示）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum ServerState {
     Connecting,

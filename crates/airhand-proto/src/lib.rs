@@ -23,7 +23,7 @@ pub mod signal;
 /// 协议版本，服务器与客户端不一致时拒绝连接（见 [`signal`] 模块的"版本握手"）。
 ///
 /// 任何不兼容的改动（增删字段、调整枚举变体顺序……）都要把它加 1。
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// QUIC ALPN 标识。与版本握手一样永远不变，否则旧客户端连 TLS 握手都过不了，无法得知版本不一致。
 pub const ALPN: &[u8] = b"airhand/1";
