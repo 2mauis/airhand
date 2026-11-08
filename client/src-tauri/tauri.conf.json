@@ -21,8 +21,8 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "shortDescription": "Remote desktop over QUIC",
-    "longDescription": "Airhand is a high-performance remote desktop built on QUIC. One program is both the controller and the host: control several computers at once, with hardware video encoding (H.264 / HEVC / AV1) and audio.",
+    "shortDescription": "High-performance, low-latency remote desktop over QUIC",
+    "longDescription": "Airhand is a high-performance, low-latency remote desktop built on QUIC. The screen is encoded on the GPU (AV1 / HEVC / H.264) at up to 120 fps, playback skips to the latest frame when the network slows down instead of letting lag pile up, and the mouse pointer is drawn locally. One program is both the host and the controller: control several computers at once, with audio and clipboard sync.",
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
       "nsis": {

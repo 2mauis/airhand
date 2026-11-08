@@ -8,7 +8,7 @@
 //!   正在控制的设备、需不需要画面 / 声音、控制端发来的输入和剪贴板；
 //! * 画面的节奏由 [`video::VideoHub`] 控制（Kotlin 的渲染线程每一轮调用 `tick` 和 `wait_window`）。
 //!
-//! 控制码像 Windows 安装版一样固定（`Register::keep`）：Kotlin 把服务器分配的控制码和密钥保存在
+//! 控制码像桌面版一样固定（`Register::keep`）：Kotlin 把服务器分配的控制码和密钥保存在
 //! 应用自己的数据目录里，下次启动时带上（[`HostConfig::reclaim`]）取回同一个控制码。
 
 pub mod audio;

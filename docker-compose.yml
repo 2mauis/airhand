@@ -23,7 +23,7 @@ services:
       # 如需使用自己的证书，挂载到 /data 并修改以下路径
       # AIRHAND_CERT: /data/cert.pem
       # AIRHAND_KEY: /data/key.pem
-      # SQLite 数据库：固定控制码的绑定表（Windows 被控端的控制码一直保留给它），默认在证书旁边
+      # SQLite 数据库：固定控制码的绑定表（保存了控制码的被控端离线多久都能取回原来的控制码），默认在证书旁边
       # AIRHAND_DB: /data/airhand.db
     logging:
       driver: json-file

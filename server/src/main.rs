@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
     let cert = tls::load_or_generate(&cert_path, &key_path, &names)?;
     info!("Certificate SHA-256 fingerprint: {}", cert.fingerprint);
     info!(
-        "(to enable certificate pinning, set AIRHAND_SERVER_FP to this fingerprint when building the client and when starting the web console, or server_fp in config.toml of installed Windows clients)"
+        "(to enable certificate pinning, set AIRHAND_SERVER_FP to this fingerprint when building the clients and when starting the web console; installed clients can also set it as server_fp in config.toml, or in Settings on Android)"
     );
 
     let endpoint = Endpoint::server(server_config(cert.chain, cert.key)?, listen)
