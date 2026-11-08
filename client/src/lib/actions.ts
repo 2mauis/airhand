@@ -1,6 +1,7 @@
 // 跨组件的操作：连接、我的设备、重新打开关闭的会话、关闭控制台 / 切换为被控端（先确认）、全屏。
 import { api, toProblem, type QualitySettings, type SavedDevice } from "./api";
 import * as devices from "./devices";
+import { OS } from "./platform";
 import { RemoteSession } from "./session";
 import { emptyDraft, store } from "./store";
 
@@ -187,13 +188,17 @@ export async function quit(kind: "close" | "toHost") {
 type KeyboardLock = { lock?: (codes?: string[]) => Promise<void>; unlock?: () => void };
 const keyboardApi = () => (navigator as Navigator & { keyboard?: KeyboardLock }).keyboard;
 
+// macOS 桌面版只用窗口全屏：WKWebView 不支持键盘锁定，网页全屏没有用处，
+// 而且 WebKit 会把网页挪进它自己的全屏窗口，再加上窗口全屏就成了两个全屏空间
+const WEB_FULLSCREEN = !(api.frame && OS === "mac");
+
 /** 进入 / 退出全屏（网页全屏 + 键盘锁定 + 窗口全屏）。可以重复调用 */
 export async function applyFullscreen(on: boolean) {
-  if (on) {
+  if (WEB_FULLSCREEN && on) {
     // 先进入网页全屏（Keyboard Lock 的前提），再让窗口全屏
     if (!document.fullscreenElement) await document.documentElement.requestFullscreen?.().catch(() => {});
     await keyboardApi()?.lock?.().catch(() => {});
-  } else {
+  } else if (WEB_FULLSCREEN) {
     keyboardApi()?.unlock?.();
     if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
   }

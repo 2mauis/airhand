@@ -86,6 +86,8 @@ dirs = "7"
 # x11rb 是纯 Rust 实现的 X11 协议，不依赖 libX11/libxcb；arboard 已经在用同一版本。
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+# 和 Tauri（gtk 0.18）用同一个版本：全屏时暂停 webview 上的信号处理函数（见 fullscreen.rs）
+glib = "0.18"
 x11rb = { version = "0.13", features = ["shm", "damage", "xfixes", "randr", "xtest", "xkb"] }
 libpulse-binding = "2"
 

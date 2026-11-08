@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { closeTab, fmtCode, toggleFullscreen } from "../lib/actions";
 import { api, type Platform } from "../lib/api";
 import { type MsgKey, t, useT } from "../lib/i18n";
@@ -87,6 +87,58 @@ const combosFor = (platform: Platform | null, os: string) => {
 
 type Menu = null | "quality" | "keys" | "display" | "clipboard" | "audio" | "sessions";
 
+/** 顶端热区的高度（和 .hot-edge 一致） */
+const HOT_EDGE = 6;
+/** 鼠标从这个高度以内移出网页，也算移到了顶端（例如 macOS 的菜单栏常驻时，它下面就是网页顶端） */
+const LEAVE_TOP = 48;
+/**
+ * 工具栏周围这一圈内不收起：跨过热区和工具栏之间的空隙；macOS 全屏时鼠标碰到顶端，
+ * 系统菜单栏和标题栏会滑下来盖住工具栏，鼠标往下移出它们时还在这一圈里
+ */
+const KEEP_NEAR = 32;
+
+/**
+ * 全屏时悬浮工具栏的显示 / 收起。不用 CSS :hover：macOS 的系统菜单栏盖住顶端时网页就不算悬停了，
+ * 工具栏会马上收起。这里只在鼠标明确离开（在网页里移到了工具栏附近以外）时才收起
+ */
+function useToolbarReveal(active: boolean, toolbar: RefObject<HTMLElement | null>) {
+  // 全屏中切换到别的连接时会重新挂载，这时鼠标还在工具栏上：先显示
+  const [revealed, setRevealed] = useState(active);
+  const shown = useRef(active);
+  useEffect(() => {
+    const set = (v: boolean) => {
+      shown.current = v;
+      setRevealed(v);
+    };
+    if (!active) {
+      set(false);
+      return;
+    }
+    const near = (x: number, y: number) => {
+      const r = toolbar.current?.getBoundingClientRect();
+      return !!r && x >= r.left - KEEP_NEAR && x <= r.right + KEEP_NEAR && y <= r.bottom + KEEP_NEAR;
+    };
+    const onPointer = (e: PointerEvent) => {
+      // 按着键拖动时（例如把远程的窗口拖到顶端）不弹出；触摸屏点一下顶端也能弹出
+      if (e.clientY <= HOT_EDGE && (e.buttons === 0 || e.type === "pointerdown")) set(true);
+      else if (shown.current && !near(e.clientX, e.clientY)) set(false);
+    };
+    const onLeave = (e: MouseEvent) => {
+      if (e.relatedTarget) return; // 还在网页里
+      set(e.clientY <= LEAVE_TOP && e.buttons === 0);
+    };
+    window.addEventListener("pointermove", onPointer);
+    window.addEventListener("pointerdown", onPointer);
+    document.addEventListener("mouseout", onLeave);
+    return () => {
+      window.removeEventListener("pointermove", onPointer);
+      window.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("mouseout", onLeave);
+    };
+  }, [active, toolbar]);
+  return revealed;
+}
+
 export function SessionView({ s }: { s: RemoteSession }) {
   // 订阅语言切换（文案直接用导入的 t）
   useT();
@@ -96,6 +148,8 @@ export function SessionView({ s }: { s: RemoteSession }) {
   const title = useSessionTitle(s);
   const [menu, setMenu] = useState<Menu>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const toolbarRef = useRef<HTMLElement>(null);
+  const revealed = useToolbarReveal(immersive, toolbarRef);
   // 菜单关掉后键盘回到远程画面（例如按 Esc 关掉画质面板后接着打字）
   const closeMenu = useCallback(() => {
     setMenu(null);
@@ -135,7 +189,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
   return (
     <div className={`session-view ${immersive ? "immersive" : ""}`}>
       {immersive && <div className="hot-edge" />}
-      <header className="toolbar">
+      <header ref={toolbarRef} className={`toolbar ${revealed ? "revealed" : ""}`}>
         {/* 像浏览器的地址栏：连的是哪台、现在怎么样 */}
         <div className="addr">
           {immersive && multi ? (

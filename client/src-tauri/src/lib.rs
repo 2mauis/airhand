@@ -18,6 +18,7 @@ mod devices;
 #[cfg(test)]
 mod e2e;
 mod ephemeral;
+mod fullscreen;
 pub mod host;
 mod single_instance;
 pub mod status;
@@ -507,6 +508,12 @@ fn clipboard_text() -> Result<String, Problem> {
     clipboard::get_text().map_err(|_| Problem::NoClipboardText)
 }
 
+/// 控制台窗口进入 / 退出全屏（各系统要额外处理的地方见 [`fullscreen`]）
+#[tauri::command]
+fn set_fullscreen(window: tauri::WebviewWindow, on: bool) -> Result<(), Problem> {
+    fullscreen::set(&window, on).map_err(Problem::failed)
+}
+
 #[tauri::command]
 async fn switch_to_host(app: AppHandle) -> Result<(), Problem> {
     let a = app.clone();
@@ -573,6 +580,7 @@ pub fn run() {
             ctrl_clipboard,
             ctrl_audio,
             clipboard_text,
+            set_fullscreen,
             switch_to_host,
             devices_load,
             devices_save,

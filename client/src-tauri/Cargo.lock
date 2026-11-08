@@ -31,6 +31,7 @@ dependencies = [
  "dirs",
  "dispatch2",
  "fast_image_resize",
+ "glib",
  "libc",
  "libpulse-binding",
  "objc2",
