@@ -24,6 +24,16 @@ use crate::config;
 const PEER_TIMEOUT: Duration = Duration::from_secs(30);
 /// 检查系统权限是否有变化的间隔
 const PERMISSION_CHECK: Duration = Duration::from_secs(2);
+/// 检查显示器有没有变化（插拔、旋转、改分辨率 / 缩放 / 排列）的间隔
+const DISPLAY_CHECK: Duration = Duration::from_secs(2);
+
+/// 显示器列表变了之后，正在看的显示器在新列表里的序号：按名字找（插拔别的显示器时序号可能变），
+/// 找不到（被拔掉了）就改看主显示器（新列表的第一个）。
+fn follow_display(old: &[DisplayInfo], current: u8, new: &[DisplayInfo]) -> u8 {
+    old.get(current as usize)
+        .and_then(|d| new.iter().position(|n| n.name == d.name))
+        .unwrap_or(0) as u8
+}
 
 /// 等到声音采集的状态有变化；没有订阅声音时一直等下去
 async fn audio_failure(sound: &mut Option<AudioSubscription>) -> Option<String> {
@@ -56,7 +66,7 @@ pub async fn run(
     )
     .await?;
 
-    let (displays, codecs, notice) = tokio::task::spawn_blocking(|| {
+    let (mut displays, codecs, notice) = tokio::task::spawn_blocking(|| {
         (
             capture::displays(),
             super::encoder::available_codecs(),
@@ -153,6 +163,8 @@ pub async fn run(
     let mut watchdog = tokio::time::interval(Duration::from_secs(5));
     let mut permission_tick = tokio::time::interval(PERMISSION_CHECK);
     permission_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut display_tick = tokio::time::interval(DISPLAY_CHECK);
+    display_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_msg = Instant::now();
 
     let result: Result<()> = async {
@@ -240,6 +252,25 @@ pub async fn run(
                         ctl(&HostMsg::Notice(permission_notice(now)))?;
                     }
                 }
+                // 显示器变了：鼠标坐标是按这里的列表换算的，旧列表会让点击落到别的位置
+                // （例如把显示器转成竖屏后宽高对调）。更新列表并告诉控制端；采集线程自己会重新打开。
+                // 正在看的显示器换了序号就跟着它走，被拔掉了就改看主显示器
+                _ = display_tick.tick() => {
+                    let now = tokio::task::spawn_blocking(capture::displays).await.unwrap_or_default();
+                    // 列不出来（例如切换显示模式的瞬间）时保留原来的列表
+                    if !now.is_empty() && now != displays {
+                        let next = follow_display(&displays, current, &now);
+                        info!(session_id, ?now, current = next, "displays changed");
+                        displays = now;
+                        if next != current || pipeline.is_none() {
+                            current = next;
+                            injector.release_all();
+                            drop(pipeline.take());
+                            pipeline = Some(Pipeline::start(current, settings, out_tx.clone()));
+                        }
+                        ctl(&HostMsg::Displays { displays: displays.clone(), current })?;
+                    }
+                }
             }
         }
         Ok(())
@@ -267,4 +298,46 @@ pub async fn run(
         Err(e) => warn!(session_id, "session failed: {e:#}"),
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn d(index: u8, name: &str, x: i32, w: u32, h: u32) -> DisplayInfo {
+        DisplayInfo {
+            index,
+            name: name.into(),
+            x,
+            y: 0,
+            width: w,
+            height: h,
+            primary: index == 0,
+        }
+    }
+
+    #[test]
+    fn follows_the_current_display() {
+        let old = [
+            d(0, "DISPLAY1", 0, 1920, 1080),
+            d(1, "DISPLAY2", 1920, 1920, 1080),
+        ];
+        // 转成竖屏：序号不变
+        let rotated = [
+            d(0, "DISPLAY1", 0, 1920, 1080),
+            d(1, "DISPLAY2", 1920, 1080, 1920),
+        ];
+        assert_eq!(follow_display(&old, 1, &rotated), 1);
+        // 在左边插了一个显示器，正在看的那个排到了后面
+        let plugged = [
+            d(0, "DISPLAY1", 0, 1920, 1080),
+            d(1, "DISPLAY3", 1920, 1280, 1024),
+            d(2, "DISPLAY2", 3200, 1920, 1080),
+        ];
+        assert_eq!(follow_display(&old, 1, &plugged), 2);
+        // 正在看的被拔掉了：改看主显示器
+        assert_eq!(follow_display(&old, 1, &old[..1]), 0);
+        // 序号本来就不对
+        assert_eq!(follow_display(&old, 7, &old), 0);
+    }
 }

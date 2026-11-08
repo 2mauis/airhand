@@ -3,7 +3,9 @@
 //! * 画面由 GPU 合成后直接复制到 staging 纹理，只在桌面有变化时才产生新帧；
 //! * 优先使用 `DuplicateOutput1`（支持 HDR 桌面自动转换为 BGRA8）；
 //! * 打开前先切到当前的输入桌面（见 [`crate::host::desktop`]）：UAC 确认框、锁屏出现时桌面复制会中断
-//!   （`DXGI_ERROR_ACCESS_LOST`），重新打开时就跟着切过去了。
+//!   （`DXGI_ERROR_ACCESS_LOST`），重新打开时就跟着切过去了；
+//! * 旋转了的显示器（竖屏）：桌面复制给出的是没有旋转的画面，复制时转成用户看到的方向（见 [`Rotation`]），
+//!   画面的宽高、方向与 [`DisplayInfo`]（桌面坐标）一致，控制端的鼠标坐标才能对上。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +22,10 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION, DXGI_MODE_ROTATION_ROTATE90,
+    DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
     DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
@@ -116,6 +121,8 @@ pub struct DxgiCapturer {
     staging: Option<(ID3D11Texture2D, u32, u32)>,
     first: bool,
     shape_buf: Vec<u8>,
+    /// 显示器的旋转方向（旋转方向变了桌面复制会中断，重新打开时更新）
+    rotation: Rotation,
 }
 
 // D3D11 设备只在采集线程内使用
@@ -176,6 +183,10 @@ impl DxgiCapturer {
                 let format = desc.ModeDesc.Format;
                 bail!("unsupported desktop pixel format: {format:?}");
             }
+            let rotation = Rotation::from_dxgi(desc.Rotation);
+            if rotation != Rotation::None {
+                tracing::info!(index, ?rotation, "the display is rotated");
+            }
             Ok(Self {
                 device,
                 ctx,
@@ -183,6 +194,7 @@ impl DxgiCapturer {
                 staging: None,
                 first: true,
                 shape_buf: Vec::new(),
+                rotation,
             })
         }
     }
@@ -271,7 +283,8 @@ impl Capturer for DxgiCapturer {
                 .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
         .context("Map")?;
-        let mut frame = pool.checkout(w, h);
+        let (fw, fh) = self.rotation.rotated_size(w, h);
+        let mut frame = pool.checkout(fw, fh);
         {
             let f = Arc::get_mut(&mut frame).expect("unique frame");
             // 采集时间用画面真正呈现的时刻（LastPresentTime），比"复制完成的时刻"更准，
@@ -283,7 +296,18 @@ impl Capturer for DxgiCapturer {
             let pitch = mapped.RowPitch as usize;
             let src = mapped.pData as *const u8;
             unsafe {
-                if pitch == row {
+                if self.rotation != Rotation::None {
+                    let len = pitch * (h as usize - 1) + row;
+                    let src = std::slice::from_raw_parts(src, len);
+                    copy_rotated(
+                        src,
+                        w as usize,
+                        h as usize,
+                        pitch,
+                        self.rotation,
+                        &mut f.data,
+                    );
+                } else if pitch == row {
                     std::ptr::copy_nonoverlapping(src, f.data.as_mut_ptr(), row * h as usize);
                 } else {
                     for y in 0..h as usize {
@@ -300,6 +324,82 @@ impl Capturer for DxgiCapturer {
         pool.keep(&frame);
         update.frame = Some(frame);
         Ok(update)
+    }
+}
+
+/// 显示器的旋转方向（`DXGI_OUTDUPL_DESC::Rotation`）。
+///
+/// 显示器旋转后，桌面复制给出的画面仍然是没有旋转的方向（例如 1080×1920 的竖屏给出 1920×1080 的画面），
+/// 需要自己转过来。对应关系与微软的 DXGIDesktopDuplication 示例（DisplayManager::SetDirtyVert）相同。
+/// 光标的形状和位置已经是用户看到的方向，不用转。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rotation {
+    None,
+    R90,
+    R180,
+    R270,
+}
+
+impl Rotation {
+    fn from_dxgi(r: DXGI_MODE_ROTATION) -> Self {
+        match r {
+            DXGI_MODE_ROTATION_ROTATE90 => Self::R90,
+            DXGI_MODE_ROTATION_ROTATE180 => Self::R180,
+            DXGI_MODE_ROTATION_ROTATE270 => Self::R270,
+            _ => Self::None,
+        }
+    }
+
+    /// `w`×`h` 的原始画面转过来之后的尺寸
+    fn rotated_size(self, w: u32, h: u32) -> (u32, u32) {
+        match self {
+            Self::R90 | Self::R270 => (h, w),
+            Self::None | Self::R180 => (w, h),
+        }
+    }
+}
+
+/// 把 `sw`×`sh` 的原始 BGRA 画面（每行 `pitch` 字节）转成用户看到的方向，紧密排列地写进 `dst`。
+///
+/// 按 32×32 的小块处理：转 90° 时读源图是按列跳着读的，分块后读到的缓存行能在块内用完。
+fn copy_rotated(src: &[u8], sw: usize, sh: usize, pitch: usize, rot: Rotation, dst: &mut [u8]) {
+    let (dw, dh) = match rot {
+        Rotation::R90 | Rotation::R270 => (sh, sw),
+        Rotation::None | Rotation::R180 => (sw, sh),
+    };
+    assert!(sw > 0 && sh > 0 && pitch >= sw * 4);
+    assert!(src.len() >= pitch * (sh - 1) + sw * 4 && dst.len() >= dw * dh * 4);
+    // 目标像素 (dx, dy) 来自源图的哪个像素（字节偏移）
+    let source = |dx: usize, dy: usize| -> usize {
+        let (sx, sy) = match rot {
+            Rotation::None => (dx, dy),
+            Rotation::R90 => (dy, dw - 1 - dx),
+            Rotation::R180 => (sw - 1 - dx, sh - 1 - dy),
+            Rotation::R270 => (dh - 1 - dy, dx),
+        };
+        sy * pitch + sx * 4
+    };
+    // 目标向右走一个像素时，源图的字节偏移怎么变
+    let step: isize = match rot {
+        Rotation::None => 4,
+        Rotation::R90 => -(pitch as isize),
+        Rotation::R180 => -4,
+        Rotation::R270 => pitch as isize,
+    };
+    const TILE: usize = 32;
+    for ty in (0..dh).step_by(TILE) {
+        for tx in (0..dw).step_by(TILE) {
+            let tw = TILE.min(dw - tx);
+            for dy in ty..(ty + TILE).min(dh) {
+                let mut s = source(tx, dy) as isize;
+                let row = &mut dst[(dy * dw + tx) * 4..(dy * dw + tx + tw) * 4];
+                for px in row.as_chunks_mut::<4>().0 {
+                    let i = s as usize;
+                    px.copy_from_slice(&src[i..i + 4]);
+                    s += step;
+                }
+            }
+        }
     }
 }
 
@@ -411,5 +511,84 @@ fn outline_inverted(rgba: &mut [u8], invert: &[bool], w: usize, h: usize) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `w`×`h` 的测试画面：每个像素记着自己的坐标，每行末尾有 `pad` 字节填充（模拟 RowPitch）
+    fn image(w: usize, h: usize, pad: usize) -> (Vec<u8>, usize) {
+        let pitch = w * 4 + pad;
+        let mut v = vec![0xEE; pitch * h];
+        for y in 0..h {
+            for x in 0..w {
+                v[y * pitch + x * 4..][..4].copy_from_slice(&[x as u8, y as u8, 0x5A, 0xFF]);
+            }
+        }
+        (v, pitch)
+    }
+
+    fn rotate(
+        src: &[u8],
+        w: usize,
+        h: usize,
+        pitch: usize,
+        rot: Rotation,
+    ) -> (Vec<u8>, usize, usize) {
+        let (dw, dh) = rot.rotated_size(w as u32, h as u32);
+        let mut dst = vec![0; dw as usize * dh as usize * 4];
+        copy_rotated(src, w, h, pitch, rot, &mut dst);
+        (dst, dw as usize, dh as usize)
+    }
+
+    /// 目标图 (x, y) 处的像素来自原图的哪个坐标
+    fn from(img: &[u8], w: usize, x: usize, y: usize) -> (u8, u8) {
+        let p = &img[(y * w + x) * 4..][..4];
+        (p[0], p[1])
+    }
+
+    /// 与微软示例的对应关系一致：转 90° 时画面顺时针转，原图左下角到左上角；转 270° 逆时针转
+    #[test]
+    fn corners() {
+        let (w, h) = (3, 2);
+        let (src, pitch) = image(w, h, 8);
+
+        let (d, dw, dh) = rotate(&src, w, h, pitch, Rotation::R90);
+        assert_eq!((dw, dh), (2, 3));
+        assert_eq!(from(&d, dw, 0, 0), (0, 1));
+        assert_eq!(from(&d, dw, 1, 0), (0, 0));
+        assert_eq!(from(&d, dw, 0, 2), (2, 1));
+
+        let (d, dw, dh) = rotate(&src, w, h, pitch, Rotation::R270);
+        assert_eq!((dw, dh), (2, 3));
+        assert_eq!(from(&d, dw, 0, 0), (2, 0));
+        assert_eq!(from(&d, dw, 1, 2), (0, 1));
+
+        let (d, dw, dh) = rotate(&src, w, h, pitch, Rotation::R180);
+        assert_eq!((dw, dh), (3, 2));
+        assert_eq!(from(&d, dw, 0, 0), (2, 1));
+        assert_eq!(from(&d, dw, 2, 1), (0, 0));
+
+        let (d, ..) = rotate(&src, w, h, pitch, Rotation::None);
+        let (tight, _) = image(w, h, 0);
+        assert_eq!(d, tight);
+    }
+
+    /// 跨多个分块、宽高不是分块大小的整数倍：90° 再 270° 回到原图，90° 两次等于 180°
+    #[test]
+    fn round_trip() {
+        let (w, h) = (77, 45);
+        let (src, pitch) = image(w, h, 12);
+        let (tight, _) = image(w, h, 0);
+
+        let (r90, w90, h90) = rotate(&src, w, h, pitch, Rotation::R90);
+        let (back, ..) = rotate(&r90, w90, h90, w90 * 4, Rotation::R270);
+        assert_eq!(back, tight);
+
+        let (twice, ..) = rotate(&r90, w90, h90, w90 * 4, Rotation::R90);
+        let (r180, ..) = rotate(&src, w, h, pitch, Rotation::R180);
+        assert_eq!(twice, r180);
     }
 }
