@@ -5,6 +5,20 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { AppInfo, Backend, SavedDevice, ServerState, SessionEvent, SessionInfo, WindowFrame } from "../api";
 import type { Lang } from "../i18n";
 
+const IS_WINDOWS = typeof navigator !== "undefined" && /Win/.test(navigator.platform || navigator.userAgent);
+
+/**
+ * 窗口全屏。Windows 的无边框窗口上，Tauri 在窗口边缘盖了一个用来拖动改大小的透明子窗口，
+ * 全屏时它还在，挡住屏幕最顶端的几个像素：鼠标移到顶端时网页收不到事件，悬浮工具栏出不来。
+ * 全屏期间关掉“可调整大小”，Tauri 就会拿掉这个子窗口；退出全屏后再恢复
+ */
+async function setFullscreen(on: boolean) {
+  const w = getCurrentWindow();
+  if (IS_WINDOWS && on) await w.setResizable(false).catch(() => {});
+  await w.setFullscreen(on);
+  if (IS_WINDOWS && !on) await w.setResizable(true).catch(() => {});
+}
+
 /** 把异步注册的监听变成同步返回的取消函数 */
 function unlistenLater(p: Promise<UnlistenFn>): () => void {
   return () => void p.then((f) => f());
@@ -77,7 +91,7 @@ export function tauriBackend(): Backend {
     saveDevices: (devices) => invoke("devices_save", { devices }),
     setLanguage: (lang) => invoke("set_language", { lang }),
     onLangChanged: (cb) => unlistenLater(listen<Lang>("lang-changed", (e) => cb(e.payload))),
-    setWindowFullscreen: (on) => getCurrentWindow().setFullscreen(on),
+    setWindowFullscreen: setFullscreen,
     onWindowFullscreenExit: (cb) => {
       const w = getCurrentWindow();
       return unlistenLater(

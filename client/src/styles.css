@@ -1530,6 +1530,15 @@ kbd {
   box-shadow: var(--shadow);
   transition: transform 0.2s ease;
 }
+/* 向上延伸一截透明区域，盖住热区和工具栏之间的空隙：鼠标从屏幕顶端往下移到工具栏上时不会中途收起 */
+.session-view.immersive .toolbar::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 12px;
+}
 .hot-edge {
   position: absolute;
   top: 0;
