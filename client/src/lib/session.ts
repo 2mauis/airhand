@@ -18,6 +18,8 @@ import {
   type QualitySettings,
   type ResumeToken,
   type SessionEvent,
+  type Platform,
+  type SystemAction,
 } from "./api";
 import { AudioPlayer } from "./audio";
 import { AvSync, type AvSyncStats } from "./avsync";
@@ -28,7 +30,8 @@ import { CODEC_LABEL } from "./presets";
 import { store } from "./store";
 
 /** waiting = 对方掉线了，等它重新上线（服务器会通知，见 hostOnline） */
-export type SessionState = "connecting" | "live" | "reconnecting" | "waiting" | "closed";
+/** `approving`：连上了，在等对方的用户同意（之后收到 hello 才是 `live`） */
+export type SessionState = "connecting" | "approving" | "live" | "reconnecting" | "waiting" | "closed";
 export type ScaleMode = "fit" | "native";
 
 export interface Stats {
@@ -114,6 +117,10 @@ export class RemoteSession {
   displays: DisplayInfo[] = [];
   currentDisplay = 0;
   hostCodecs: Codec[] = ["H264"];
+  /** 对方报告的平台（hello 之前为 null，这时按 hostOs 猜） */
+  hostPlatform: Platform | null = null;
+  /** 对方支持的系统操作（手机的返回、主页……）；电脑为空 */
+  hostActions: SystemAction[] = [];
   encoder: EncoderState | null = null;
   stats: Stats = { fps: 0, kbps: 0, rttMs: null, width: 0, height: 0, decodeMs: 0 };
   /** 画面上方的提示（显示时才变成文字，见 messages.ts） */
@@ -270,7 +277,8 @@ export class RemoteSession {
     this.sid = info.sid;
     this.hostName = info.hostName;
     this.hostOs = info.hostOs;
-    this.state = "live";
+    // 收到对方的 hello 才算开始（对方可能要先问它的用户，见 onEvent 的 awaitingApproval）；
+    // hello 也可能比这里先到，那时已经是 live 了
     this.retries = 0;
     this.closedReason = null;
     // 在后台要降帧率；连接过程中设置变了（例如 Hello 先到，换了编码格式，那时还没有 sid 发不出去）也要重发
@@ -371,9 +379,15 @@ export class RemoteSession {
 
   private onEvent(ev: SessionEvent) {
     switch (ev.type) {
+      case "awaitingApproval":
+        this.state = "approving";
+        break;
       case "hello":
+        this.state = "live";
         this.hostName = ev.hostname;
         this.hostOs = ev.os;
+        this.hostPlatform = ev.platform;
+        this.hostActions = ev.actions;
         this.hostVersion = ev.version;
         this.displays = ev.displays;
         this.currentDisplay = ev.current;
@@ -407,7 +421,10 @@ export class RemoteSession {
           if (this.notice?.kind === RECOVERS[n.kind]) this.notice = null;
         } else if (n.kind === "missingPermissions" && !n.screen && !n.input) {
           // 对方把权限都打开了：撤下之前的权限提示
-          if (this.notice?.kind === "missingPermissions") this.notice = null;
+          if (this.notice?.kind === "missingPermissions" || this.notice?.kind === "androidNoInput") this.notice = null;
+        } else if (n.kind === "missingPermissions" && this.hostPlatform === "Android") {
+          // 对方是手机：缺的是 Airhand 的"远程操作"（无障碍服务），不是 Mac 的系统权限
+          this.notice = { kind: "androidNoInput" };
         } else if (n.kind === "audioFailed") {
           this.audioError = n.detail;
           // 声音的问题不盖住正在显示的其它提示（例如缺少权限、Wayland），原因在声音菜单里一直能看到
@@ -899,6 +916,11 @@ export class RemoteSession {
     for (const code of codes) evs.push({ Key: { code, down: true } });
     for (const code of [...codes].reverse()) evs.push({ Key: { code, down: false } });
     this.enqueue(evs, true);
+  }
+
+  /** 系统操作（对方是手机时的返回、主页……；只发对方在 hello 里列出的） */
+  sendSystem(action: SystemAction) {
+    if (this.hostActions.includes(action)) this.enqueue([{ System: { action } }], true);
   }
 
   sendText(text: string) {

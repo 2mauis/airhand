@@ -1,0 +1,604 @@
+//! 被控端的画面分发：Kotlin 那边只有一个编码器（手机只有一块屏幕，MediaProjection 也只能建一个虚拟显示器），
+//! 编出来的帧发给所有会话。和桌面版的编码管线（`client/src-tauri/src/host/pipeline.rs`）用同样的低延迟办法：
+//!
+//! * **在途帧控制**：每个会话记录已发送、未确认的帧，超过窗口（≈ 基础 RTT × 帧率 + 2）时
+//!   Kotlin 的渲染线程在 [`VideoHub::wait_window`] 里等，期间新画面覆盖旧画面，不会排队；
+//! * **自适应码率**：按阻塞次数和 RTT 膨胀程度下调 / 恢复码率（[`Abr`]，与桌面版相同）；
+//! * 新加入的会话从关键帧开始收（[`Out::need_key`]）。
+//!
+//! Kotlin 的渲染线程每一轮调用 [`VideoHub::tick`]：设置变了（帧率、分辨率上限、编码格式、码率）
+//! 或者需要关键帧时返回一个 JSON，见 [`Tick`]。
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use airhand_proto::framing;
+use airhand_proto::session::{Codec, HostMsg, QualitySettings, VideoFrame};
+use bytes::Bytes;
+use serde::Serialize;
+use serde_json::json;
+use tokio::sync::mpsc;
+use tracing::{debug, info};
+
+use crate::queue::Queue;
+
+/// 每个会话的画面队列（编码好的消息）。在途帧控制之下一般只有一两帧
+pub const QUEUE: usize = 8;
+
+pub struct VideoHub {
+    st: Mutex<State>,
+    cv: Condvar,
+    events: Arc<Queue<String>>,
+}
+
+struct State {
+    sessions: HashMap<u64, Out>,
+    settings: QualitySettings,
+    /// 设置的版本：每次设置变化加 1
+    version: u32,
+    /// 上次通过 tick 告诉 Kotlin 的设置版本 / 码率
+    told_version: u32,
+    told_kbps: u32,
+    force_key: bool,
+    seq: u32,
+    abr: Abr,
+    /// H.264 / HEVC 的参数集（MediaCodec 单独给出的 codec config），拼在每个关键帧前面
+    config: Vec<u8>,
+}
+
+struct Out {
+    tx: mpsc::Sender<Bytes>,
+    flow: Flow,
+    /// 还没收到过关键帧（刚加入，或者队列满了丢过帧）：非关键帧不发给它
+    need_key: bool,
+}
+
+/// [`VideoHub::tick`] 的结果
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tick {
+    pub version: u32,
+    pub fps: u8,
+    pub max_short: u16,
+    pub codec: Codec,
+    /// 当前目标码率（自适应码率调整后的）
+    pub kbps: u32,
+    /// 需要马上编一个关键帧
+    pub key: bool,
+}
+
+impl VideoHub {
+    pub fn new(events: Arc<Queue<String>>) -> Self {
+        let settings = QualitySettings::default();
+        Self {
+            st: Mutex::new(State {
+                sessions: HashMap::new(),
+                settings,
+                version: 1,
+                told_version: 0,
+                told_kbps: 0,
+                force_key: false,
+                seq: 0,
+                abr: Abr::new(settings.bitrate_kbps),
+                config: Vec::new(),
+            }),
+            cv: Condvar::new(),
+            events,
+        }
+    }
+
+    fn report_active(&self, active: bool) {
+        info!(active, "video wanted");
+        self.events
+            .push(json!({ "type": "video", "active": active }).to_string());
+    }
+
+    /// 会话开始看画面
+    pub fn add(&self, id: u64, tx: mpsc::Sender<Bytes>) {
+        let mut st = self.st.lock().unwrap();
+        st.sessions.insert(
+            id,
+            Out {
+                tx,
+                flow: Flow::new(),
+                need_key: true,
+            },
+        );
+        st.force_key = true;
+        let first = st.sessions.len() == 1;
+        drop(st);
+        if first {
+            self.report_active(true);
+        }
+        self.cv.notify_all();
+    }
+
+    pub fn remove(&self, id: u64) {
+        let mut st = self.st.lock().unwrap();
+        let removed = st.sessions.remove(&id).is_some();
+        let empty = st.sessions.is_empty();
+        drop(st);
+        if removed && empty {
+            self.report_active(false);
+        }
+        self.cv.notify_all();
+    }
+
+    pub fn ack(&self, id: u64, seq: u32) {
+        let mut st = self.st.lock().unwrap();
+        if let Some(o) = st.sessions.get_mut(&id) {
+            o.flow.on_ack(seq);
+        }
+        drop(st);
+        self.cv.notify_all();
+    }
+
+    /// 控制端改了画质。多个控制端时以最后一次修改为准
+    pub fn set_settings(&self, s: QualitySettings) {
+        let s = s.sanitized();
+        let mut st = self.st.lock().unwrap();
+        if st.settings != s {
+            st.settings = s;
+            st.version = st.version.wrapping_add(1);
+            st.abr.reset(s.bitrate_kbps);
+            info!(?s, "quality settings updated");
+        }
+    }
+
+    pub fn request_keyframe(&self) {
+        self.st.lock().unwrap().force_key = true;
+    }
+
+    /// 渲染线程每一轮调用：需要 Kotlin 做点什么（设置变了、码率变了、要关键帧）时返回 [`Tick`]
+    pub fn tick(&self) -> Option<Tick> {
+        let mut st = self.st.lock().unwrap();
+        if st.settings.adaptive {
+            let (srtt, min_rtt) = st.worst_rtt();
+            st.abr.tick(srtt, min_rtt);
+        } else {
+            st.abr.current = st.settings.bitrate_kbps;
+        }
+        let kbps = st.abr.current;
+        if st.version == st.told_version && kbps == st.told_kbps && !st.force_key {
+            return None;
+        }
+        st.told_version = st.version;
+        st.told_kbps = kbps;
+        let key = std::mem::take(&mut st.force_key);
+        Some(Tick {
+            version: st.version,
+            fps: st.settings.fps,
+            max_short: st.settings.max_short,
+            codec: st.settings.codec,
+            kbps,
+            key,
+        })
+    }
+
+    /// 等到所有会话的在途帧都低于窗口。返回 false 表示超时（算一次阻塞，自适应码率据此下调）
+    pub fn wait_window(&self, timeout: Duration) -> bool {
+        let st = self.st.lock().unwrap();
+        let fps = st.settings.fps;
+        let (mut st, _) = self
+            .cv
+            .wait_timeout_while(st, timeout, |s| !s.window_open(fps))
+            .unwrap();
+        let open = st.window_open(fps);
+        if !open {
+            st.abr.blocked += 1;
+        }
+        open
+    }
+
+    /// 编码器的输出。`config`：参数集（不是画面），存起来拼到之后的关键帧前面
+    #[allow(clippy::too_many_arguments)]
+    pub fn push(
+        &self,
+        data: &[u8],
+        key: bool,
+        config: bool,
+        capture_us: u64,
+        codec: Codec,
+        width: u16,
+        height: u16,
+    ) {
+        let mut st = self.st.lock().unwrap();
+        if config {
+            st.config = data.to_vec();
+            return;
+        }
+        if st.sessions.is_empty() {
+            return;
+        }
+        let mut payload = Vec::with_capacity(st.config.len() + data.len());
+        if key && codec != Codec::AV1 && !starts_with_parameter_set(data, codec) {
+            payload.extend_from_slice(&st.config);
+        }
+        payload.extend_from_slice(data);
+        st.seq = st.seq.wrapping_add(1);
+        let seq = st.seq;
+        let len = payload.len();
+        let msg = HostMsg::Video(VideoFrame {
+            seq,
+            key,
+            codec,
+            width,
+            height,
+            capture_us,
+            data: payload,
+        });
+        let bytes = match framing::encode_with_capacity(&msg, len) {
+            Ok(b) => Bytes::from(b),
+            Err(e) => {
+                tracing::warn!("can't encode a video frame: {e}");
+                return;
+            }
+        };
+        let mut want_key = false;
+        for (id, o) in st.sessions.iter_mut() {
+            if o.need_key && !key {
+                want_key = true;
+                continue;
+            }
+            match o.tx.try_send(bytes.clone()) {
+                Ok(()) => {
+                    o.need_key = false;
+                    o.flow.on_sent(seq);
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // 丢了一帧，之后的帧解不出来：从下一个关键帧重新开始
+                    debug!(session = id, "video queue full, waiting for a keyframe");
+                    o.need_key = true;
+                    want_key = true;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {}
+            }
+        }
+        if want_key {
+            st.force_key = true;
+        }
+    }
+
+    /// 编码器重建了（格式 / 分辨率变了）：旧的参数集作废
+    pub fn reset_config(&self) {
+        self.st.lock().unwrap().config.clear();
+    }
+}
+
+/// 关键帧本身是不是已经带着参数集（有的编码器会自己在 IDR 前面重复 SPS/PPS）
+fn starts_with_parameter_set(data: &[u8], codec: Codec) -> bool {
+    let start = if data.starts_with(&[0, 0, 0, 1]) {
+        4
+    } else if data.starts_with(&[0, 0, 1]) {
+        3
+    } else {
+        return false;
+    };
+    let Some(&h) = data.get(start) else {
+        return false;
+    };
+    match codec {
+        Codec::H264 => h & 0x1f == 7,                      // SPS
+        Codec::H265 => matches!((h >> 1) & 0x3f, 32 | 33), // VPS / SPS
+        Codec::AV1 => true,
+    }
+}
+
+impl State {
+    fn window_open(&self, fps: u8) -> bool {
+        self.sessions
+            .values()
+            .all(|o| o.need_key || o.flow.inflight() < o.flow.window(fps))
+    }
+
+    /// 最慢的会话的 (平滑 RTT, 基础 RTT)
+    fn worst_rtt(&self) -> (f64, f64) {
+        self.sessions
+            .values()
+            .map(|o| o.flow.rtt())
+            .fold((0.0, 0.0), |acc, r| if r.0 > acc.0 { r } else { acc })
+    }
+}
+
+// ───────────────────────────── 在途帧控制（与桌面版相同） ─────────────────────────────
+
+struct Flow {
+    sent: u32,
+    acked: u32,
+    pending: VecDeque<(u32, Instant)>,
+    srtt_ms: f64,
+    /// 近 10 秒的最小 RTT（基础时延）
+    min_rtt: (f64, Instant),
+}
+
+impl Flow {
+    fn new() -> Self {
+        Self {
+            sent: 0,
+            acked: 0,
+            pending: VecDeque::new(),
+            srtt_ms: 0.0,
+            min_rtt: (f64::MAX, Instant::now()),
+        }
+    }
+
+    fn on_sent(&mut self, seq: u32) {
+        if self.pending.is_empty() {
+            // 序号是所有会话共用的：这个会话没收到的序号都当作已确认
+            self.acked = seq.wrapping_sub(1);
+        }
+        self.sent = seq;
+        self.pending.push_back((seq, Instant::now()));
+        if self.pending.len() > 256 {
+            self.pending.pop_front();
+        }
+    }
+
+    fn on_ack(&mut self, seq: u32) {
+        if seq.wrapping_sub(self.acked) as i32 <= 0 || seq.wrapping_sub(self.sent) as i32 > 0 {
+            return;
+        }
+        self.acked = seq;
+        let now = Instant::now();
+        while let Some(&(s, t)) = self.pending.front() {
+            if s.wrapping_sub(seq) as i32 > 0 {
+                break;
+            }
+            self.pending.pop_front();
+            if s == seq {
+                let rtt = now.duration_since(t).as_secs_f64() * 1000.0;
+                self.srtt_ms = if self.srtt_ms == 0.0 {
+                    rtt
+                } else {
+                    self.srtt_ms * 0.875 + rtt * 0.125
+                };
+                if rtt < self.min_rtt.0
+                    || now.duration_since(self.min_rtt.1) > Duration::from_secs(10)
+                {
+                    self.min_rtt = (rtt, now);
+                }
+            }
+        }
+    }
+
+    /// 已发送、未确认的帧数（序号是所有会话共用的，这个会话跳过的帧不算）
+    fn inflight(&self) -> u32 {
+        self.pending.len() as u32
+    }
+
+    /// 窗口 = 基础时延内可发出的帧数 + 2，限制在 [2, 8]
+    fn window(&self, fps: u8) -> u32 {
+        if self.min_rtt.0 == f64::MAX {
+            return 3;
+        }
+        let frames = (self.min_rtt.0 / 1000.0 * fps as f64).ceil() as u32 + 2;
+        frames.clamp(2, 8)
+    }
+
+    fn rtt(&self) -> (f64, f64) {
+        (
+            self.srtt_ms,
+            if self.min_rtt.0 == f64::MAX {
+                0.0
+            } else {
+                self.min_rtt.0
+            },
+        )
+    }
+}
+
+// ───────────────────────────── 自适应码率（与桌面版相同） ─────────────────────────────
+
+struct Abr {
+    target: u32,
+    current: u32,
+    blocked: u32,
+    window_start: Instant,
+    calm_since: Instant,
+}
+
+impl Abr {
+    fn new(target: u32) -> Self {
+        Self {
+            target,
+            current: target,
+            blocked: 0,
+            window_start: Instant::now(),
+            calm_since: Instant::now(),
+        }
+    }
+
+    fn reset(&mut self, target: u32) {
+        *self = Self::new(target);
+    }
+
+    fn floor(&self) -> u32 {
+        (self.target / 6).max(300).min(self.target)
+    }
+
+    fn tick(&mut self, srtt: f64, min_rtt: f64) {
+        let now = Instant::now();
+        if now.duration_since(self.window_start) < Duration::from_secs(1) {
+            return;
+        }
+        let congested = self.blocked >= 3 || (min_rtt > 0.0 && srtt > min_rtt * 2.0 + 60.0);
+        if congested {
+            let next = ((self.current as f64) * 0.75) as u32;
+            self.current = next.max(self.floor());
+            self.calm_since = now;
+            debug!(
+                kbps = self.current,
+                srtt,
+                min_rtt,
+                blocked = self.blocked,
+                "network congested, lowering the bitrate"
+            );
+        } else if now.duration_since(self.calm_since) > Duration::from_secs(3)
+            && self.current < self.target
+        {
+            self.current = ((self.current as f64 * 1.12) as u32 + 100).min(self.target);
+            self.calm_since = now - Duration::from_secs(2);
+        }
+        self.blocked = 0;
+        self.window_start = now;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use airhand_proto::framing;
+
+    fn hub() -> (VideoHub, Arc<Queue<String>>) {
+        let events = Arc::new(Queue::new(64));
+        (VideoHub::new(events.clone()), events)
+    }
+
+    fn decode(b: &Bytes) -> VideoFrame {
+        let msg: HostMsg = postcard_decode(&b[4..]);
+        match msg {
+            HostMsg::Video(v) => v,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn postcard_decode(b: &[u8]) -> HostMsg {
+        // framing 没有同步解码函数：借 read_msg 走一遍
+        let mut framed = (b.len() as u32).to_le_bytes().to_vec();
+        framed.extend_from_slice(b);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut buf = Vec::new();
+            framing::read_msg::<_, HostMsg>(&mut &framed[..], 1 << 20, &mut buf)
+                .await
+                .unwrap()
+                .unwrap()
+        })
+    }
+
+    #[test]
+    fn new_sessions_start_from_a_keyframe() {
+        let (hub, events) = hub();
+        let (tx, mut rx) = mpsc::channel(QUEUE);
+        hub.add(1, tx);
+        assert_eq!(
+            events.pop(Duration::ZERO).unwrap(),
+            r#"{"active":true,"type":"video"}"#
+        );
+        // 加入时要求关键帧
+        let t = hub.tick().unwrap();
+        assert!(t.key);
+        assert_eq!(t.codec, Codec::H264);
+        assert!(hub.tick().is_none());
+
+        // 参数集 + 非关键帧：都不发
+        hub.push(&[0, 0, 0, 1, 0x67, 1, 2], false, true, 0, Codec::H264, 8, 8);
+        hub.push(&[0, 0, 0, 1, 0x41, 9], false, false, 1, Codec::H264, 8, 8);
+        assert!(rx.try_recv().is_err());
+        // 关键帧：前面拼上参数集
+        hub.push(&[0, 0, 0, 1, 0x65, 9], true, false, 2, Codec::H264, 8, 8);
+        let v = decode(&rx.try_recv().unwrap());
+        assert!(v.key);
+        assert_eq!(v.data, [0, 0, 0, 1, 0x67, 1, 2, 0, 0, 0, 1, 0x65, 9]);
+        // 之后的非关键帧照常发
+        hub.push(&[0, 0, 0, 1, 0x41, 9], false, false, 3, Codec::H264, 8, 8);
+        let v2 = decode(&rx.try_recv().unwrap());
+        assert_eq!(v2.seq, v.seq + 1);
+        // 自带参数集的关键帧不重复拼
+        hub.push(
+            &[0, 0, 0, 1, 0x67, 1, 2, 0, 0, 0, 1, 0x65],
+            true,
+            false,
+            4,
+            Codec::H264,
+            8,
+            8,
+        );
+        assert_eq!(decode(&rx.try_recv().unwrap()).data.len(), 12);
+
+        hub.remove(1);
+        assert_eq!(
+            events.pop(Duration::ZERO).unwrap(),
+            r#"{"active":false,"type":"video"}"#
+        );
+    }
+
+    #[test]
+    fn inflight_window_blocks_until_acked() {
+        let (hub, _) = hub();
+        let (tx, mut rx) = mpsc::channel(QUEUE);
+        hub.add(7, tx);
+        hub.push(&[1], true, false, 0, Codec::AV1, 8, 8);
+        assert!(hub.wait_window(Duration::ZERO));
+        hub.push(&[2], false, false, 0, Codec::AV1, 8, 8);
+        hub.push(&[3], false, false, 0, Codec::AV1, 8, 8);
+        // 还没有 RTT 样本时窗口是 3 帧
+        assert!(!hub.wait_window(Duration::from_millis(5)));
+        let seqs: Vec<u32> = (0..3)
+            .map(|_| decode(&rx.try_recv().unwrap()).seq)
+            .collect();
+        hub.ack(7, seqs[1]);
+        assert!(hub.wait_window(Duration::ZERO));
+        // 累积确认；旧的 / 没发过的序号不影响
+        hub.ack(7, seqs[0]);
+        hub.ack(7, seqs[2] + 100);
+        hub.ack(7, seqs[2]);
+        assert!(hub.wait_window(Duration::ZERO));
+    }
+
+    #[test]
+    fn full_queue_drops_to_the_next_keyframe() {
+        let (hub, _) = hub();
+        let (tx, mut rx) = mpsc::channel(1);
+        hub.add(1, tx);
+        let _ = hub.tick();
+        hub.push(&[1], true, false, 0, Codec::AV1, 8, 8);
+        hub.push(&[2], false, false, 0, Codec::AV1, 8, 8); // 队列满，丢掉
+        assert!(hub.tick().unwrap().key);
+        rx.try_recv().unwrap();
+        hub.push(&[3], false, false, 0, Codec::AV1, 8, 8); // 等关键帧，不发
+        assert!(rx.try_recv().is_err());
+        hub.push(&[4], true, false, 0, Codec::AV1, 8, 8);
+        assert_eq!(decode(&rx.try_recv().unwrap()).data, [4]);
+    }
+
+    #[test]
+    fn settings_changes_are_reported_once() {
+        let (hub, _) = hub();
+        let first = hub.tick().unwrap();
+        assert_eq!(first.kbps, 4000);
+        assert!(hub.tick().is_none());
+        hub.set_settings(QualitySettings {
+            fps: 60,
+            bitrate_kbps: 8000,
+            max_short: 720,
+            adaptive: false,
+            codec: Codec::H265,
+        });
+        let t = hub.tick().unwrap();
+        assert_eq!(
+            (t.fps, t.kbps, t.max_short, t.codec),
+            (60, 8000, 720, Codec::H265)
+        );
+        assert!(t.version > first.version);
+        assert!(hub.tick().is_none());
+    }
+
+    #[test]
+    fn parameter_set_detection() {
+        assert!(starts_with_parameter_set(&[0, 0, 1, 0x67], Codec::H264));
+        assert!(!starts_with_parameter_set(&[0, 0, 1, 0x65], Codec::H264));
+        assert!(starts_with_parameter_set(
+            &[0, 0, 0, 1, 0x40, 1],
+            Codec::H265
+        )); // VPS
+        assert!(!starts_with_parameter_set(
+            &[0, 0, 0, 1, 0x26, 1],
+            Codec::H265
+        )); // IDR
+        assert!(!starts_with_parameter_set(&[1, 2, 3], Codec::H264));
+    }
+}

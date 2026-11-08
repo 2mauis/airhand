@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与桌面控制台（client/src/styles.css）一致 -->
+    <color name="bg">#FF0B0D14</color>
+    <color name="accent">#FF5B7CFF</color>
+    <color name="brand1">#FF7B5CFF</color>
+    <color name="brand2">#FF4C7DFF</color>
+    <color name="brand3">#FF12D3EE</color>
+</resources>

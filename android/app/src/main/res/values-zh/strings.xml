@@ -1,0 +1,319 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- 通用 -->
+    <string name="cancel">取消</string>
+    <string name="close">关闭</string>
+    <string name="save">保存</string>
+    <string name="delete">删除</string>
+    <string name="clear">清除</string>
+    <string name="back">返回</string>
+    <string name="retry">立即重试</string>
+    <string name="undo">撤销</string>
+    <string name="copy">复制</string>
+    <string name="copied">已复制</string>
+    <string name="share">分享</string>
+    <string name="more">更多</string>
+    <string name="menu">菜单</string>
+    <string name="got_it">知道了</string>
+    <string name="allow">允许</string>
+    <string name="turn_on">去开启</string>
+    <string name="granted">已开启</string>
+    <string name="open_settings">打开设置</string>
+    <string name="app_info">应用信息</string>
+    <string name="on">开</string>
+    <string name="off">关</string>
+    <string name="unknown_device">未知设备</string>
+    <string name="connect">连接</string>
+    <string name="connecting">连接中…</string>
+    <string name="disconnect">断开</string>
+    <string name="hardware">硬件</string>
+    <string name="software">软件</string>
+
+    <!-- 页签 -->
+    <string name="tab_connect">远程</string>
+    <string name="tab_share">共享本机</string>
+    <string name="tab_settings">设置</string>
+
+    <!-- 服务器 -->
+    <string name="server">服务器</string>
+    <string name="server_online">已连接</string>
+    <string name="server_offline">未连接</string>
+    <string name="server_connecting">正在连接服务器…</string>
+    <string name="server_connected">已连接到服务器</string>
+
+    <!-- 远程页 -->
+    <string name="connect_title">连接到设备</string>
+    <string name="connect_hint">输入对方 Airhand 上显示的 6 位控制码</string>
+    <string name="connect_paste">粘贴控制码</string>
+    <string name="connect_no_code_in_clipboard">剪贴板里没有控制码</string>
+    <string name="my_devices">我的设备</string>
+    <string name="my_devices_empty">连接成功的设备会保存在这里，下次点一下就能连</string>
+    <string name="device_waiting">对方不在线 · 上线后自动连接</string>
+    <string name="device_waiting_tv">对方不在线 · 上线后自动连接（再按一次取消）</string>
+    <string name="device_rename">重命名</string>
+    <string name="copy_code">复制控制码</string>
+    <string name="device_delete_title">删除设备？</string>
+    <string name="device_delete_text">从“我的设备”里删除“%1$s”。之后需要重新输入控制码才能连接。</string>
+    <string name="device_deleted">已删除</string>
+
+    <!-- 共享本机 -->
+    <string name="share_title">共享本机</string>
+    <string name="share_intro_title">让别人远程协助这台手机</string>
+    <string name="share_intro_body">开始共享后，对方在 Airhand 里输入本机的控制码就能看到这台手机的屏幕；开启“远程操作”后还能帮你操作。只把控制码告诉信任的人。</string>
+    <string name="share_start">开始共享屏幕</string>
+    <string name="share_cancelled">已取消，没有开始共享</string>
+    <string name="share_your_code">本机控制码</string>
+    <string name="share_ready">等待对方连接</string>
+    <string name="share_code_message">用 Airhand 连接我的手机，控制码：%1$s</string>
+    <string name="share_viewers">正在查看本机</string>
+    <string name="share_no_viewers">还没有人连接</string>
+    <string name="share_kick_all">全部断开</string>
+    <string name="share_kick_text">断开所有正在查看 / 操作本机的设备？对方之后仍可以用控制码重新连接；不想让对方再连，请更换控制码。</string>
+    <string name="share_new_code">更换控制码</string>
+    <string name="share_new_code_button">更换控制码</string>
+    <string name="share_new_code_title">更换控制码？</string>
+    <string name="share_new_code_text">旧的控制码立即失效，正在连接的设备会被断开，之前保存了本机的设备也连不上了。</string>
+    <string name="share_stop">停止共享</string>
+    <string name="share_stop_title">停止共享？</string>
+    <plurals name="share_stop_text">
+        <item quantity="other">有 %1$d 台设备正在查看本机，停止共享会断开它们。</item>
+    </plurals>
+    <string name="share_stopped_by_system">屏幕共享已在系统中被停止</string>
+    <string name="share_stopped_no_permission">没有获得屏幕录制权限</string>
+    <string name="permissions">权限</string>
+    <string name="perm_control">远程操作</string>
+    <string name="perm_control_desc">让对方可以点击、滑动、打字（需要开启无障碍服务）。不开启时对方只能看</string>
+    <string name="perm_audio">共享声音</string>
+    <string name="perm_audio_desc">把手机正在播放的声音传给对方（不会录麦克风）</string>
+    <string name="perm_notifications">通知</string>
+    <string name="perm_notifications_desc">共享时在通知栏显示控制码和“停止共享”</string>
+    <string name="request_channel">连接请求</string>
+    <string name="request_title">%1$s 请求连接</string>
+    <string name="request_wants_control">对方将能看到并操作这台手机。</string>
+    <string name="request_wants_view">对方将能看到这台手机的屏幕。</string>
+    <string name="request_text">%1$s来自 %2$s，%3$d 秒内不处理会自动拒绝。</string>
+    <string name="request_allow">允许</string>
+    <string name="request_decline">拒绝</string>
+    <string name="require_approval">连接前先问我</string>
+    <string name="require_approval_desc">有人输入本机控制码时，先由你允许或拒绝。允许过的设备在本次共享里断线重连不再询问</string>
+    <string name="perm_battery">后台运行</string>
+    <string name="perm_battery_desc">避免锁屏或切到后台后被系统停止</string>
+    <string name="a11y_guide_title">开启远程操作</string>
+    <string name="a11y_guide_steps">1. 点“打开设置”，在无障碍里找到“Airhand 远程操作”（可能在“已下载的应用”或“已安装的服务”里）\n2. 打开开关并确认\n3. 返回 Airhand</string>
+    <string name="a11y_guide_restricted">如果开关是灰色的、提示“受限制的设置”：先点“应用信息”，再点右上角 ⋮ →“允许受限制的设置”，然后回来重新打开。</string>
+    <string name="accessibility_label">Airhand 远程操作</string>
+    <string name="accessibility_summary">让正在查看本机的设备可以操作这台手机</string>
+    <string name="accessibility_description">开启后，通过 Airhand 连接到本机的设备可以在这台手机上点击、滑动、返回和输入文字。Airhand 不读取屏幕上的内容，只在有人远程操作时执行操作。只在“共享本机”时有效，可以随时关闭。</string>
+
+    <!-- 通知 -->
+    <string name="notification_channel">屏幕共享</string>
+    <string name="notification_sharing">正在共享屏幕</string>
+    <plurals name="notification_viewers">
+        <item quantity="other">%1$d 台设备正在查看本机</item>
+    </plurals>
+    <string name="notification_code">控制码 %1$s</string>
+    <string name="notification_connecting">正在连接服务器…</string>
+
+    <!-- 设置 -->
+    <string name="settings_server">服务器</string>
+    <string name="server_address">服务器地址</string>
+    <string name="server_address_hint">中转服务器的 地址:端口，例如 relay.example.com:4433</string>
+    <string name="server_address_invalid">格式应为 地址:端口</string>
+    <string name="server_fingerprint">证书指纹</string>
+    <string name="fingerprint_none">未设置：不校验服务器证书（仅适合测试）</string>
+    <string name="fingerprint_hint">服务器日志里打印的 SHA-256 指纹（64 位十六进制，可以带冒号）。留空则不校验</string>
+    <string name="fingerprint_invalid">指纹应为 64 位十六进制数字</string>
+    <string name="settings_this_device">本机</string>
+    <string name="device_name">设备名称</string>
+    <string name="device_name_hint">连接时对方看到的名字</string>
+    <string name="settings_current_code">当前 %1$s · 更换后旧控制码立即失效</string>
+    <string name="settings_no_code">还没有控制码（第一次共享时分配）</string>
+    <string name="settings_code_reset">下次共享时会分配新的控制码</string>
+    <string name="settings_remote">远程控制</string>
+    <string name="default_quality">默认画质</string>
+    <string name="touch_mode">操作方式</string>
+    <string name="mode_auto">自动（推荐）</string>
+    <string name="mode_auto_desc">控制电脑用触控板，控制手机用触屏</string>
+    <string name="mode_trackpad">触控板</string>
+    <string name="mode_trackpad_desc">屏幕当触控板用，滑动移动指针，点按单击，适合精确操作电脑</string>
+    <string name="mode_trackpad_short">滑动移动指针</string>
+    <string name="mode_touch">触屏</string>
+    <string name="mode_touch_desc">点哪里就点到哪里，像操作自己的手机</string>
+    <string name="mode_touch_short">点哪里是哪里</string>
+    <string name="mode_touch_phone_short">和用手机一样</string>
+    <string name="play_audio">播放对方的声音</string>
+    <string name="play_audio_desc">连接后自动打开声音</string>
+    <string name="nav_keys">控制手机时显示导航键</string>
+    <string name="nav_keys_desc">在画面下方显示返回、主页、最近任务</string>
+    <string name="settings_data">数据</string>
+    <string name="clear_devices">清除已保存的设备</string>
+    <string name="clear_devices_desc">共 %1$d 台</string>
+    <string name="clear_devices_confirm">“我的设备”里的所有设备都会被删除。</string>
+    <string name="data_note">所有数据（设置、保存的设备、本机控制码）只保存在本应用的私有目录里，不会备份到其他地方，卸载应用时一并删除。</string>
+    <string name="settings_about">关于</string>
+    <string name="version">版本</string>
+    <string name="version_value">%1$s · 协议版本 %2$d</string>
+
+    <!-- 画质预设（与桌面控制台相同） -->
+    <string name="preset_saver">省流</string>
+    <string name="preset_saver_desc">720p · 24 fps · 1.2 Mbps，适合移动网络</string>
+    <string name="preset_balanced">均衡</string>
+    <string name="preset_balanced_desc">1080p · 30 fps · 4 Mbps</string>
+    <string name="preset_smooth">流畅</string>
+    <string name="preset_smooth_desc">1080p · 60 fps · 8 Mbps</string>
+    <string name="preset_hd">高清</string>
+    <string name="preset_hd_desc">1440p · 60 fps · 16 Mbps</string>
+    <string name="preset_native">原画</string>
+    <string name="preset_native_desc">原始分辨率 · 60 fps · 30 Mbps</string>
+    <string name="codec">编码格式</string>
+    <string name="encoder_info">正在使用 %1$s %2$d×%3$d（%4$s，%5$s）</string>
+
+    <!-- 远程画面 -->
+    <string name="session_connecting">正在连接 %1$s…</string>
+    <string name="session_waiting_video">正在等待画面…</string>
+    <string name="session_reconnecting">连接中断，正在重连…</string>
+    <string name="session_waiting_host">%1$s 已离线</string>
+    <string name="session_waiting_host_detail">对方重新上线后会自动连接</string>
+    <string name="session_ended">连接已结束</string>
+    <string name="approving_title">等待 %1$s 同意…</string>
+    <string name="approving_text">对方设备上弹出了连接请求，对方同意后开始</string>
+    <string name="approving_short">等待对方同意…</string>
+    <string name="approving_tv">等待对方同意连接请求…（按返回键取消）</string>
+    <string name="session_active">正在连接 · 点按回到远程画面</string>
+    <string name="disconnect_title">断开连接？</string>
+    <string name="disconnect_text">断开与“%1$s”的连接。</string>
+    <string name="latency_ms">延迟 %1$d ms</string>
+    <string name="clipboard_received">已复制对方的剪贴板内容</string>
+    <string name="audio_playback_failed">无法播放声音：%1$s</string>
+    <string name="menu_keyboard">键盘</string>
+    <string name="menu_shortcuts">快捷键</string>
+    <string name="menu_sound_on">声音：开</string>
+    <string name="menu_sound_off">声音：关</string>
+    <string name="menu_quality">画质</string>
+    <string name="menu_clipboard">剪贴板</string>
+    <string name="menu_displays">显示器</string>
+    <string name="menu_fit">适应屏幕</string>
+    <string name="menu_help">手势说明</string>
+    <string name="hide_keyboard">收起键盘</string>
+    <string name="display_n">显示器 %1$d</string>
+    <string name="display_primary">主显示器</string>
+    <string name="clipboard_send">同步到对方的剪贴板</string>
+    <string name="clipboard_send_desc">把本机复制的文字发过去，对方可以粘贴</string>
+    <string name="clipboard_sent">已发送到对方的剪贴板</string>
+    <string name="clipboard_type">作为键盘输入发送</string>
+    <string name="clipboard_type_desc">直接把本机复制的文字打到对方当前的输入框里</string>
+
+    <!-- 快捷键 -->
+    <string name="combo_ctrl_alt_del">Ctrl + Alt + Del</string>
+    <string name="combo_alt_tab">Alt + Tab 切换窗口</string>
+    <string name="combo_win">Win 开始菜单</string>
+    <string name="combo_win_d">Win + D 显示桌面</string>
+    <string name="combo_win_e">Win + E 文件资源管理器</string>
+    <string name="combo_win_l">Win + L 锁屏</string>
+    <string name="combo_alt_f4">Alt + F4 关闭窗口</string>
+    <string name="combo_task_manager">Ctrl + Shift + Esc 任务管理器</string>
+    <string name="combo_copy">Ctrl + C 复制</string>
+    <string name="combo_paste">Ctrl + V 粘贴</string>
+    <string name="combo_undo">Ctrl + Z 撤销</string>
+    <string name="combo_print_screen">PrintScreen 截屏</string>
+    <string name="combo_cmd_tab">Command + Tab 切换应用</string>
+    <string name="combo_spotlight">Command + 空格 聚焦搜索</string>
+    <string name="combo_mission_control">Control + ↑ 调度中心</string>
+    <string name="combo_cmd_w">Command + W 关闭窗口</string>
+    <string name="combo_cmd_q">Command + Q 退出应用</string>
+    <string name="combo_force_quit">Command + Option + Esc 强制退出</string>
+    <string name="combo_lock_mac">Control + Command + Q 锁定屏幕</string>
+    <string name="combo_screenshot_mac">Command + Shift + 5 截屏</string>
+    <string name="combo_copy_mac">Command + C 复制</string>
+    <string name="combo_paste_mac">Command + V 粘贴</string>
+    <string name="combo_undo_mac">Command + Z 撤销</string>
+
+    <!-- 系统操作（手机） -->
+    <string name="action_back">返回</string>
+    <string name="action_home">主页</string>
+    <string name="action_recents">最近任务</string>
+    <string name="action_notifications">通知栏</string>
+    <string name="action_quick_settings">快捷设置</string>
+    <string name="action_screenshot">截屏</string>
+    <string name="action_lock_screen">锁屏</string>
+    <string name="action_power_menu">电源菜单</string>
+    <string name="action_volume_up">音量 +</string>
+    <string name="action_volume_down">音量 −</string>
+
+    <!-- 手势说明 -->
+    <string name="tips_trackpad">触控板模式</string>
+    <string name="tips_touch">触屏模式</string>
+    <string name="tips_passthrough">像操作自己的手机一样</string>
+    <string name="tips_menu">右侧的圆钮是菜单：键盘、快捷键、操作方式、画质……圆钮可以拖到别处。</string>
+    <string name="g_slide">单指滑动</string>
+    <string name="g_tap">单击</string>
+    <string name="g_long_press">长按</string>
+    <string name="g_tap_then_drag">点一下再按住拖</string>
+    <string name="g_two_tap">双指点击</string>
+    <string name="g_two_slide">双指拖动</string>
+    <string name="g_pinch">双指捏合</string>
+    <string name="g_three_tap">三指点击</string>
+    <string name="g_touch">点按、长按、滑动</string>
+    <string name="g_nav_keys">底部三个键</string>
+    <string name="g_move_pointer">移动指针</string>
+    <string name="g_left_click">左键单击（快速点两下 = 双击）</string>
+    <string name="g_right_click">右键</string>
+    <string name="g_click_there">在手指处单击</string>
+    <string name="g_right_click_there">在手指处右键</string>
+    <string name="g_drag">按住左键拖动（选文字、拖窗口）</string>
+    <string name="g_scroll">滚动</string>
+    <string name="g_zoom">放大画面（指针会带着画面走）</string>
+    <string name="g_zoom_pan">放大 / 移动画面</string>
+    <string name="g_zoom_pan_local">放大 / 移动画面（不影响对方）</string>
+    <string name="g_keyboard">打开 / 收起键盘</string>
+    <string name="g_same_as_phone">直接作用在对方手机上</string>
+    <string name="g_nav_keys_desc">返回、主页、最近任务</string>
+    <string name="g_fingers">两个及以上手指</string>
+    <string name="g_fingers_desc">也原样传过去：双指缩放、多指手势</string>
+    <string name="g_menu_keyboard">菜单 → 键盘</string>
+
+    <!-- 被控端的提示 -->
+    <string name="notice_no_displays">对方没有可采集的显示器</string>
+    <string name="notice_wayland">对方电脑是 Wayland 桌面：目前只能采集和操作 X11（XWayland）程序。请在对方电脑的登录界面改用 X11（Xorg）会话</string>
+    <string name="notice_capture_failed">对方的屏幕采集失败，正在重试：%1$s</string>
+    <string name="notice_audio_failed">对方无法采集声音：%1$s</string>
+    <string name="notice_android_no_input">对方手机没有开启 Airhand 的“远程操作”（无障碍服务），只能看不能操作</string>
+    <string name="notice_mac_no_screen_input">对方 Mac 没有允许 Airhand 使用“屏幕与系统录音”和“辅助功能”：看不到画面、听不到声音，也不能操作</string>
+    <string name="notice_mac_no_input">对方 Mac 没有允许 Airhand 使用“辅助功能”，不能操作键盘和鼠标</string>
+    <string name="notice_mac_no_screen">对方 Mac 没有允许 Airhand 使用“屏幕与系统录音”，看不到画面，也听不到声音</string>
+
+    <!-- 问题（类型，见 Rust 的 problem.rs） -->
+    <string name="problem_server_unreachable">无法连接服务器：%1$s</string>
+    <string name="problem_cert_mismatch">服务器证书与设置里的指纹不一致，连接可能被人拦截</string>
+    <string name="problem_incompatible_update_app">与服务器版本不兼容：服务器较新，请更新 Airhand</string>
+    <string name="problem_incompatible_update_server">与服务器版本不兼容：服务器较旧，请更新服务器</string>
+    <string name="problem_server_lost">与服务器的连接已断开：%1$s</string>
+    <string name="problem_not_connected">尚未连接到服务器，请稍候重试</string>
+    <string name="problem_invalid_code">控制码应为 6 位数字</string>
+    <string name="problem_code_not_found">控制码不存在或对方不在线</string>
+    <string name="problem_rate_limited">尝试过于频繁，请稍后再试</string>
+    <string name="problem_host_busy">对方当前连接的设备数已满</string>
+    <string name="problem_server_timeout">服务器响应超时</string>
+    <string name="problem_host_offline">对方已离线</string>
+    <string name="problem_host_ended">对方结束了会话</string>
+    <string name="problem_host_unresponsive">对方无响应</string>
+    <string name="problem_kicked">对方断开了你的连接</string>
+    <string name="problem_code_changed">对方更换了控制码</string>
+    <string name="problem_declined">对方拒绝了连接请求</string>
+    <string name="problem_unanswered">对方一直没有回应连接请求</string>
+    <string name="problem_session_ended">会话已结束</string>
+    <string name="problem_not_controller">当前不是控制端模式</string>
+    <string name="problem_no_session">会话不存在</string>
+    <string name="problem_no_clipboard_text">本机剪贴板没有文本</string>
+    <string name="problem_failed">出错了：%1$s</string>
+
+    <!-- 电视 -->
+    <string name="tv_enter_code">输入控制码</string>
+    <string name="tv_enter_code_hint">用遥控器的数字键或下面的键盘输入 6 位控制码</string>
+    <string name="tv_recent">最近连接</string>
+    <string name="tv_recent_empty">连接过的设备会显示在这里</string>
+    <string name="tv_session_hint">按 确认键 打开菜单 · 返回键 断开</string>
+    <string name="tv_sound">声音</string>
+    <string name="tv_info">显示连接信息</string>
+</resources>

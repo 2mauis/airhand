@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use airhand_proto::framing::{read_msg, write_msg};
 use airhand_proto::session::{
-    ByeReason, Codec, ControllerMsg, HostMsg, InputEvent, Notice, QualitySettings,
+    ByeReason, Codec, ControllerHello, ControllerMsg, HostMsg, InputEvent, Notice, QualitySettings,
 };
 use airhand_proto::signal::{ClientMsg, ConnectError, ServerMsg};
 use airhand_proto::{MAX_SESSION_MSG, MAX_SIGNAL_MSG, Role, SessionHeader};
@@ -141,6 +141,13 @@ async fn e2e_roundtrip() {
     )
     .await
     .unwrap();
+    // 和真正的控制端一样：先报上本次运行的标识，再发画质设置
+    write_msg(
+        &mut send,
+        &ControllerMsg::Hello(ControllerHello { device: [7; 16] }),
+    )
+    .await
+    .unwrap();
     let settings = QualitySettings {
         codec: Codec::H264,
         fps: 30,
@@ -260,6 +267,9 @@ async fn e2e_roundtrip() {
         match msg {
             HostMsg::Hello(h) => {
                 rep.hello = true;
+                // 桌面被控端：报告自己的平台，不接收触摸、没有手机那样的系统操作
+                assert!(!h.touch && h.actions.is_empty(), "{h:?}");
+                assert_ne!(h.platform, airhand_proto::session::Platform::Android);
                 println!(
                     "Hello: {} / {} / 显示器 {} / 编码 {:?}",
                     h.hostname,
@@ -303,6 +313,7 @@ async fn e2e_roundtrip() {
             }
             HostMsg::Bye(reason) => panic!("意外的 Bye: {reason:?}"),
             HostMsg::Displays { .. } => {}
+            HostMsg::AwaitingApproval => panic!("桌面被控端不会请本机用户同意"),
             HostMsg::Notice(notice) => {
                 println!("提示: {notice:?}");
                 match notice {

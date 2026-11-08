@@ -1,2 +1,5 @@
 # Shell 脚本在 Windows 上检出时也保持 LF，否则在 WSL/Linux 里无法执行
 *.sh text eol=lf
+# Gradle Wrapper 的启动脚本：Unix 版保持 LF，Windows 版保持 CRLF
+gradlew text eol=lf
+*.bat text eol=crlf

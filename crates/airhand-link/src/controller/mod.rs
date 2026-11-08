@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use airhand_proto::framing::{read_msg, write_msg};
-use airhand_proto::session::{ControllerMsg, InputEvent, MAX_CLIPBOARD_TEXT, QualitySettings};
+use airhand_proto::session::{
+    ControllerHello, ControllerMsg, InputEvent, MAX_CLIPBOARD_TEXT, QualitySettings,
+};
 use airhand_proto::signal::{ClientMsg, ConnectError, ResumeToken, ServerMsg, SessionGrant};
 use airhand_proto::{MAX_SIGNAL_MSG, Role, SessionHeader};
 use anyhow::{Result, anyhow};
@@ -85,6 +87,9 @@ struct SessionHandle {
 
 struct Inner {
     cfg: Arc<LinkConfig>,
+    /// 本次运行的随机标识，每个会话开始时告诉被控端（见 [`ControllerHello::device`]）：
+    /// 断线重连时被控端认得出是同一台，不用再请它的用户同意
+    device: [u8; 16],
     rt: Handle,
     live: Mutex<Option<Live>>,
     sessions: Mutex<HashMap<u32, SessionHandle>>,
@@ -120,6 +125,7 @@ impl ControllerService {
     ) -> Self {
         let inner = Arc::new(Inner {
             cfg,
+            device: rand::random(),
             rt: rt.clone(),
             live: Mutex::default(),
             sessions: Mutex::default(),
@@ -174,6 +180,12 @@ impl ControllerService {
         }
         .encode();
         send.write_all(&header).await.map_err(Problem::failed)?;
+        let hello = ControllerMsg::Hello(ControllerHello {
+            device: self.inner.device,
+        });
+        write_msg(&mut send, &hello)
+            .await
+            .map_err(Problem::failed)?;
         write_msg(&mut send, &ControllerMsg::Settings(settings.sanitized()))
             .await
             .map_err(Problem::failed)?;

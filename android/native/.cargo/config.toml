@@ -1,0 +1,6 @@
+# Android 15 起部分设备使用 16 KB 内存页：64 位的 .so 要按 16 KB 对齐才能加载
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

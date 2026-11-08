@@ -8,6 +8,7 @@
 assets
 data
 client/dist
-# 桌面客户端的 Rust 部分，两个镜像都用不到
+# 桌面客户端的 Rust 部分、Android 应用，两个镜像都用不到
 client/src-tauri
+android
 web/.env

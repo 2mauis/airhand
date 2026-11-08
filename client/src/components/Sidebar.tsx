@@ -129,6 +129,8 @@ function SessionItem({ s, active }: { s: RemoteSession; active: boolean }) {
         ? t("common.reconnecting")
         : s.state === "waiting"
           ? t("common.waiting")
+          : s.state === "approving"
+          ? t("common.approving")
           : s.state === "connecting"
           ? t("common.connecting")
           : t("common.disconnected");

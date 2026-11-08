@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use airhand_proto::MAX_SESSION_MSG;
 use airhand_proto::framing::{read_msg, write_msg};
 use airhand_proto::session::{
-    AudioFrame, Codec, ControllerMsg, CursorState, DisplayInfo, HostMsg, Notice, VideoFrame,
+    AudioFrame, Codec, ControllerMsg, CursorState, DisplayInfo, HostMsg, Notice, Platform,
+    SystemAction, VideoFrame,
 };
 use anyhow::Result;
 use quinn::{RecvStream, SendStream};
@@ -53,7 +54,12 @@ pub enum SessionEvent {
         displays: Vec<DisplayInfo>,
         current: u8,
         codecs: Vec<Codec>,
+        platform: Platform,
+        touch: bool,
+        actions: Vec<SystemAction>,
     },
+    /// 被控端在等它的用户同意这次连接（同意之后才会收到 `Hello` 和画面）
+    AwaitingApproval,
     Encoder {
         codec: Codec,
         name: String,
@@ -296,7 +302,13 @@ pub(super) async fn run(
                         displays: h.displays,
                         current: h.current_display,
                         codecs: h.codecs,
+                        platform: h.platform,
+                        touch: h.touch,
+                        actions: h.actions,
                     });
+                }
+                HostMsg::AwaitingApproval => {
+                    let _ = out.event(SessionEvent::AwaitingApproval);
                 }
                 HostMsg::Displays { displays, current } => {
                     let _ = out.event(SessionEvent::Displays { displays, current });
@@ -540,6 +552,34 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             json!({ "type": "clipboard", "text": "hi" })
+        );
+        assert_eq!(
+            serde_json::to_value(SessionEvent::AwaitingApproval).unwrap(),
+            json!({ "type": "awaitingApproval" })
+        );
+        let h = SessionEvent::Hello {
+            hostname: "Pixel".into(),
+            os: "Android 15".into(),
+            version: "0.1.0".into(),
+            displays: vec![],
+            current: 0,
+            codecs: vec![Codec::H265],
+            platform: Platform::Android,
+            touch: true,
+            actions: vec![SystemAction::Back, SystemAction::QuickSettings],
+        };
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v["platform"], json!("Android"));
+        assert_eq!(v["touch"], json!(true));
+        assert_eq!(v["actions"], json!(["Back", "QuickSettings"]));
+        assert_eq!(v["codecs"], json!(["H265"]));
+        let c = SessionEvent::Closed {
+            reason: Problem::from(airhand_proto::session::ByeReason::Declined),
+            retry: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&c).unwrap(),
+            json!({ "type": "closed", "reason": { "kind": "declined" }, "retry": false })
         );
     }
 }

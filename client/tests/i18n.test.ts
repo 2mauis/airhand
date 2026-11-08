@@ -101,6 +101,26 @@ test("Rust 的 Problem / NoticeView 在两种语言里都有词条", async () =>
   }
 });
 
+/** 系统操作（对方是手机时的快捷键菜单）：每一种在两种语言里都有词条（JSON 里是变体名本身，不转 camelCase） */
+test("Rust 的 SystemAction 在两种语言里都有词条", async () => {
+  const actions = (await rustVariants("../../crates/airhand-proto/src/session.rs", "SystemAction")).map(
+    (k) => k[0].toUpperCase() + k.slice(1),
+  );
+  assert.ok(actions.includes("Back") && actions.includes("Home"), `解析结果不对: ${actions}`);
+  const before = getLang();
+  try {
+    for (const lang of ["zh", "en"] as const) {
+      setLang(lang);
+      for (const a of actions) {
+        const key = `action.${a}` as MsgKey;
+        assert.notEqual(t(key), key, `${lang} 缺少词条 ${key}`);
+      }
+    }
+  } finally {
+    setLang(before);
+  }
+});
+
 test("问题文字：版本不兼容按版本号提示更新哪一方，技术信息原样附在后面", () => {
   const before = getLang();
   try {

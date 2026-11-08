@@ -42,6 +42,8 @@ function Tile({ s }: { s: RemoteSession }) {
             t("common.disconnected")
           ) : s.state === "waiting" ? (
             t("common.waiting")
+          ) : s.state === "approving" ? (
+            t("common.approving")
           ) : (
             <span className="spinner" />
           )}</div>

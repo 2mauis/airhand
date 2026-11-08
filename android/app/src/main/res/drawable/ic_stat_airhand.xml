@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知栏小图标（单色） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="800"
+    android:viewportHeight="800">
+    <group
+        android:translateX="-95"
+        android:translateY="-96">
+        <path
+            android:pathData="M 330 409 A 154 154 0 0 1 484 255"
+            android:strokeWidth="54"
+            android:strokeColor="#FFFFFF"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M 226 409 A 258 258 0 0 1 484 151"
+            android:strokeWidth="54"
+            android:strokeColor="#FFFFFF"
+            android:strokeAlpha="0.6"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M 484 409 L 484 783 L 583 700 L 645 846 L 708 820 L 645 674 L 770 674 Z"
+            android:fillColor="#FFFFFF"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="44"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>

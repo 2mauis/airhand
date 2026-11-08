@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 界面都是 Compose 画的，这里只管启动时的窗口背景和系统栏 -->
+    <style name="Theme.Airhand" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:colorAccent">@color/accent</item>
+    </style>
+
+    <style name="Theme.Airhand.Tv" parent="Theme.Airhand" />
+
+    <!-- 远程画面：黑底 -->
+    <style name="Theme.Airhand.Session" parent="Theme.Airhand">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>

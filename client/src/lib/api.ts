@@ -62,6 +62,10 @@ export type Problem =
   | { kind: "hostUnresponsive" }
   | { kind: "kicked" }
   | { kind: "codeChanged" }
+  /** 被控端的用户拒绝了连接 */
+  | { kind: "declined" }
+  /** 被控端的用户一直没有回应连接请求 */
+  | { kind: "unanswered" }
   | { kind: "sessionEnded" }
   // 其它
   | { kind: "notController" }
@@ -112,6 +116,22 @@ export interface SessionInfo {
   resume: ResumeToken;
 }
 
+/** 被控端的平台，与 airhand_proto::session::Platform 对应 */
+export type Platform = "Windows" | "Mac" | "Linux" | "Android";
+
+/** 系统操作（手机的导航键等），与 airhand_proto::session::SystemAction 对应 */
+export type SystemAction =
+  | "Back"
+  | "Home"
+  | "Recents"
+  | "Notifications"
+  | "QuickSettings"
+  | "Screenshot"
+  | "LockScreen"
+  | "PowerMenu"
+  | "VolumeUp"
+  | "VolumeDown";
+
 export type SessionEvent =
   | {
       type: "hello";
@@ -121,7 +141,14 @@ export type SessionEvent =
       displays: DisplayInfo[];
       current: number;
       codecs: Codec[];
+      platform: Platform;
+      /** 能接收多点触摸（控制台用鼠标，不发触摸） */
+      touch: boolean;
+      /** 支持的系统操作 */
+      actions: SystemAction[];
     }
+  /** 被控端在等它的用户同意这次连接，同意之后才会收到 hello */
+  | { type: "awaitingApproval" }
   | { type: "displays"; displays: DisplayInfo[]; current: number }
   | {
       type: "stats";
@@ -147,6 +174,7 @@ export type InputEvent =
   | { Wheel: { dx: number; dy: number } }
   | { Key: { code: string; down: boolean } }
   | { Text: { text: string } }
+  | { System: { action: SystemAction } }
   | "ReleaseAll";
 
 /** 会话的输出 */

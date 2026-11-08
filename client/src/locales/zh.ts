@@ -12,6 +12,7 @@ export default {
   "common.disconnect": "断开",
   "common.reconnecting": "正在重连…",
   "common.waiting": "等待对方上线",
+  "common.approving": "等待对方同意",
   "common.thisComputer": "本机",
 
   // 侧边栏
@@ -116,6 +117,19 @@ export default {
   "session.reconnecting": "正在重新连接…",
   "session.connecting": "正在连接…",
   "session.waiting": "等待对方重新上线…",
+  "session.approving": "等待 {name} 同意…",
+  "session.approvingHint": "对方设备上弹出了连接请求，对方同意后开始",
+  // 系统操作（对方是手机时的快捷键菜单）
+  "action.Back": "返回",
+  "action.Home": "主页",
+  "action.Recents": "最近任务",
+  "action.Notifications": "通知栏",
+  "action.QuickSettings": "快捷设置",
+  "action.Screenshot": "截屏",
+  "action.LockScreen": "锁屏",
+  "action.PowerMenu": "电源菜单",
+  "action.VolumeUp": "音量 +",
+  "action.VolumeDown": "音量 −",
   "session.waitingHint": "对方已离线，重新上线后会自动连接",
   "session.attempt": "第 {n} 次尝试",
   "session.noClipboard": "本机剪贴板没有文本",
@@ -172,6 +186,7 @@ export default {
   "notice.h264Undecodable": "本机无法解码 H.264 画面",
   "notice.codecFallback": "本机无法解码 {codec} 画面，已改用 {to}",
   "notice.noOpus": "本机不支持 Opus 解码，无法播放远程声音",
+  "notice.androidNoInput": "对方手机没有开启 Airhand 的“远程操作”（无障碍服务），只能看不能操作。需要手机的主人在 Airhand 的“共享本机”页里开启",
   "error.canvas": "无法创建 Canvas",
 
   // 网页版用不了时的说明
@@ -200,6 +215,8 @@ export default {
   "problem.hostUnresponsive": "对方电脑无响应",
   "problem.kicked": "对方断开了你的连接",
   "problem.codeChanged": "对方更换了控制码",
+  "problem.declined": "对方拒绝了连接请求",
+  "problem.unanswered": "对方一直没有回应连接请求",
   "problem.sessionEnded": "会话已结束",
   // 其它
   "problem.notController": "当前不是控制端模式",

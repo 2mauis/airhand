@@ -1,11 +1,24 @@
 //! 会话流（被控端 ⇄ 控制端，经服务器透传）消息。
+//!
+//! # 会话开始
+//!
+//! 控制端打开会话流后先发 [`ControllerMsg::Hello`]（带上本次运行的设备标识），然后是画质设置。
+//! 被控端通常马上回 [`HostMsg::Hello`]，之后开始发画面。
+//!
+//! 被控端也可以先请坐在它面前的人同意（[`HostMsg::AwaitingApproval`]，例如手机默认这样做）：
+//! 同意之后才发 `Hello` 和画面，拒绝或者超时没人理会就发 [`HostMsg::Bye`]（[`ByeReason::Declined`] /
+//! [`ByeReason::Unanswered`]）。等待期间照常回应 Ping，控制端不会把它当成失联。
+//! 同一次运行里同一台控制端（同一个 [`ControllerHello::device`]）断线重连时被控端可以不再询问。
 
 use serde::{Deserialize, Serialize};
 
 /// 被控端 → 控制端
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum HostMsg {
+    /// 会话开始（需要本机用户同意时，同意之后才发）
     Hello(HostHello),
+    /// 正在等被控端的用户同意这次连接（见模块说明）
+    AwaitingApproval,
     Video(VideoFrame),
     /// 回应 [`ControllerMsg::Ping`]，用于测量端到端往返时延。
     Pong {
@@ -34,7 +47,8 @@ pub enum HostMsg {
 
 /// 被控端给控制端的提示。
 ///
-/// 发送的是类型而不是文字：控制端按**自己的**界面语言显示，不会出现对方电脑的语言。
+/// 发送的是类型而不是文字：控制端按**自己的**界面语言显示，不会出现对方电脑的语言；
+/// 怎么解决（例如去哪里授权）因平台而异，由控制端按 [`HostHello::platform`] 说明。
 /// 会自动恢复的问题成对出现（`XxxFailed` / `XxxRecovered`）：恢复时控制端撤下之前的提示，`XxxRecovered` 本身不显示。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
@@ -53,8 +67,9 @@ pub enum Notice {
     AudioFailed { detail: String },
     /// 声音采集恢复正常（之前发过 [`Notice::AudioFailed`]）。
     AudioRecovered,
-    /// 被控端缺少系统权限（目前只有 macOS），只能由那台电脑的用户在"系统设置 → 隐私与安全性"里授予：
-    /// `screen` 是"屏幕与系统录音"（缺了就没有画面和声音），`input` 是"辅助功能"（缺了就不能操作键盘鼠标）。
+    /// 被控端缺少只能由那台设备的用户授予的权限：`screen` 缺了就没有画面和声音，`input` 缺了就不能操作。
+    /// macOS 是"系统设置 → 隐私与安全性"里的"屏幕与系统录音"和"辅助功能"；Android 是 Airhand 的
+    /// "远程操作"（无障碍服务），屏幕录制在开始共享时已经同意过，不会缺。
     ///
     /// 会话开始时缺少权限就发一次，之后权限有变化再发；两项都为 false 表示已经全部授予，
     /// 控制端据此撤下之前的提示。
@@ -68,6 +83,10 @@ pub enum ByeReason {
     Kicked,
     /// 被控端的用户更换了控制码（所有控制端随之断开）
     CodeChanged,
+    /// 被控端的用户拒绝了这次连接
+    Declined,
+    /// 被控端的用户一直没有回应连接请求
+    Unanswered,
 }
 
 /// 声音格式固定为 Opus 48 kHz 立体声，每包 20 ms。
@@ -121,12 +140,43 @@ pub struct EncoderInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HostHello {
     pub hostname: String,
+    /// 操作系统的名称和版本，仅用于展示（例如 "Windows 11 Pro 24H2"、"Android 15"）
     pub os: String,
     pub version: String,
     pub displays: Vec<DisplayInfo>,
     pub current_display: u8,
     /// 被控端可用的编码格式（硬件或软件）
     pub codecs: Vec<Codec>,
+    /// 被控端是什么平台：控制端据此选择默认的操作方式、快捷键，以及提示里的说法
+    pub platform: Platform,
+    /// 能接收多点触摸（[`InputEvent::Touch`]）
+    pub touch: bool,
+    /// 支持的系统操作（[`InputEvent::System`]），控制端只显示这些
+    pub actions: Vec<SystemAction>,
+}
+
+/// 被控端的平台
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Platform {
+    Windows,
+    Mac,
+    Linux,
+    Android,
+}
+
+/// 系统操作：手机上的导航键和系统界面（不是键盘上的按键，被控端用系统自己的方式执行）
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SystemAction {
+    Back,
+    Home,
+    Recents,
+    Notifications,
+    QuickSettings,
+    Screenshot,
+    LockScreen,
+    PowerMenu,
+    VolumeUp,
+    VolumeDown,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -169,6 +219,8 @@ pub struct VideoFrame {
 /// 控制端 → 被控端
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ControllerMsg {
+    /// 会话流上的第一条消息（见模块说明）
+    Hello(ControllerHello),
     /// 批量输入事件（鼠标移动会被合并）
     Input(Vec<InputEvent>),
     /// 确认收到某一帧，用于被控端的在途帧控制（防止延迟堆积）。
@@ -191,6 +243,13 @@ pub enum ControllerMsg {
     Audio {
         enabled: bool,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControllerHello {
+    /// 控制端这次运行的随机标识（不保存，不跨运行）。被控端据此认出断线重连的同一台控制端，
+    /// 不再重复请用户同意
+    pub device: [u8; 16],
 }
 
 /// 剪贴板同步的文本上限
@@ -240,6 +299,19 @@ pub enum MouseButton {
     Forward,
 }
 
+/// 触摸点的阶段
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TouchPhase {
+    Down,
+    Move,
+    Up,
+    /// 手势被打断（例如控制端的系统接管了触摸）：被控端松开这个触摸点
+    Cancel,
+}
+
+/// 同时按下的触摸点上限（与 Android 手势的上限一致）
+pub const MAX_TOUCH_POINTS: u8 = 10;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum InputEvent {
     /// 归一化坐标（0..=1），相对当前显示器画面
@@ -267,4 +339,16 @@ pub enum InputEvent {
     },
     /// 释放所有按下的键（控制端失焦时发送，防止按键粘连）
     ReleaseAll,
+    /// 触摸点（只发给 [`HostHello::touch`] 的被控端）。`id` 区分同时按下的手指（小于 [`MAX_TOUCH_POINTS`]），
+    /// 坐标同 `MouseMove`。同一批里的触摸事件是同一时刻的
+    Touch {
+        id: u8,
+        phase: TouchPhase,
+        x: f32,
+        y: f32,
+    },
+    /// 系统操作（只发被控端在 [`HostHello::actions`] 里列出的）
+    System {
+        action: SystemAction,
+    },
 }

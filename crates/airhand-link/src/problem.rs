@@ -5,7 +5,9 @@
 //! * `Display` 是写日志用的英文；
 //! * `detail` 是给排查问题用的技术信息（英文），界面上原样显示在说明文字后面。
 //!
-//! 新增变体时，前端的 `problem.<kind>` 词条也要补上（`client/` 里的 `npm test` 会检查）。
+//! 新增变体时，前端的 `problem.<kind>` 词条也要补上（`client/` 里的 `npm test` 会检查），
+//! Android 的文案也要补上（`android/app/.../ui/Messages.kt` 和两种语言的 `strings.xml`，`android/` 里的
+//! `./gradlew testDebugUnitTest` 会检查）。
 
 use std::fmt;
 
@@ -56,6 +58,10 @@ pub enum Problem {
     Kicked,
     /// 被控端的用户更换了控制码
     CodeChanged,
+    /// 被控端的用户拒绝了这次连接
+    Declined,
+    /// 被控端的用户一直没有回应连接请求
+    Unanswered,
     /// 会话已结束
     SessionEnded,
 
@@ -91,9 +97,12 @@ impl Problem {
         matches!(self, Problem::Incompatible { .. })
     }
 
-    /// 对方有意结束的会话，不应该自动重连
+    /// 对方有意结束（或者对方的用户没有同意）的会话，不应该自动重连
     pub fn is_final(&self) -> bool {
-        matches!(self, Problem::Kicked | Problem::CodeChanged)
+        matches!(
+            self,
+            Problem::Kicked | Problem::CodeChanged | Problem::Declined | Problem::Unanswered
+        )
     }
 }
 
@@ -124,6 +133,10 @@ impl fmt::Display for Problem {
             Problem::HostUnresponsive => f.write_str("the host stopped responding"),
             Problem::Kicked => f.write_str("the user at the host disconnected all controllers"),
             Problem::CodeChanged => f.write_str("the user at the host changed the control code"),
+            Problem::Declined => f.write_str("the user at the host declined the connection"),
+            Problem::Unanswered => {
+                f.write_str("the user at the host didn't answer the connection request")
+            }
             Problem::SessionEnded => f.write_str("session ended"),
             Problem::NotController => f.write_str("not in controller mode"),
             Problem::NoSession => f.write_str("no such session"),
@@ -151,6 +164,8 @@ impl From<ByeReason> for Problem {
         match r {
             ByeReason::Kicked => Problem::Kicked,
             ByeReason::CodeChanged => Problem::CodeChanged,
+            ByeReason::Declined => Problem::Declined,
+            ByeReason::Unanswered => Problem::Unanswered,
         }
     }
 }

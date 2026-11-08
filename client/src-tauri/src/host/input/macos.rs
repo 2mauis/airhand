@@ -123,6 +123,8 @@ impl MacInjector {
                 }
                 InputEvent::Text { text } => self.type_text(text),
                 InputEvent::ReleaseAll => self.release_all(),
+                // 桌面被控端不声明触摸和系统操作（HostHello），控制端不会发
+                InputEvent::Touch { .. } | InputEvent::System { .. } => {}
             }
         }
     }

@@ -260,6 +260,87 @@ mod tests {
         assert_eq!(crate::ALPN, b"airhand/1");
     }
 
+    /// 会话开始、等待同意、触摸和系统操作（协议版本 7 新增）
+    #[tokio::test]
+    async fn session_start_and_touch_roundtrip() {
+        let mut wire = Vec::new();
+        write_msg(&mut wire, &HostMsg::AwaitingApproval)
+            .await
+            .unwrap();
+        write_msg(&mut wire, &HostMsg::Bye(ByeReason::Declined))
+            .await
+            .unwrap();
+        write_msg(
+            &mut wire,
+            &HostMsg::Hello(HostHello {
+                hostname: "Pixel".into(),
+                os: "Android 15".into(),
+                version: "0.1.0".into(),
+                displays: vec![],
+                current_display: 0,
+                codecs: vec![Codec::H264, Codec::AV1],
+                platform: Platform::Android,
+                touch: true,
+                actions: vec![SystemAction::Back, SystemAction::VolumeDown],
+            }),
+        )
+        .await
+        .unwrap();
+        let mut r = &wire[..];
+        let mut buf = Vec::new();
+        let a: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
+        assert!(matches!(a, HostMsg::AwaitingApproval));
+        let b: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
+        assert!(matches!(b, HostMsg::Bye(ByeReason::Declined)));
+        let h: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
+        assert!(
+            matches!(h, HostMsg::Hello(ref h) if h.platform == Platform::Android && h.touch
+            && h.actions == [SystemAction::Back, SystemAction::VolumeDown])
+        );
+
+        let msgs = vec![
+            ControllerMsg::Hello(ControllerHello { device: [9; 16] }),
+            ControllerMsg::Input(vec![
+                InputEvent::Touch {
+                    id: 1,
+                    phase: TouchPhase::Down,
+                    x: 0.25,
+                    y: 0.5,
+                },
+                InputEvent::System {
+                    action: SystemAction::Recents,
+                },
+            ]),
+        ];
+        let mut wire = Vec::new();
+        for m in &msgs {
+            write_msg(&mut wire, m).await.unwrap();
+        }
+        let mut r = &wire[..];
+        let hello: ControllerMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
+        assert!(
+            matches!(hello, ControllerMsg::Hello(ControllerHello { device }) if device == [9; 16])
+        );
+        let input: ControllerMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
+        let ControllerMsg::Input(events) = input else {
+            panic!()
+        };
+        assert_eq!(
+            events,
+            [
+                InputEvent::Touch {
+                    id: 1,
+                    phase: TouchPhase::Down,
+                    x: 0.25,
+                    y: 0.5
+                },
+                InputEvent::System {
+                    action: SystemAction::Recents
+                }
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn too_large() {
         let wire = encode(&ControllerMsg::Input(vec![InputEvent::Text {

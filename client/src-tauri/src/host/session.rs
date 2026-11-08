@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use airhand_proto::framing::{self, read_msg};
 use airhand_proto::session::{
-    ByeReason, ControllerMsg, DisplayInfo, HostHello, HostMsg, Notice, QualitySettings,
+    ByeReason, ControllerMsg, DisplayInfo, HostHello, HostMsg, Notice, Platform, QualitySettings,
 };
 use airhand_proto::{MAX_SESSION_MSG, Role, SessionHeader};
 use anyhow::{Context, Result, anyhow};
@@ -22,6 +22,14 @@ use crate::config;
 
 /// 控制端每秒都会发 Ping，这么久没有任何消息说明对方已失联
 const PEER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 告诉控制端的平台（控制端据此选快捷键、提示的说法）
+#[cfg(windows)]
+const PLATFORM: Platform = Platform::Windows;
+#[cfg(target_os = "macos")]
+const PLATFORM: Platform = Platform::Mac;
+#[cfg(not(any(windows, target_os = "macos")))]
+const PLATFORM: Platform = Platform::Linux;
 /// 检查系统权限是否有变化的间隔
 const PERMISSION_CHECK: Duration = Duration::from_secs(2);
 /// 检查显示器有没有变化（插拔、旋转、改分辨率 / 缩放 / 排列）的间隔
@@ -96,6 +104,10 @@ pub async fn run(
         displays: displays.clone(),
         current_display: current,
         codecs,
+        platform: PLATFORM,
+        // 桌面被控端只有鼠标键盘：不接收触摸，也没有手机那样的系统操作（快捷键由控制端发按键）
+        touch: false,
+        actions: Vec::new(),
     }))?;
     if displays.is_empty() {
         ctl(&HostMsg::Notice(Notice::NoDisplays))?;
@@ -206,6 +218,8 @@ pub async fn run(
                         }
                         ControllerMsg::Ping { t } => ctl(&HostMsg::Pong { t })?,
                         ControllerMsg::Clipboard { text } => clip.apply(text),
+                        // 桌面被控端不请本机用户同意，用不到控制端的标识
+                        ControllerMsg::Hello(_) => {}
                         ControllerMsg::Audio { enabled } => {
                             if !enabled {
                                 sound = None;

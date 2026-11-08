@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/icon.svg" width="96" alt="Airhand"></p>
 
 <h1 align="center">Airhand</h1>
-<p align="center">High-performance remote desktop over QUIC · Rust + Tauri + React</p>
+<p align="center">High-performance remote desktop over QUIC · Rust + Tauri + React · Android</p>
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a></p>
 
 ---
@@ -9,6 +9,8 @@
 Airhand is a single program that is both the **host** (the computer being controlled) and the **controller** (the computer you control it from). It runs on **Windows**, **macOS** (13 or later) and **Linux** (X11 desktops). A small relay server, deployed with one Docker Compose command, handles signaling and forwards traffic. The controller can also be deployed with Docker Compose as a **web console** that you use from a browser.
 
 On Windows Airhand is installed, and the host runs as a system service: the lock screen, the sign-in screen and UAC prompts can be controlled too, and the control code stays the same.
+
+There is also an **Android** app (a single APK): on **phones and tablets** it can watch and control other devices, and let others watch and control the phone; opened from a **TV**'s home screen it shows a dedicated TV interface that only watches (see [Android](#android-phones--tvs)).
 
 > **Status:** under active development. The protocol still changes between versions, so the clients and the server must be built from the same version (a mismatch is detected and reported, see [Protocol versions](#protocol-versions)).
 
@@ -18,6 +20,7 @@ On Windows Airhand is installed, and the host runs as a system service: the lock
 - **Windows system service**: the lock screen, the sign-in screen and UAC prompts can be seen and controlled; the **control code is fixed**; optionally starts with Windows (see [Windows installation](#windows-installation))
 - **Controller console**: control **several computers at once**, switch between them, or watch them all in a multi-screen overview
 - **Web console**: start the controller with Docker Compose and open one port in a browser; nothing to install on the computer you control from (see [Web console](#web-console-docker))
+- **Android phones and TVs**: control computers and phones from a phone with trackpad or touch gestures, or share the phone's own screen to get help; on a TV just watch, with the remote. Devices you connected to are saved, so next time it's one tap (see [Android](#android-phones--tvs))
 - **Low latency, low bandwidth**: hardware **AV1 / HEVC / H.264** encoding, no frames when the screen is still, adaptive bitrate, the cursor moves locally with no lag
 - **Audio**: the host's system sound is streamed to the controller, with optional A/V sync for watching video
 - **Practical tools**: two-way clipboard sync, typing the clipboard as keystrokes, system shortcuts (Win, Alt+Tab, Ctrl+Shift+Esc…), multiple monitors, fullscreen with keyboard lock
@@ -31,6 +34,7 @@ On Windows Airhand is installed, and the host runs as a system service: the lock
 - [Usage](#usage)
 - [Server configuration](#server-configuration)
 - [Web console (Docker)](#web-console-docker)
+- [Android (phones / TVs)](#android-phones--tvs)
 - [Building the client](#building-the-client)
 - [How it works](#how-it-works)
 - [Security](#security)
@@ -109,6 +113,7 @@ Tray → **Switch to controller** opens the console. Closing the console window 
 - In fullscreen the console tries to lock the keyboard, so system shortcuts such as the Win key and Alt+Tab go to the remote computer
 - Network hiccups reconnect automatically. If the user at the host disconnects you, the console says so and doesn't reconnect
 - If the remote computer goes offline (shut down, asleep, network gone), the console shows "Waiting for the remote computer to come back" and reconnects as soon as it's back with its old code. It doesn't keep retrying in the meantime, and the server doesn't mistake the reconnects for code guessing
+- When connecting to a phone, its owner may have to accept first (the Android default): the console shows "Waiting for … to accept" and starts once accepted; if it's declined or ignored, the reason is shown and it doesn't retry. With a phone, the shortcut menu holds system actions such as Back, Home and notifications
 
 **Quality panel**: presets from Data saver (720p / 24 fps / 1.2 Mbps) through Balanced (1080p / 30 fps / 4 Mbps), Smooth (1080p / 60 fps / 8 Mbps) and HD (1440p / 60 fps / 16 Mbps) to Original (native resolution / 60 fps / 30 Mbps), or set the resolution cap, frame rate (15–120), bitrate cap (0.5–50 Mbps), codec and adaptive bitrate yourself. The console only offers codecs this computer can hardware-decode; if the host has no matching hardware encoder it falls back automatically, and the toolbar shows the encoder actually in use.
 
@@ -172,6 +177,77 @@ Environment variables (see `web/docker-compose.yml` and `web/.env.example`):
 - Behind a reverse proxy (for your own domain and certificate): proxy to the container's `http://…:8080`, forward WebSockets (`/ws`) and keep the `Host` header (or set `X-Forwarded-Host`), otherwise the WebSocket is rejected as cross-site. A sub-path works too
 - The image is based on distroless, runs as a non-root user, and is about 30 MB. It only needs outbound UDP (to the relay) and this one inbound TCP port
 
+## Android (phones / TVs)
+
+One APK (`android/`, see [building](#android-apk)) for phones, tablets and TVs. The same app shows a different interface depending on how it's opened:
+
+| Opened from | Interface | What it does |
+|---|---|---|
+| A phone / tablet home screen | Phone interface (three tabs) | **Control others**: watch and operate computers or other phones<br>**Be controlled**: share this phone's screen so others can watch and operate it |
+| A TV home screen (Android TV / Google TV / TV boxes) | TV interface, everything works with the remote | **Watch only** (computers or phones); no control, can't be controlled |
+
+On a TV, the phone entry point also switches to the TV interface.
+
+### Phone: Remote
+
+- The home page is a **6-digit control code field**; it connects as soon as 6 digits are in ("Paste code" also finds a code inside text like "code: 123 456"). Connecting happens right there (a spinner on the button) and the remote screen opens once connected; a wrong code, an offline device, too many attempts and so on are explained right under the field
+- **My devices**: every device you connect to is saved (name, OS, control code, last connection, resume token), so next time it's **one tap**. If it's offline the row says "Offline · connects automatically when it's back" and the remote screen opens by itself when it comes online; you can cancel any time. Devices can be renamed, their code copied, or removed (with undo)
+- A card at the top leads back to a session that's still running
+
+The remote screen is full screen with just one **draggable round button** (it snaps to the left / right edge) that opens the menu: keyboard, shortcuts, sound, quality (same presets as the desktop, plus the video format), clipboard (send to the remote clipboard / type it in), displays (with several monitors), fit screen, gestures, disconnect. The top of the menu shows the device's name, video format, frame rate, latency and bitrate. Rotating the phone to landscape fills the screen.
+
+Two **touch input modes** (two big buttons in the menu switch any time, Settings sets the default; the default "Automatic" uses the trackpad for computers and touch for phones). The gestures are explained the first time each mode is used:
+
+| Gesture | Trackpad (computers) | Touch (computers) | Touch (phones) |
+|---|---|---|---|
+| Slide one finger | Move the pointer (precise when slow, accelerated when fast) | Drag with the left button | Every finger is passed through: taps, long presses, swipes, pinch-to-zoom and multi-finger gestures all happen on the remote phone |
+| Tap | Click; tap twice = double-click | Click under the finger | 〃 |
+| Long press | Right-click | Right-click under the finger | 〃 |
+| Tap, then hold and drag | Drag with the left button (select text, move windows) | — | 〃 |
+| Two-finger tap | Right-click | Right-click | 〃 |
+| Two-finger drag | Scroll (natural, with momentum) | Scroll | 〃 |
+| Pinch | Zoom in, the view follows the pointer | Zoom / move the view | 〃 |
+| Three-finger tap | Show / hide the keyboard | Same | 〃 (the keyboard is in the menu) |
+
+When the remote phone runs Android 7 (no continuous multi-finger gestures), only one finger is passed through and pinching zooms the local view.
+
+- In trackpad mode the pointer is drawn locally (with the remote shape), so it moves without lag; in touch mode a fading circle shows where you tapped
+- **Keyboard**: the picture shrinks to stay fully visible above it, and a row of extra keys sits on top: Esc, Tab, Ctrl, Alt, Shift, Win (⌘ for Macs), arrows, Home / End, PgUp / PgDn, Del, F1–F12. Modifiers are sticky: tap once for the next key only, again to lock, again to release (tap Ctrl, then type c = Ctrl+C). While an IME composes (pinyin etc.) the text shows above the extra keys and is only sent once chosen
+- When controlling a phone, **Back / Home / Recents** keys sit below the picture (can be turned off in Settings), and the shortcut menu holds system actions: notifications, quick settings, screenshot, lock screen, power menu, volume (whichever the phone supports). For computers the shortcut menu lists shortcuts for the remote OS (Windows / macOS / Linux)
+- If the remote phone has "Ask before someone connects" on, the home page shows "Waiting for … to accept" (cancellable) and the remote screen opens once it's accepted; if it's declined or ignored for 60 s, the reason is shown
+- A connected mouse and keyboard map directly to the remote mouse and keyboard
+- Back first asks "Disconnect?", so it can't happen by accident. Network drops reconnect automatically; if the device goes offline it says so and reconnects when it's back; if the other side disconnected you or changed its code, it says why and doesn't retry
+- In the background the session stays, at 2 fps and without sound, and resumes immediately when you return
+
+### Phone: Share screen (be controlled)
+
+On the "Share screen" tab, tap **Start sharing screen**: Airhand asks for notification and audio-recording permission (recording is only used to share **what the phone is playing**, never the microphone; the screen is shared even if you decline), then the system asks to confirm screen recording. Once sharing:
+
+- The **control code** is shown in large digits, with copy and share. Like the Windows installation it is **fixed** (saved in the app's own data directory, and the server keeps it for this phone) until you tap "Change control code"
+- **Ask before someone connects** (on by default, can be turned off in Settings): when someone enters this phone's code, a notification pops up and this tab shows "… wants to connect", saying whether they'll be able to watch or control and from which IP; you **Allow** or **Decline**, and it's declined automatically after 60 s. Until then they see nothing and can't do anything. A device you allowed reconnects without asking until sharing stops; after "Disconnect all" or a code change it has to be allowed again
+- **Who's watching** (name, IP) is listed, with "Disconnect all"; the notification always shows "Sharing · control code" and "Stop sharing"
+- The screen is kept on while someone is watching (nothing can be captured when it's off); with nobody watching nothing is captured or encoded
+- Below is a **permission checklist**, each item with its purpose, state and a "Turn on" button:
+  - **Remote control** (accessibility service): needed to tap, swipe and type; without it the other side can only watch (and is told so). From Android 13, apps not installed from a store must first be allowed in "App info → ⋮ at the top right → Allow restricted settings"; the guide explains it and links there
+  - **Share sound** (Android 10+, audio-recording permission)
+  - **Notifications** (Android 13+)
+  - **Run in background** (ignore battery optimization): keeps the system from stopping sharing when locked or in the background
+
+Remote input maps to the phone like this: touch points and the left mouse button are fingers (tap, long press, drag, swipe; several at once is multi-touch), the wheel swipes; Back, Home, Recents, notifications, screenshot and so on are **system actions** in the protocol, sent by the controller's navigation keys and shortcut menu (the desktop console's shortcut menu lists them too when the remote side is a phone). For people at a computer, right-click / Esc = Back, middle-click / Win alone = Home, Alt+Tab = Recents, Ctrl+C / V / X / A = copy / paste / cut / select all; typing goes straight into the focused text field (physical keys from desktop consoles are translated with a US layout).
+
+### Phone: Settings
+
+Server address and certificate fingerprint (defaults are compiled in and can be changed here; a malformed fingerprint can't be saved), this device's name (shown to others, defaults to the system device name), ask before someone connects, change control code, default quality, default touch input, play sound by default, navigation keys for phones, clear saved devices, version and protocol version.
+
+### TV
+
+- Enter the control code on the left with the remote's number keys or the on-screen keypad; recent devices are on the right (arrow keys to pick, OK to connect); Settings (server, fingerprint, device name) is at the top right
+- The picture is full screen with sound on. **OK / Menu** opens the side menu: sound, displays, quality (each press picks the next preset), connection info, disconnect; **left / right** switch the remote display; **Back** closes the menu, and asks before disconnecting
+
+### Where the data is stored
+
+Settings (`settings.json`), saved devices (`devices.json`) and this phone's control code with the secret to reclaim it (`host.json`) are only kept in the app's private directory (`/data/data/app.airhand.android/files/`), which other apps can't read. Backup and device transfer are disabled in the manifest, and **uninstalling the app deletes all of it**. Logs only go to logcat.
+
 ## Building the client
 
 Requirements: Rust (stable), Node.js 20+, CMake (to build libopus).
@@ -217,6 +293,34 @@ npm run tauri build
 - The app is only ad-hoc signed, not notarized: the first time you open a copy on another Mac, right-click it in Finder → Open (or run `xattr -dr com.apple.quarantine Airhand.app`)
 - macOS remembers granted permissions by code signature, and an ad-hoc signature changes with every build: after rebuilding, remove Airhand in System Settings → Privacy & Security and grant the permissions again. For long-term use, put your own Developer ID in `signingIdentity` in `client/src-tauri/tauri.macos.conf.json`
 
+### Android (APK)
+
+Requirements: JDK 17 or later (the one bundled with Android Studio works), the Android SDK (platform 35) and NDK 27, Rust's Android targets and [cargo-ndk](https://github.com/bbqsrc/cargo-ndk):
+
+```bash
+# sdkmanager from the Android SDK (or tick them in Android Studio's SDK Manager)
+sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+cargo install cargo-ndk
+```
+
+Then build in `android/` (Gradle first builds the Rust core in `android/native` with cargo-ndk):
+
+```powershell
+cd android
+# tell Gradle where the Android SDK is (or set ANDROID_HOME)
+"sdk.dir=C:/Users/<you>/AppData/Local/Android/Sdk" | Out-File -Encoding ascii local.properties
+$env:AIRHAND_SERVER    = "relay.example.com:4433"   # compiled-in defaults, like the desktop; changeable in Settings later
+$env:AIRHAND_SERVER_FP = "<server certificate fingerprint>"
+./gradlew assembleRelease
+# → android/app/build/outputs/apk/release/Airhand-<version>-release.apk (~12 MB, arm64-v8a / armeabi-v7a / x86_64)
+```
+
+- One APK for phones and TVs (Android 7.0 or later); `-Pairhand.abis=arm64-v8a` builds just one CPU type, faster and smaller
+- **Signing**: with `AIRHAND_KEYSTORE` (plus `AIRHAND_KEYSTORE_PASSWORD`, `AIRHAND_KEY_ALIAS`, `AIRHAND_KEY_PASSWORD`) set, the APK is signed with your key; otherwise with this machine's debug key, which still installs fine. For APKs you hand out and update over time, always use the same key of your own
+- `./gradlew assembleDebug` builds a debug version (package `app.airhand.android.debug`, installable next to the release)
+- A malformed fingerprint fails the build (same rule as the desktop)
+
 ## How it works
 
 ### Architecture
@@ -234,6 +338,8 @@ npm run tauri build
 
 The first bidirectional stream on every QUIC connection is the **control stream** (signaling). For each remote-control session both sides open another bidirectional stream; the server pairs them by session ID and from then on **only forwards bytes, it never parses the video**. Every message is a `u32` length prefix followed by a postcard-encoded payload. When a controller reconnects it presents the resume token it got when it connected; if the host is offline the server remembers the request and sends `HostOnline` when the host is back (see "Resume tokens" in `crates/airhand-proto/src/signal.rs`).
 
+On the session stream the controller first sends a random ID for this run of the app; the host answers with `Hello` (platform, whether it accepts multi-touch, which system actions it supports) and starts sending video. A host may first answer "awaiting approval" and send `Hello` only after the person at it allows the connection (Android does by default; see the module docs of `crates/airhand-proto/src/session.rs`).
+
 The web console splits the controller on the right in two: the QUIC connection and session handling run in `airhand-web` (the container), while decoding, rendering and input capture stay in the browser, with one WebSocket in between. Packets are forwarded to the browser unchanged (with a 4-byte session number in front), and the browser acknowledges the frames.
 
 | Directory | Contents |
@@ -243,6 +349,8 @@ The web console splits the controller on the right in two: the QUIC connection a
 | `server/` | Relay server (quinn + rustls) and its `Dockerfile` |
 | `web/` | Web console service (axum: static files + WebSocket, HTTP and HTTPS on one port), its `Dockerfile` and `docker-compose.yml`. A separate Cargo workspace, like `client/src-tauri/` |
 | `client/src-tauri/` | Desktop client, Rust side: host `host/`, tray, console window and commands |
+| `android/native/` | Android Rust core (JNI): the controller uses `airhand-link`; the host's network side (registering / reclaiming the code, sessions, in-flight frame control and adaptive bitrate, same as the desktop). A separate Cargo workspace like `client/src-tauri/` and `web/` |
+| `android/app/` | Android app (Kotlin + Jetpack Compose): phone and TV interfaces, MediaCodec decoding / encoding, screen recording, accessibility service (remote control) |
 | `client/src/` | Console UI (React 19 + TypeScript, no UI library), shared by the desktop and web consoles, which differ only in `client/src/lib/backend/`; strings in `client/src/locales/` |
 | `assets/icon.svg` | Application icon source |
 
@@ -324,6 +432,7 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 - The console's WebView needs a data directory: it lives in a random subdirectory of the temp directory, runs in private mode (no cookies or cache saved), and is deleted when the window closes or the program exits. If the process is killed, leftovers are removed on the next start. On macOS WKWebView needs no data directory and writes nothing to disk in private mode
 - On Linux, the few things that can only be handed over as files (the tray icon for AppIndicator, WebKitGTK's GStreamer plugin cache) live in a random per-process directory under `XDG_RUNTIME_DIR` (a RAM disk) that is removed on exit, including on SIGTERM / SIGINT. The Mesa / NVIDIA on-disk shader caches are turned off
 - Controller settings live in memory only
+- Android: settings, saved devices and the phone's control code are only stored in the app's private directory, never backed up or transferred, and removed by the system on uninstall (see [Where the data is stored](#where-the-data-is-stored))
 - All of the above is about the desktop client. The web console is a service you deploy: it keeps its self-signed HTTPS certificate in a data volume, and the browser also keeps settings in memory only (plus a session cookie when a password is set)
 
 ## Security
@@ -351,6 +460,9 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 - The clipboard syncs text only, not files
 - Audio flows from host to controller only; the controller's microphone isn't forwarded. Audio is captured after the volume control, so a muted host sends silence
 - Web console: reloading or closing the tab disconnects its sessions; in Firefox, text copied locally isn't synced to the remote side automatically; outside fullscreen some shortcuts (Ctrl+W…) can't reach the remote computer
+- Android host: each time sharing starts, screen recording must be confirmed on the phone (a system rule), and sharing can't resume by itself after the system kills the app; remote control uses accessibility gestures, so apps that handle touches themselves (games…) may react less precisely; typing only works in regular text fields (arrow keys and Tab need Android 13+); a secured lock screen and screens marked secure are black; since Android 10 apps can't read the clipboard in the background, so the clipboard only syncs from the controller to the phone; sharing sound needs Android 10+, and some apps don't allow their sound to be captured; HEVC and AV1 are only offered when the phone has a **hardware** encoder for them (few phones have an AV1 hardware encoder so far), otherwise H.264 is used (with the system's software encoder if there's no hardware H.264 encoder)
+- Android controller: one device at a time; no A/V sync; TVs only watch; HEVC and AV1 are only used when the device has a **hardware** decoder for them, otherwise H.264
+- AV1 on Android (encoding and decoding) hasn't been verified on a real device yet: the emulator has no AV1 hardware codecs
 
 ## Development
 
@@ -370,6 +482,20 @@ npm test
 cargo test --lib
 # audio loopback capture (needs an audio output device; plays a 1.5 s test tone at -60 dBFS, barely audible)
 cargo test --lib loopback_captures_tone -- --ignored --nocapture
+
+# android/native/: Android Rust core (runs on this computer: in-flight control, keyframes, audio fan-out, command format)
+cargo test
+# android/: gestures (trackpad / touch / multi-touch / pass-through), keyboard, control codes, strings (every Rust problem / notice / system action has English and Chinese text)
+./gradlew testDebugUnitTest -Pairhand.abis=x86_64
+```
+
+Testing the Android host doesn't need a second phone: `android/native` has a protocol-level controller that connects to the phone's code from a computer, counts frames / audio, and can tap and type:
+
+```bash
+# android/native/ (an app in the emulator reaches a server on this computer at 10.0.2.2:4433)
+cargo run --example probe -- <phone's control code> 8 --tap 0.5,0.5 --text hello --audio
+# multi-touch and system actions: pinch out, open quick settings (with "Ask before someone connects" on, allow it on the phone first; timing starts then)
+cargo run --example probe -- <phone's control code> 6 --pinch --action QuickSettings
 ```
 
 On macOS the screen / audio capture tests (`sck_capture`, `loopback_captures_tone`, video and audio in the end-to-end test) and the input injection test (`mac_move_to_center`) need the Screen & System Audio Recording and Accessibility permissions for the terminal that runs them (System Settings → Privacy & Security). Without them `sck_capture`, `loopback_captures_tone` and `mac_move_to_center` skip themselves; the end-to-end test checks that the host reports the missing permission (rather than a capture failure) and then skips the video and audio checks (clipboard, ping, disconnect and the rest are still checked).
@@ -456,6 +582,7 @@ Anything the user may see that crosses the network or comes from the Rust side i
 - Console strings live in `client/src/locales/zh.ts` (the full list of keys) and `en.ts`
 - Tray strings use `tr!` in `client/src-tauri/src/tray.rs`
 - `npm test` fails if a Rust `Problem` / `NoticeView` variant has no string in either language
+- Android strings live in `android/app/src/main/res/values/strings.xml` (English, the default) and `values-zh/strings.xml`; `Messages.kt` maps the types to them. `./gradlew testDebugUnitTest` (`MessagesTest`) fails if a Rust `Problem` / `NoticeView` has no Android string, a string for a variant with `detail` doesn't show it, or the two languages differ in keys or placeholders
 - Logs and internal errors are English
 
 #### Icon

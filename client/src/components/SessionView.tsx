@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api } from "../lib/api";
+import { api, type Platform } from "../lib/api";
 import { type MsgKey, t, useT } from "../lib/i18n";
 import { errorText, noticeText, problemText } from "../lib/messages";
 import { CODEC_LABEL } from "../lib/presets";
@@ -76,9 +76,13 @@ const MAC_COMBOS: Combo[] = [
   { label: "combo.screenshotMac", keys: ["MetaLeft", "ShiftLeft", "Digit5"] },
 ];
 
-/** 被控端操作系统对应的快捷键（Windows 报告 "Windows 11 ..."，macOS 报告 "macOS 15.3"，Linux 报告发行版名称） */
-const combosFor = (os: string) =>
-  os === "" || /windows/i.test(os) ? WINDOWS_COMBOS : /^macos/i.test(os) ? MAC_COMBOS : LINUX_COMBOS;
+/** 被控端平台对应的快捷键。hello 之前不知道平台，按系统名称猜（Windows 报告 "Windows 11 ..."，macOS 报告 "macOS 15.3"） */
+const combosFor = (platform: Platform | null, os: string) => {
+  if (platform === "Mac") return MAC_COMBOS;
+  if (platform === "Linux") return LINUX_COMBOS;
+  if (platform === "Windows") return WINDOWS_COMBOS;
+  return os === "" || /windows/i.test(os) ? WINDOWS_COMBOS : /^macos/i.test(os) ? MAC_COMBOS : LINUX_COMBOS;
+};
 
 type Menu = null | "quality" | "keys" | "display" | "clipboard" | "audio";
 
@@ -244,19 +248,34 @@ export function SessionView({ s }: { s: RemoteSession }) {
             </button>
             {menu === "keys" && (
               <Dropdown onClose={closeMenu}>
-                {combosFor(s.hostOs).map((c) => (
-                  <button
-                    key={c.label}
-                    className="dd-item"
-                    onClick={() => {
-                      s.sendCombo(c.keys);
-                      closeMenu();
-                      s.focus();
-                    }}
-                  >
-                    {t(c.label)}
-                  </button>
-                ))}
+                {s.hostActions.length > 0
+                  ? // 手机：系统操作（返回、主页……），对方列出了哪些就显示哪些
+                    s.hostActions.map((a) => (
+                      <button
+                        key={a}
+                        className="dd-item"
+                        onClick={() => {
+                          s.sendSystem(a);
+                          closeMenu();
+                          s.focus();
+                        }}
+                      >
+                        {t(`action.${a}` as const)}
+                      </button>
+                    ))
+                  : combosFor(s.hostPlatform, s.hostOs).map((c) => (
+                      <button
+                        key={c.label}
+                        className="dd-item"
+                        onClick={() => {
+                          s.sendCombo(c.keys);
+                          closeMenu();
+                          s.focus();
+                        }}
+                      >
+                        {t(c.label)}
+                      </button>
+                    ))}
               </Dropdown>
             )}
           </div>
@@ -383,6 +402,17 @@ export function SessionView({ s }: { s: RemoteSession }) {
                     <IconRefresh size={16} />
                     {t("session.reconnect")}
                   </button>
+                  <button className="ghost-btn" onClick={() => store.remove(s.id)}>
+                    {t("session.close")}
+                  </button>
+                </div>
+              </div>
+            ) : s.state === "approving" ? (
+              <div className="overlay-card">
+                <span className="spinner large" />
+                <div className="overlay-title">{t("session.approving", { name: s.hostName || s.code })}</div>
+                <div className="muted small">{t("session.approvingHint")}</div>
+                <div className="overlay-actions">
                   <button className="ghost-btn" onClick={() => store.remove(s.id)}>
                     {t("session.close")}
                   </button>
