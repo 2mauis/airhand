@@ -58,6 +58,17 @@ export function AppMenu({ onClose }: { onClose: () => void }) {
           <span className="am-label">{t("menu.language")}</span>
           <LangSwitch />
         </div>
+        {/* 设置、本机的控制码、我的设备都在这个文件里 */}
+        {app?.configPath && (
+          <>
+            <div className="am-row">
+              <span className="am-label">{t("menu.config")}</span>
+            </div>
+            <div className="am-note am-path" title={app.configPath}>
+              {app.configPath}
+            </div>
+          </>
+        )}
       </div>
 
       {/* 网页版没有被控端模式，浏览器也会拦下这些快捷键 */}

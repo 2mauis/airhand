@@ -24,7 +24,7 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
-# config.toml（Windows）：修改时保留用户的注释和格式
+# config.toml：修改时保留用户的注释和格式
 toml_edit = "0.25"
 base64 = "0.23"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
@@ -76,6 +76,10 @@ windows = { version = "0.62", features = [
   "Win32_UI_HiDpi",
   "Win32_Security",
 ] }
+
+# macOS / Linux：config.toml 放在系统建议的用户配置目录（~/Library/Application Support、~/.config）
+[target.'cfg(not(windows))'.dependencies]
+dirs = "7"
 
 # Linux 被控端：X11（MIT-SHM 采集 + DAMAGE 变化检测 + XFIXES 光标/剪贴板 + XTEST 注入），
 # 声音用 PulseAudio（PipeWire 的 pipewire-pulse 同样适用）监听默认输出设备。

@@ -56,6 +56,11 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     info!(version = config::VERSION, "host started");
+    // 安装版的配置文件由这里维护：不存在时按默认配置生成，运行中被删掉了也会重新生成（控制码、我的设备不丢）
+    if let Err(e) = config::ensure_file() {
+        warn!("can't create config.toml: {e:#}");
+    }
+    config::keep_file();
     let hub = status::new_hub();
     let host = HostService::start(hub.clone());
     let autostart = Arc::new(watch::Sender::new(config::settings().autostart));

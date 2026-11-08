@@ -4,8 +4,9 @@
 //! * 托盘菜单可切换为**控制端**：打开现代化控制台，可同时控制多台电脑；
 //! * Windows 需要安装：被控端作为系统服务运行（见 `winsvc`），托盘只负责显示和操作；
 //!   调试构建直接运行时被控端在本进程里运行。macOS / Linux 的被控端一直在本进程里运行；
-//! * 配置：Windows 是安装目录下的 `config.toml`（见 [`config`]）；macOS / Linux 没有配置文件，
-//!   运行过程中不在磁盘上留下任何文件（见 [`ephemeral`]）；
+//! * 配置和数据只有一个 `config.toml`（见 [`config`]）：服务器设置、本机的控制码、控制台的"我的设备"
+//!   （见 [`devices`]）。Windows 在安装目录，macOS 在 `~/Library/Application Support/app.airhand.client/`，
+//!   Linux 在 `~/.config/airhand/`；被删掉了会自动重新生成。其余运行时产生的文件退出时删除（见 [`ephemeral`]）；
 //! * 界面支持中文 / 英文，默认跟随系统语言（见 [`i18n`]）。
 
 // 最先声明：其它模块都要用到 `tr!`
@@ -13,6 +14,7 @@
 mod i18n;
 mod clipboard;
 mod config;
+mod devices;
 #[cfg(test)]
 mod e2e;
 mod ephemeral;
@@ -332,6 +334,8 @@ struct AppInfo {
     pinned: bool,
     hostname: String,
     lang: Lang,
+    /// 配置文件（也保存着我的设备）的路径，控制台的菜单里显示
+    config_path: Option<String>,
 }
 
 #[tauri::command]
@@ -342,7 +346,48 @@ fn app_info() -> AppInfo {
         pinned: config::pinned(),
         hostname: sysinfo::host_identity().0,
         lang: i18n::current(),
+        config_path: config::path().map(|p| p.display().to_string()),
     }
+}
+
+/// 我的设备（配置文件里本账户的）
+#[tauri::command]
+async fn devices_load() -> Vec<devices::Device> {
+    tauri::async_runtime::spawn_blocking(devices::load)
+        .await
+        .unwrap_or_default()
+}
+
+/// 保存我的设备（控制台传来整个列表）
+#[tauri::command]
+#[cfg_attr(not(windows), allow(unused_variables))]
+async fn devices_save(
+    state: tauri::State<'_, AppState>,
+    devices: Vec<devices::Device>,
+) -> Result<(), Problem> {
+    let list = tauri::async_runtime::spawn_blocking(move || devices::for_file(devices))
+        .await
+        .map_err(Problem::failed)?
+        .map_err(|e| Problem::failed(format!("{e:#}")))?;
+    // Windows 安装版：配置文件在安装目录里，由服务里的被控端维护（托盘没有写权限），经命名管道交给它写
+    #[cfg(windows)]
+    if state.service_mode {
+        let connected = state.hub.borrow().service.is_some_and(|s| s.connected);
+        let sv = state.services.lock().unwrap();
+        return match &sv.host {
+            Some(Hosting::Service(link)) if connected => {
+                link.send(winsvc::ipc::ToAgent::SaveDevices { devices: list });
+                Ok(())
+            }
+            _ => Err(Problem::failed(
+                "the Airhand service isn't reachable from this session",
+            )),
+        };
+    }
+    tauri::async_runtime::spawn_blocking(move || config::save_devices(&list))
+        .await
+        .map_err(Problem::failed)?
+        .map_err(|e| Problem::failed(format!("{e:#}")))
 }
 
 /// 控制台切换界面语言
@@ -487,6 +532,14 @@ pub fn run() {
     }
     #[cfg(not(windows))]
     let service_mode = false;
+    // 配置文件由本进程维护（Windows 安装版由服务里的被控端维护，见 winsvc::agent）：
+    // 不存在时按默认配置生成，运行中被删掉了也会重新生成
+    if !service_mode {
+        if let Err(e) = config::ensure_file() {
+            warn!("can't create the configuration file: {e:#}");
+        }
+        config::keep_file();
+    }
     enable_dpi_awareness();
     // 先清理上次残留的目录，再创建本次的（同一个前缀）
     ephemeral::sweep_stale();
@@ -515,6 +568,8 @@ pub fn run() {
             ctrl_audio,
             clipboard_text,
             switch_to_host,
+            devices_load,
+            devices_save,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

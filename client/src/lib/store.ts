@@ -1,7 +1,8 @@
-// 全局状态：标签（会话 / 新建连接 / 多屏总览）、服务器状态等。
-// 不持久化：控制端不在磁盘上留下任何数据，"最近关闭"也只在控制台打开期间保留在内存里。
+// 全局状态：标签（会话 / 新建连接 / 多屏总览）、我的设备、服务器状态等。
+// 只有"我的设备"保存下来（config.toml，见 actions.ts 的 saveDevices）；其余只在控制台打开期间有效。
 import { useCallback, useSyncExternalStore } from "react";
-import type { AppInfo, Codec, Problem, QualitySettings, ServerState } from "./api";
+import type { AppInfo, Codec, Problem, QualitySettings, SavedDevice, ServerState } from "./api";
+import { fmtCode } from "./devices";
 import { DEFAULT_PRESET, type PresetId } from "./presets";
 import type { RemoteSession } from "./session";
 
@@ -17,7 +18,7 @@ export interface Draft {
   error: Problem | null;
 }
 
-/** 本次关闭的会话：在新建连接标签里一键重连（Ctrl+Shift+T 重新打开最近关闭的一个） */
+/** 本次关闭的会话（Ctrl+Shift+T 重新打开最近关闭的一个） */
 export interface Recent {
   code: string;
   name: string;
@@ -34,6 +35,10 @@ interface State {
   /** 新建连接标签（总在会话标签后面）；没有会话时一定有 */
   draft: Draft | null;
   recent: Recent[];
+  /** 我的设备：连接过的电脑，最近连过的在前面 */
+  devices: SavedDevice[];
+  /** 我的设备能不能保存（桌面版：config.toml）；网页版只在本页面的内存里 */
+  devicesSaved: boolean;
   confirm: Confirm;
   server: ServerState;
   app: AppInfo | null;
@@ -50,6 +55,8 @@ let state: State = {
   view: "new",
   draft: emptyDraft(),
   recent: [],
+  devices: [],
+  devicesSaved: false,
   confirm: null,
   server: { state: "connecting" },
   app: null,
@@ -167,13 +174,19 @@ export const store = {
     const v = n >= 9 ? tabs[tabs.length - 1] : tabs[n - 1];
     if (v) store.setView(v);
   },
-  forgetRecent: (code: string) => set({ recent: state.recent.filter((r) => r.code !== code) }),
+  setDevices: (devices: SavedDevice[], saved = state.devicesSaved) => set({ devices, devicesSaved: saved }),
 
   setConfirm: (confirm: Confirm) => set({ confirm }),
 };
 
 export function useStore<T>(select: (s: State) => T): T {
   return useSyncExternalStore(store.subscribe, () => select(state));
+}
+
+/** 会话显示的名字：在我的设备里起过名字就用它，否则用对方的设备名，都没有就是控制码 */
+export function useSessionTitle(s: RemoteSession): string {
+  const alias = useStore((st) => st.devices.find((d) => d.code === s.code)?.alias ?? null);
+  return alias || s.hostName || fmtCode(s.code);
 }
 
 /** 订阅单个会话的变化 */

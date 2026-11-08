@@ -28,6 +28,7 @@ dependencies = [
  "base64 0.23.1",
  "block2",
  "bytes",
+ "dirs",
  "dispatch2",
  "fast_image_resize",
  "libc",

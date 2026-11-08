@@ -139,6 +139,11 @@ export class RemoteSession {
   syncStats: AvSyncStats = { skewMs: null, videoDelayMs: 0, extraMs: 0 };
   retries = 0;
 
+  /** 连上了（第一次和每次重连）：记进我的设备 */
+  onConnected: ((s: RemoteSession) => void) | null = null;
+  /** 画质设置变了：记进我的设备，下次用同样的画质连 */
+  onSettingsChange: ((s: RemoteSession) => void) | null = null;
+
   /** 变化计数，供 React useSyncExternalStore 使用 */
   version = 0;
   private listeners = new Set<() => void>();
@@ -203,10 +208,19 @@ export class RemoteSession {
   private cursorCss = "default";
   private cursorScale = 0;
 
-  constructor(code: string, settings: QualitySettings) {
+  /**
+   * `saved`：我的设备里记着的这台电脑。带着上次的重连凭证连，对方不在线时等它上线（见 [`open`]），
+   * 连上之前标签上就显示它的名字
+   */
+  constructor(code: string, settings: QualitySettings, saved?: { resume: ResumeToken | null; name: string; os: string }) {
     this.code = code;
     this.codeNum = Number(code.replace(/\D/g, ""));
     this.settings = settings;
+    if (saved) {
+      this.resume = saved.resume;
+      this.hostName = saved.name;
+      this.hostOs = saved.os;
+    }
     this.canvas = document.createElement("canvas");
     this.canvas.className = "remote-canvas";
     this.canvas.tabIndex = 0;
@@ -287,6 +301,26 @@ export class RemoteSession {
     this.audioOn = false;
     this.syncAudio();
     this.emit();
+    this.onConnected?.(this);
+  }
+
+  /**
+   * 第一次连接。带着重连凭证（我的设备里保存的）时，对方不在线不算失败：
+   * 进入"等待对方上线"，对方一上线就连上（和断线后等对方一样）。其它失败照样抛出
+   */
+  async open(): Promise<void> {
+    try {
+      await this.start();
+    } catch (e) {
+      const p = toProblem(e);
+      if (p.kind !== "hostOffline" || this.disposed) throw e;
+      this.scheduleRetry(p);
+    }
+  }
+
+  /** 重连凭证（连上过才有）：记进我的设备，下次对方不在线时可以等它 */
+  get resumeToken(): ResumeToken | null {
+    return this.resume;
   }
 
   /**
@@ -873,6 +907,7 @@ export class RemoteSession {
     this.settings = s;
     this.pushSettings();
     this.emit();
+    this.onSettingsChange?.(this);
   }
 
   /**

@@ -39,6 +39,7 @@ export default {
   "menu.nameHintWeb": "对方电脑上显示的控制端名称（AIRHAND_NAME）",
   "menu.server": "服务器",
   "menu.language": "语言",
+  "menu.config": "设置和我的设备保存在",
   "menu.toHost": "切换为被控端",
   "menu.toHostHint": "关闭控制台，让这台电脑可以被别人控制",
   "menu.shortcuts": "快捷键（不在操作远程电脑时）",
@@ -67,10 +68,21 @@ export default {
   "connect.code": "控制码",
   "connect.quality": "画质",
   "connect.clear": "清空",
-  "connect.recent": "最近关闭",
-  "connect.recentHint": "点一下重新连接 · 关闭控制台后清空",
-  "connect.forget": "从列表中移除",
   "connect.customQuality": "自定义画质",
+
+  // 我的设备（新建连接页）
+  "devices.title": "我的设备",
+  "devices.hint": "连接过的电脑自动保存在这里，点一下就连",
+  "devices.hintWeb": "网页版不保存，刷新页面后清空",
+  "devices.empty": "连接过的电脑会自动保存在这里，下次点一下就能连上",
+  "devices.search": "搜索名称或控制码",
+  "devices.noMatch": "没有匹配的设备",
+  "devices.rename": "重命名",
+  "devices.forget": "从我的设备中移除",
+  "devices.removed": "已移除 {name}",
+  "devices.undo": "撤销",
+  "devices.open": "已打开",
+  "devices.known": "我的设备：{name}",
 
   // 画质预设
   "preset.saver": "省流",

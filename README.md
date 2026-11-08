@@ -24,7 +24,7 @@ There is also an **Android** app (a single APK): on **phones and tablets** it ca
 - **Low latency, low bandwidth**: hardware **AV1 / HEVC / H.264** encoding, no frames when the screen is still, adaptive bitrate, the cursor moves locally with no lag
 - **Audio**: the host's system sound is streamed to the controller, with optional A/V sync for watching video
 - **Practical tools**: two-way clipboard sync, typing the clipboard as keystrokes, system shortcuts (Win, Alt+Tab, Ctrl+Shift+Esc…), multiple monitors, fullscreen with keyboard lock
-- **Leaves nothing behind**: on macOS and Linux there's no config file and nothing is written to disk; on Windows the only file is `config.toml` in the install directory, removed together with the service when uninstalling (see [below](#files-on-disk))
+- **All data in one file**: settings, this computer's control code and the console's "My devices" all live in a single `config.toml`, which is recreated with the default settings if it gets deleted by accident; everything else written at runtime is removed on exit (see [Configuration file](#configuration-file) and [Files on disk](#files-on-disk))
 - **Secure by default**: TLS 1.3 with certificate pinning, brute-force protection for control codes
 - **English and Simplified Chinese**: follows the system language, switchable at any time
 
@@ -61,7 +61,7 @@ There is also an **Android** app (a single APK): on **phones and tablets** it ca
    # → client/src-tauri/target/release/bundle/nsis/Airhand_<version>_x64-setup.exe (installer)
    ```
 
-   On Windows the address and fingerprint can also be changed after installing, in `config.toml` in the install directory (see [Windows installation](#windows-installation)).
+   The address and fingerprint can also be changed after installing, in `config.toml` (see [Configuration file](#configuration-file)).
 
 3. **Install it on both computers** (on Windows run the installer, which needs administrator rights). On the remote one, right-click the tray icon to see its 6-digit **control code**. On yours, choose **Open console** (**Switch to controller** on macOS / Linux) in the tray menu and enter the code.
 
@@ -79,7 +79,7 @@ Double-click to run (on Windows install it first, see [Windows installation](#wi
 - **Change control code**: the old code stops working immediately and connected controllers are disconnected
 - Open console and **Start with Windows** (Windows) / Switch to controller (macOS, Linux) / Language / Quit
 
-After a network drop the host reconnects automatically with exponential backoff and **gets its old control code back**, even after a server restart. On Windows the code is **fixed**: it's saved in `config.toml`, and the server keeps it for this computer however long it stays offline (codes unused for 180 days are released), so it stays the same across restarts and upgrades until you change it. On macOS and Linux each start gets a new code, and the server keeps a code for its host for 10 minutes after the host goes offline.
+After a network drop the host reconnects automatically with exponential backoff and **gets its old control code back**, even after a server restart. The code is **fixed**: it's saved in `config.toml`, and the server keeps it for this computer however long it stays offline (codes unused for 180 days are released), so it stays the same across restarts and upgrades until you change it.
 
 > On Linux the tray icon uses AppIndicator. It works out of the box on Ubuntu, KDE, Xfce and similar; stock GNOME needs the "AppIndicator and KStatusNotifierItem Support" extension. Without an AppIndicator library the program still runs as a host and prints the control code to the log (stderr).
 
@@ -91,25 +91,39 @@ On Windows Airhand is installed with its installer (into `C:\Program Files\Airha
 
 - Opening Airhand starts the service; **Quit** in the tray stops it (as before, the computer can't be controlled after quitting); when the service stops (or is uninstalled) the tray icons close too
 - **Start with Windows** (tray menu, on by default): the service starts at boot, so the computer can be controlled before anyone signs in, and the tray icon appears after signing in
-- `config.toml` in the install directory (created on installation, with comments):
-
-  | Key | Description |
-  |---|---|
-  | `server` | Relay server `host:port`; without it, the address built into the program |
-  | `server_fp` | Relay certificate fingerprint; `""` turns verification off (development only); without it, the built-in fingerprint |
-  | `autostart` | Start with Windows (also in the tray menu) |
-  | `[code]` | The control code the server assigned, and the secret that gets it back (encrypted with DPAPI, only Airhand on this computer can read it). Delete `code` and `secret` to get a new code |
-
-  Edit it as administrator, then restart Airhand (Quit, then open it again). Airhand keeps your edits and comments when it saves the code or the autostart setting
-- **Uninstalling** (Settings → Apps) stops and removes the service, the startup entry, `config.toml` and the program; nothing is left behind. Installing a new version over an old one keeps `config.toml`, and with it the control code, even if you choose to uninstall the old version first
+- The configuration file `config.toml` is in the install directory (created on installation, see [Configuration file](#configuration-file)) and maintained by the service; edit it as administrator
+- **Uninstalling** (Settings → Apps) stops and removes the service, the startup entry, `config.toml` and the program; nothing is left behind. Installing a new version over an old one keeps `config.toml`, and with it the control code and My devices, even if you choose to uninstall the old version first
 - A bare `airhand.exe` doesn't run without being installed: release builds ask you to run the installer. Debug builds (`npm run tauri dev`) run the host inside the tray process, like on macOS and Linux, with `config.toml` next to the program (`client/src-tauri/target/debug/`)
+
+### Configuration file
+
+Everything Airhand saves is in one `config.toml` (with comments). The menu in the console's top-left corner also shows where it is:
+
+| System | Location |
+|---|---|
+| Windows | The install directory: `C:\Program Files\Airhand\config.toml` (next to the program for debug builds that aren't installed) |
+| macOS | `~/Library/Application Support/app.airhand.client/config.toml` |
+| Linux | `$XDG_CONFIG_HOME/airhand/config.toml`, by default `~/.config/airhand/config.toml` |
+
+| Key | Description |
+|---|---|
+| `server` | Relay server `host:port`; without it, the address built into the program |
+| `server_fp` | Relay certificate fingerprint; `""` turns verification off (development only); without it, the built-in fingerprint |
+| `autostart` | Start with Windows (Windows only, also in the tray menu) |
+| `[code]` | This computer's control code, and the secret that gets it back. Delete `code` and `secret` to get a new code |
+| `[[device]]` | The console's **My devices**: computers you've connected to (control code, their name, the name you gave them, last quality settings, last connected). Saved automatically on connect, up to 50. To add one by hand, write the 6 digits as `code` |
+
+- Restart Airhand after changing settings (Quit, then open it again). Airhand keeps your edits and comments when it saves the code or devices
+- **Deleted by accident** (the file or the whole directory): it's recreated with the default settings at startup, and within a few seconds while running. This computer's control code, the autostart setting and My devices carry over from before the deletion, so nothing is lost; other settings go back to their defaults
+- A control code is enough to control its computer, so treat it like a key. On macOS / Linux only your account can read and write the file (mode 600, directory 700). On Windows the file is in the install directory, readable by every account on the computer: this computer's secret is encrypted with DPAPI for the SYSTEM account, and the codes in My devices with the Windows account that saved them, so other accounts and other computers can't read them (each account on the same computer only sees its own devices)
+- Windows removes it when uninstalling; on macOS / Linux it stays after the program is removed (as is customary there), so delete the directory above if you don't need it anymore
 
 ### Controller
 
 Tray → **Switch to controller** opens the console. Closing the console window switches back to host mode. On Windows the item is **Open console**: the host keeps running in the service while the console is open.
 
 - It works like a browser: each computer gets a **tab** that you can drag to reorder and close (= disconnect) with × or a middle click. Click **+** for a new connection, enter the 6-digit control code (pasting `123 456` works), and once connected that tab becomes the computer. With two or more connections a **Multi-screen overview** tab appears on the left
-- Closed connections are listed under **Recently closed** on the new-connection page; click one to reconnect with its previous quality settings (kept in memory only, cleared when the console closes)
+- **My devices**: computers you connect to are saved (in `config.toml`); next time, one click on the new-connection page connects with the quality settings you used last. Rename or remove them (with undo), and search when there are many. If one is offline, there's no error: its tab opens and waits, and connects as soon as it's back (using the saved reconnect token, which doesn't count as code guessing)
 - The window has no system title bar: drag an empty part of the tab bar to move it, double-click to maximize. The icon on the far left opens the menu: this computer's name, server status, language, switch to host. Closing the console while connections are open (including from the taskbar or Alt+F4) asks first
 - Shortcuts (when not controlling a computer): Ctrl+T new connection, Ctrl+W close tab, Ctrl+Tab / Ctrl+Shift+Tab switch tabs, Ctrl+1–9, Ctrl+Shift+T reopen the last closed connection. While the remote screen has focus, every key goes to the remote computer
 - Toolbar (like an address bar): remote name, control code, frame rate / bitrate / latency, encoder; monitor switch, **Quality**, shortcuts, clipboard (two-way sync / type as keystrokes), sound (mute / A/V sync), actual size (1:1), fullscreen, disconnect
@@ -265,7 +279,7 @@ Requirements: Rust (stable), Node.js 20+, CMake (to build libopus).
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
   ```
 
-The server address and certificate fingerprint are **compiled into the program**: set `AIRHAND_SERVER` and `AIRHAND_SERVER_FP` at build time (as in [Quick start](#quick-start)), or change the defaults in `client/src-tauri/src/config.rs`. Without `AIRHAND_SERVER` the client connects to `127.0.0.1:4433`. A malformed fingerprint (it must be 64 hex digits; `:` and spaces are allowed) fails the build. On Windows these are only defaults: `server` and `server_fp` in `config.toml` override them (an invalid `server_fp` there refuses every connection rather than turning verification off).
+The server address and certificate fingerprint are **compiled into the program**: set `AIRHAND_SERVER` and `AIRHAND_SERVER_FP` at build time (as in [Quick start](#quick-start)), or change the defaults in `client/src-tauri/src/config.rs`. Without `AIRHAND_SERVER` the client connects to `127.0.0.1:4433`. A malformed fingerprint (it must be 64 hex digits; `:` and spaces are allowed) fails the build. These are only defaults: `server` and `server_fp` in `config.toml` override them (an invalid `server_fp` there refuses every connection rather than turning verification off).
 
 > When `AIRHAND_SERVER_FP` is empty the **server certificate is not verified**, which leaves you open to man-in-the-middle attacks. Use that for development only; the console then shows "Not pinned" at the top left.
 
@@ -429,14 +443,14 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 
 ### Files on disk
 
-- macOS and Linux: no config file, the server address is compiled in. Windows: only `config.toml` in the install directory (see [Windows installation](#windows-installation)), removed when uninstalling. Logs never go to files: stderr, or `OutputDebugString` for the Windows service
+- Everything Airhand saves (settings, this computer's control code, My devices) is in one `config.toml` (see [Configuration file](#configuration-file)). Logs never go to files: stderr, or `OutputDebugString` for the Windows service
 - Host mode **doesn't create a WebView**, so it creates no files at all
 - The single-instance lock is a kernel object, not a lock file: a named mutex on Windows, an abstract-namespace Unix socket on Linux, a Mach port name registered with the bootstrap server on macOS
 - The console's WebView needs a data directory: it lives in a random subdirectory of the temp directory, runs in private mode (no cookies or cache saved), and is deleted when the window closes or the program exits. If the process is killed, leftovers are removed on the next start. On macOS WKWebView needs no data directory and writes nothing to disk in private mode
 - On Linux, the few things that can only be handed over as files (the tray icon for AppIndicator, WebKitGTK's GStreamer plugin cache) live in a random per-process directory under `XDG_RUNTIME_DIR` (a RAM disk) that is removed on exit, including on SIGTERM / SIGINT. The Mesa / NVIDIA on-disk shader caches are turned off
-- Controller settings live in memory only
+- Other console settings (the UI language, closed tabs…) live in memory only
 - Android: settings, saved devices and the phone's control code are only stored in the app's private directory, never backed up or transferred, and removed by the system on uninstall (see [Where the data is stored](#where-the-data-is-stored))
-- All of the above is about the desktop client. The web console is a service you deploy: it keeps its self-signed HTTPS certificate in a data volume, and the browser also keeps settings in memory only (plus a session cookie when a password is set)
+- All of the above is about the desktop client. The web console is a service you deploy: it keeps its self-signed HTTPS certificate in a data volume, and the browser also keeps settings in memory only; My devices isn't saved there and is cleared when the page reloads (plus a session cookie when a password is set)
 
 ## Security
 
@@ -444,7 +458,8 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 - Brute-force protection: at most 20 failed attempts per IP (IPv6 grouped by /64) per 10 minutes, and each failure adds a 400 ms delay
 - Resume tokens: when a controller connects, the server gives it a token derived from the host's code and secret (it can't be computed or reversed without the secret), and the controller presents it when reconnecting. Requests with a token don't count as failures and aren't rate limited, so however long a host stays offline, automatic reconnects can't lock the controller (or a web console sharing one IP) out. With a wrong token the server always answers "offline", revealing nothing about whether the code exists, so tokens can't be used to guess codes. A token stops working when the host changes its code
 - Getting a control code back after a reconnect requires a random secret, so nobody else can claim it
-- Fixed control codes (Windows): the server only stores a hash of the host's secret (in `airhand.db`), so the database can't be used to claim codes; on the host the secret is encrypted with DPAPI for the SYSTEM account, so a copied `config.toml` doesn't carry the code to another computer. **Change control code** releases the old code on the server
+- Fixed control codes: the server only stores a hash of the host's secret (in `airhand.db`), so the database can't be used to claim codes. On Windows the host's secret is encrypted with DPAPI for the SYSTEM account, so a copied `config.toml` doesn't carry the code to another computer; on macOS / Linux `config.toml` is readable by your account only. **Change control code** releases the old code on the server
+- My devices holds other computers' control codes: on Windows they're encrypted with your account (DPAPI), on macOS / Linux protected by the file permissions (600). Don't share `config.toml`
 - The Windows host runs as SYSTEM so that it can operate UAC prompts and the sign-in screen: whoever has the control code controls the computer with administrator rights. Give the code only to people you trust; whoever sits at the computer sees who is connected and can disconnect them, change the code or quit Airhand
 - The host's tray always shows who is controlling the computer; disconnect them or change the code with one click
 - The relay server can see the content of session streams (TLS ends at the server), so run it on a machine you trust

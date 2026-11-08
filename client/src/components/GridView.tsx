@@ -2,7 +2,7 @@ import { closeTab, fmtCode } from "../lib/actions";
 import { useT } from "../lib/i18n";
 import { sessionStateText } from "../lib/messages";
 import type { RemoteSession } from "../lib/session";
-import { store, useSession, useStore } from "../lib/store";
+import { store, useSession, useSessionTitle, useStore } from "../lib/store";
 import { IconClose, IconPlus } from "./Icons";
 import { CanvasHost } from "./SessionView";
 
@@ -32,7 +32,7 @@ export function GridView() {
 function Tile({ s }: { s: RemoteSession }) {
   const t = useT();
   useSession(s);
-  const name = s.hostName || fmtCode(s.code);
+  const name = useSessionTitle(s);
   return (
     <div className={`tile ${s.state}`} onClick={() => store.setView(s.id)} title={t("grid.open")}>
       <div className="tile-screen">

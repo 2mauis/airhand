@@ -11,7 +11,7 @@ import { useT } from "../lib/i18n";
 import { sessionStateText } from "../lib/messages";
 import { NATIVE_WINDOW_BUTTONS } from "../lib/platform";
 import type { RemoteSession } from "../lib/session";
-import { showGrid, store, useSession, useStore } from "../lib/store";
+import { showGrid, store, useSession, useSessionTitle, useStore } from "../lib/store";
 import { AppMenu, ServerIndicator } from "./AppMenu";
 import {
   IconClose,
@@ -184,7 +184,7 @@ function SessionTab({
 }) {
   const t = useT();
   useSession(s);
-  const name = s.hostName || fmtCode(s.code);
+  const name = useSessionTitle(s);
   return (
     <div
       role="tab"

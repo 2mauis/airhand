@@ -113,6 +113,15 @@ export const IconWarn = (p: P) =>
 export const IconHistory = (p: P) =>
   base(p, <path d="M3.5 12a8.5 8.5 0 1 0 2.5-6M3.5 4v4h4M12 7.5V12l3 2" />);
 export const IconArrowRight = (p: P) => base(p, <path d="M5 12h14M13 6l6 6-6 6" />);
+export const IconPencil = (p: P) => base(p, <path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4" />);
+export const IconSearch = (p: P) =>
+  base(
+    p,
+    <>
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="M16 16l4.5 4.5" />
+    </>,
+  );
 
 // 窗口按钮：细线图标（10×10），与 Windows 11 的标题栏按钮一致
 function win(children: React.ReactNode) {

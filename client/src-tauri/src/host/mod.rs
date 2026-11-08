@@ -123,7 +123,7 @@ impl Drop for HostService {
 }
 
 async fn run(hub: StatusHub, mut cmds: mpsc::UnboundedReceiver<HostCmd>) {
-    // 保存过的控制码（Windows 的 config.toml）：第一次连接就取回它
+    // 保存过的控制码（config.toml）：第一次连接就取回它
     let mut reclaim: Option<Reclaim> = config::settings().code();
     let mut reconnect = Reconnect::new(crate::status::host_reporter(&hub));
     loop {
@@ -137,7 +137,7 @@ async fn run(hub: StatusHub, mut cmds: mpsc::UnboundedReceiver<HostCmd>) {
     }
 }
 
-/// 保存控制码（没有配置文件的平台什么也不做）。写不进去只是下次启动时换一个控制码，不影响这次运行
+/// 保存控制码（找不到配置文件的位置时什么也不做）。写不进去只是下次启动时换一个控制码，不影响这次运行
 async fn save_code(code: Option<Reclaim>) {
     let r = tokio::task::spawn_blocking(move || config::save_code(code)).await;
     if let Ok(Err(e)) = r {

@@ -467,6 +467,12 @@ html.os-linux:not(.maximized) .app:not(.immersive)::after {
   gap: 4px;
   user-select: text;
 }
+.am-path {
+  margin-top: -2px;
+  font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
 .am-problem {
   color: #ff9aa4;
 }
@@ -1039,16 +1045,23 @@ kbd {
   margin-top: 2px;
 }
 
-.nt-recent {
+/* 我的设备 */
+.nt-devices {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+.nt-empty {
+  margin: 0;
+  text-align: center;
+  color: var(--text-3);
 }
 .section-title {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  min-height: 28px;
   padding: 0 4px;
   font-size: 12.5px;
   font-weight: 600;
@@ -1058,21 +1071,74 @@ kbd {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  flex-shrink: 0;
 }
 .section-title .small {
   font-weight: 400;
   color: var(--text-3);
+  text-align: right;
 }
-.recent-list {
+.section-title .count {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-3);
+}
+.nt-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 210px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 14px;
+  background: var(--well);
+  border: 1px solid var(--line);
+  color: var(--text-3);
+  cursor: text;
+}
+.nt-search:focus-within {
+  border-color: var(--accent);
+}
+.nt-search input,
+.device-rename {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  user-select: text;
+}
+.undo-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(91, 124, 255, 0.1);
+  border: 1px solid rgba(91, 124, 255, 0.25);
+  font-size: 12.5px;
+  color: var(--text-2);
+  animation: pop 0.14s ease-out;
+}
+.device-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
-.recent-item {
+.device-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 6px 9px 10px;
+  min-height: 56px;
+  padding: 9px 8px 9px 10px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid var(--line);
@@ -1080,53 +1146,75 @@ kbd {
   outline: none;
   transition: background 0.12s, border-color 0.12s;
 }
-.recent-item:hover,
-.recent-item:focus-visible {
+.device-item:hover,
+.device-item:focus-visible {
   background: var(--hover);
   border-color: var(--line-2);
 }
-.recent-item.disabled {
-  opacity: 0.5;
+.device-item.open {
+  border-color: rgba(53, 212, 154, 0.25);
+}
+.device-item.disabled {
   cursor: default;
 }
-.recent-item .avatar {
-  width: 32px;
-  height: 32px;
+.device-item.disabled .avatar,
+.device-item.disabled .device-meta {
+  opacity: 0.55;
+}
+.device-item.editing {
+  cursor: default;
+  border-color: var(--accent);
+  background: var(--hover);
+}
+.device-item .avatar {
+  width: 34px;
+  height: 34px;
   font-size: 13px;
 }
-.recent-meta {
+.device-meta {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
-.recent-meta > span {
+.device-name {
+  font-weight: 600;
+  font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.recent-name {
+.device-rename {
   font-weight: 600;
   font-size: 13px;
+  padding: 0;
 }
-.recent-go {
+.device-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 悬停时：箭头换成重命名 / 移除 */
+.device-actions {
+  display: none;
+  gap: 2px;
   flex-shrink: 0;
+}
+.device-item:hover .device-actions,
+.device-item:focus-within .device-actions {
+  display: flex;
+}
+.nt-known {
+  margin-left: 10px;
+  font-weight: 500;
   color: var(--accent);
-  opacity: 0;
-  transform: translateX(-4px);
-  transition: opacity 0.12s, transform 0.12s;
-}
-.recent-item:hover:not(.disabled) .recent-go {
-  opacity: 1;
-  transform: none;
-}
-.recent-item .icon-btn {
-  opacity: 0;
-}
-.recent-item:hover .icon-btn,
-.recent-item:focus-within .icon-btn {
-  opacity: 1;
 }
 
 /* 网页版：需要 HTTPS 等说明页 */

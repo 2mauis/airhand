@@ -381,6 +381,9 @@ class WebConsole implements Backend {
   onLangChanged = () => () => {};
   setWindowFullscreen = async () => {};
   onWindowFullscreenExit = () => () => {};
+  // 网页版不保存"我的设备"（不写浏览器的存储）：只在本页面的内存里，刷新后清空
+  loadDevices = async () => null;
+  saveDevices = async () => {};
 }
 
 export function webBackend(): Backend {

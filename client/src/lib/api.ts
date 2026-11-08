@@ -100,6 +100,25 @@ export interface AppInfo {
   /** 被控端看到的本控制端名称（桌面版是计算机名） */
   hostname: string;
   lang: Lang;
+  /** 配置文件（也保存着"我的设备"）的路径；网页版没有 */
+  configPath?: string | null;
+}
+
+/** "我的设备"里的一台：连接过的电脑（与 Rust 端 devices::Device 对应，保存在 config.toml 的 [[device]] 里） */
+export interface SavedDevice {
+  /** 6 位控制码 */
+  code: string;
+  /** 用户起的名字，null 表示用对方的设备名 */
+  alias: string | null;
+  /** 对方的设备名 */
+  name: string;
+  os: string;
+  /** 重连凭证：对方不在线时等它上线，不算猜码 */
+  resume: ResumeToken | null;
+  /** 最后一次连上的时间（Unix 毫秒） */
+  lastUsed: number;
+  /** 上次用的画质 */
+  quality: QualitySettings | null;
 }
 
 /**
@@ -221,6 +240,10 @@ export interface Backend {
   setWindowFullscreen(on: boolean): Promise<void>;
   /** 窗口退出了全屏（例如按了系统快捷键） */
   onWindowFullscreenExit(cb: () => void): () => void;
+  /** 我的设备（桌面版：config.toml 里的）。返回 null 表示不能保存（网页版：只在本页面的内存里） */
+  loadDevices(): Promise<SavedDevice[] | null>;
+  /** 保存整个列表 */
+  saveDevices(devices: SavedDevice[]): Promise<void>;
   /** 桌面版的无边框窗口（标题栏和窗口按钮由界面自己画）；网页版在浏览器里，为 null */
   readonly frame: WindowFrame | null;
 }

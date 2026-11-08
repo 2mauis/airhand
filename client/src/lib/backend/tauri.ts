@@ -2,7 +2,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AppInfo, Backend, ServerState, SessionEvent, SessionInfo, WindowFrame } from "../api";
+import type { AppInfo, Backend, SavedDevice, ServerState, SessionEvent, SessionInfo, WindowFrame } from "../api";
 import type { Lang } from "../i18n";
 
 /** 把异步注册的监听变成同步返回的取消函数 */
@@ -55,6 +55,8 @@ export function tauriBackend(): Backend {
     selectDisplay: (sid, index) => invoke("ctrl_display", { sid, index }),
     disconnect: (sid) => invoke("ctrl_disconnect", { sid }),
     switchToHost: () => invoke("switch_to_host"),
+    loadDevices: () => invoke<SavedDevice[]>("devices_load"),
+    saveDevices: (devices) => invoke("devices_save", { devices }),
     setLanguage: (lang) => invoke("set_language", { lang }),
     onLangChanged: (cb) => unlistenLater(listen<Lang>("lang-changed", (e) => cb(e.payload))),
     setWindowFullscreen: (on) => getCurrentWindow().setFullscreen(on),

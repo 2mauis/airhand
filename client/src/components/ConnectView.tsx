@@ -1,22 +1,24 @@
-// 新建连接标签：输入控制码连接；下面是本次关闭过的连接，点一下重新连接。
+// 新建连接标签：输入控制码连接；下面是"我的设备"（连接过的电脑，保存在 config.toml 里），点一下就连。
 //
 // 输入的内容放在 store 里（Draft），切到别的标签再回来时还在。
-import { useEffect, useRef } from "react";
-import { fmtCode, openSession, resetDraft } from "../lib/actions";
-import { useT } from "../lib/i18n";
-import { problemText } from "../lib/messages";
+import { useEffect, useRef, useState } from "react";
+import type { SavedDevice } from "../lib/api";
+import { fmtCode, forgetDevice, openSession, renameDevice, resetDraft, restoreDevice } from "../lib/actions";
+import { deviceTitle, matchDevice, relativeTime } from "../lib/devices";
+import { getLang, useT } from "../lib/i18n";
+import { problemText, sessionStateText } from "../lib/messages";
 import { bestCodec } from "../lib/codec";
 import { CODEC_LABEL, PRESETS, matchPreset, presetDesc, presetName, presetSettings } from "../lib/presets";
-import { store, useStore, type Recent } from "../lib/store";
-import { IconArrowRight, IconBolt, IconClose, IconHistory, IconMonitor, IconWarn } from "./Icons";
+import type { RemoteSession } from "../lib/session";
+import { store, useSession, useStore } from "../lib/store";
+import { IconBolt, IconClose, IconMonitor, IconPencil, IconSearch, IconWarn } from "./Icons";
 
 export function ConnectView() {
   const t = useT();
   const draft = useStore((s) => s.draft);
   const server = useStore((s) => s.server);
   const decoders = useStore((s) => s.decoders);
-  const recent = useStore((s) => s.recent);
-  const sessions = useStore((s) => s.sessions);
+  const devices = useStore((s) => s.devices);
   const inputs = useRef<(HTMLInputElement | null)[]>([]);
 
   // 新建连接标签总是有的时候才显示这一页；万一没有（例如状态不一致），补一个
@@ -44,8 +46,8 @@ export function ConnectView() {
   const code = digits.join("");
   const ready = /^\d{6}$/.test(code) && code[0] !== "0";
   const online = server.state === "connected";
-  const open = new Set(sessions.map((s) => s.code));
-  const recents = recent.filter((r) => !open.has(r.code));
+  // 输入的是我的设备里的：告诉用户是哪台
+  const known = ready ? devices.find((d) => d.code === code) : undefined;
 
   const setFrom = (start: number, text: string) => {
     const only = text.replace(/\D/g, "");
@@ -65,10 +67,8 @@ export function ConnectView() {
     void openSession(code, presetSettings(preset, codec));
   };
 
-  const reconnect = (r: Recent) => {
-    if (busy || !online) return;
-    void openSession(r.code, r.settings);
-  };
+  /** 我的设备：用上次的画质连（没记下画质的用默认预设） */
+  const openDevice = (d: SavedDevice) => void openSession(d.code, d.quality ?? presetSettings(preset, codec));
 
   return (
     <div className="newtab">
@@ -84,7 +84,10 @@ export function ConnectView() {
 
           <div className="nt-field">
             <div className="nt-label">
-              <span>{t("connect.code")}</span>
+              <span>
+                {t("connect.code")}
+                {known && <span className="nt-known">{t("devices.known", { name: deviceTitle(known) })}</span>}
+              </span>
               {code.length > 0 && !busy && (
                 <button className="text-btn" onClick={() => (resetDraft(), inputs.current[0]?.focus())}>
                   {t("connect.clear")}
@@ -183,52 +186,193 @@ export function ConnectView() {
           </button>
         </section>
 
-        {recents.length > 0 && (
-          <section className="nt-recent">
-            <div className="section-title">
-              <span>
-                <IconHistory size={14} />
-                {t("connect.recent")}
-              </span>
-              <span className="muted small">{t("connect.recentHint")}</span>
-            </div>
-            <div className="recent-list">
-              {recents.map((r) => {
-                const p = matchPreset(r.settings);
-                return (
-                  <div
-                    key={r.code}
-                    role="button"
-                    tabIndex={0}
-                    className={`recent-item ${busy || !online ? "disabled" : ""}`}
-                    onClick={() => reconnect(r)}
-                    onKeyDown={(e) => e.key === "Enter" && reconnect(r)}
-                  >
-                    <span className="avatar">{(r.name || r.code).slice(0, 1).toUpperCase()}</span>
-                    <span className="recent-meta">
-                      <span className="recent-name">{r.name || fmtCode(r.code)}</span>
-                      <span className="muted small">
-                        {fmtCode(r.code)} · {p ? presetName(p) : t("connect.customQuality")}
-                      </span>
-                    </span>
-                    <IconArrowRight size={16} className="recent-go" />
-                    <button
-                      className="icon-btn subtle"
-                      title={t("connect.forget")}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        store.forgetRecent(r.code);
-                      }}
-                    >
-                      <IconClose size={13} />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
+        <MyDevices onOpen={openDevice} disabled={busy || !online} />
+      </div>
+    </div>
+  );
+}
+
+/** 超过这么多台时显示搜索框 */
+const SEARCH_FROM = 7;
+
+/** 我的设备：连接过的电脑，最近连过的在前面。点一下就连；可以重命名、移除（能撤销） */
+function MyDevices({ onOpen, disabled }: { onOpen: (d: SavedDevice) => void; disabled: boolean }) {
+  const t = useT();
+  const devices = useStore((s) => s.devices);
+  const saved = useStore((s) => s.devicesSaved);
+  const sessions = useStore((s) => s.sessions);
+  const [query, setQuery] = useState("");
+  const [editing, setEditing] = useState<string | null>(null);
+  const [removed, setRemoved] = useState<SavedDevice | null>(null);
+
+  // 撤销的机会只保留一会儿
+  useEffect(() => {
+    if (!removed) return;
+    const timer = window.setTimeout(() => setRemoved(null), 6000);
+    return () => clearTimeout(timer);
+  }, [removed]);
+
+  if (devices.length === 0 && !removed) {
+    // 第一次用：告诉用户连过的电脑会出现在这里
+    return saved ? <p className="nt-empty muted small">{t("devices.empty")}</p> : null;
+  }
+  const open = new Map(sessions.map((s) => [s.code, s]));
+  const shown = devices.filter((d) => matchDevice(d, query));
+
+  return (
+    <section className="nt-devices">
+      <div className="section-title">
+        <span>
+          <IconMonitor size={14} />
+          {t("devices.title")}
+          <span className="count">{devices.length}</span>
+        </span>
+        {devices.length >= SEARCH_FROM ? (
+          <label className="nt-search">
+            <IconSearch size={14} />
+            <input
+              value={query}
+              placeholder={t("devices.search")}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+            />
+          </label>
+        ) : (
+          <span className="small">{t(saved ? "devices.hint" : "devices.hintWeb")}</span>
         )}
       </div>
+
+      {removed && (
+        <div className="undo-bar" role="status">
+          <span>{t("devices.removed", { name: deviceTitle(removed) })}</span>
+          <button
+            className="text-btn"
+            onClick={() => {
+              restoreDevice(removed);
+              setRemoved(null);
+            }}
+          >
+            {t("devices.undo")}
+          </button>
+        </div>
+      )}
+
+      <div className="device-list">
+        {shown.map((d) => (
+          <DeviceItem
+            key={d.code}
+            d={d}
+            session={open.get(d.code)}
+            disabled={disabled}
+            editing={editing === d.code}
+            onOpen={() => onOpen(d)}
+            onEdit={(on) => setEditing(on ? d.code : null)}
+            onForget={() => {
+              forgetDevice(d.code);
+              setRemoved(d);
+            }}
+          />
+        ))}
+      </div>
+      {shown.length === 0 && <p className="nt-empty muted small">{t("devices.noMatch")}</p>}
+    </section>
+  );
+}
+
+function DeviceItem({
+  d,
+  session,
+  disabled,
+  editing,
+  onOpen,
+  onEdit,
+  onForget,
+}: {
+  d: SavedDevice;
+  /** 已经打开的标签（点一下就切过去） */
+  session: RemoteSession | undefined;
+  disabled: boolean;
+  editing: boolean;
+  onOpen: () => void;
+  onEdit: (on: boolean) => void;
+  onForget: () => void;
+}) {
+  const t = useT();
+  useSession(session);
+  const title = deviceTitle(d);
+  // 打开着的可以随时切过去；其余的要等服务器连上、没有正在进行的连接
+  const off = disabled && !session;
+  const status = session
+    ? session.state === "live"
+      ? t("devices.open")
+      : sessionStateText(session)
+    : relativeTime(d.lastUsed, Date.now(), getLang() === "zh" ? "zh-CN" : "en");
+  const p = d.quality ? matchPreset(d.quality) : null;
+  const finish = (value: string | null) => {
+    if (value !== null) renameDevice(d.code, value);
+    onEdit(false);
+  };
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      className={`device-item ${session ? "open" : ""} ${off ? "disabled" : ""} ${editing ? "editing" : ""}`}
+      title={[title !== d.name && d.name, d.os, fmtCode(d.code)].filter(Boolean).join(" · ")}
+      onClick={() => !off && !editing && onOpen()}
+      onKeyDown={(e) => e.key === "Enter" && !off && !editing && onOpen()}
+    >
+      <span className="avatar">{title.slice(0, 1).toUpperCase()}</span>
+      <span className="device-meta">
+        {editing ? (
+          <input
+            className="device-rename"
+            autoFocus
+            defaultValue={title}
+            maxLength={60}
+            onClick={(e) => e.stopPropagation()}
+            onFocus={(e) => e.target.select()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") finish(e.currentTarget.value);
+              else if (e.key === "Escape") finish(null);
+            }}
+            onBlur={(e) => finish(e.currentTarget.value)}
+          />
+        ) : (
+          <span className="device-name">{title}</span>
+        )}
+        <span className="device-sub">
+          {session && <span className={`dot ${session.state}`} />}
+          {fmtCode(d.code)}
+          {status && ` · ${status}`}
+          {!session && d.quality && ` · ${p ? presetName(p) : t("connect.customQuality")}`}
+        </span>
+      </span>
+      {!editing && (
+        <span className="device-actions">
+          <button
+            className="icon-btn subtle"
+            title={t("devices.rename")}
+            onClick={(e) => {
+              e.stopPropagation();
+              onEdit(true);
+            }}
+          >
+            <IconPencil size={13} />
+          </button>
+          <button
+            className="icon-btn subtle"
+            title={t("devices.forget")}
+            onClick={(e) => {
+              e.stopPropagation();
+              onForget();
+            }}
+          >
+            <IconClose size={13} />
+          </button>
+        </span>
+      )}
     </div>
   );
 }

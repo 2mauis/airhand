@@ -5,7 +5,7 @@ import { type MsgKey, t, useT } from "../lib/i18n";
 import { errorText, noticeText, problemText, sessionStateText } from "../lib/messages";
 import { CODEC_LABEL } from "../lib/presets";
 import type { RemoteSession } from "../lib/session";
-import { store, useSession, useStore } from "../lib/store";
+import { store, useSession, useSessionTitle, useStore } from "../lib/store";
 import {
   IconChevron,
   IconClipboard,
@@ -93,6 +93,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
   useSession(s);
   const immersive = useStore((st) => st.immersive);
   const multi = useStore((st) => st.sessions.length > 1);
+  const title = useSessionTitle(s);
   const [menu, setMenu] = useState<Menu>(null);
   const [toast, setToast] = useState<string | null>(null);
   // 菜单关掉后键盘回到远程画面（例如按 Esc 关掉画质面板后接着打字）
@@ -146,7 +147,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
                 onClick={() => toggleMenu("sessions")}
               >
                 <span className={`dot ${s.state}`} />
-                <span className="host">{s.hostName || fmtCode(s.code)}</span>
+                <span className="host">{title}</span>
                 <IconChevron size={14} />
               </button>
               {menu === "sessions" && <SessionSwitcher current={s} onClose={closeMenu} />}
@@ -154,7 +155,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
           ) : (
             <div className="addr-title">
               <span className={`dot ${s.state}`} />
-              <span className="host">{s.hostName || fmtCode(s.code)}</span>
+              <span className="host">{title}</span>
             </div>
           )}
           <span className="addr-code">{fmtCode(s.code)}</span>
@@ -401,7 +402,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
             ) : s.state === "approving" ? (
               <div className="overlay-card">
                 <span className="spinner large" />
-                <div className="overlay-title">{t("session.approving", { name: s.hostName || s.code })}</div>
+                <div className="overlay-title">{t("session.approving", { name: title })}</div>
                 <div className="muted small">{t("session.approvingHint")}</div>
                 <div className="overlay-actions">
                   <button className="ghost-btn" onClick={() => closeTab(s.id)}>
@@ -485,11 +486,12 @@ function SessionSwitcher({ current, onClose }: { current: RemoteSession; onClose
 
 function SwitcherItem({ s, active, onPick }: { s: RemoteSession; active: boolean; onPick: () => void }) {
   useSession(s);
+  const title = useSessionTitle(s);
   return (
     <button className={`dd-item ${active ? "active" : ""}`} onClick={onPick}>
       <span className="dd-main">
         <span className={`dot ${s.state}`} />
-        <span className="ellipsis">{s.hostName || fmtCode(s.code)}</span>
+        <span className="ellipsis">{title}</span>
       </span>
       <span className="muted small">{s.state === "live" ? fmtCode(s.code) : sessionStateText(s)}</span>
     </button>
