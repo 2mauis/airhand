@@ -6,7 +6,10 @@ import { toProblem, type Problem, type RemoteNotice } from "./api";
 import { t } from "./i18n";
 
 /** 本机产生的提示 */
-export type LocalNotice = { kind: "h264Undecodable" } | { kind: "codecFallback"; codec: string } | { kind: "noOpus" };
+export type LocalNotice =
+  | { kind: "h264Undecodable" }
+  | { kind: "codecFallback"; codec: string; to: string }
+  | { kind: "noOpus" };
 
 /** 被控端发来的"已恢复"：只用来撤下之前的提示，本身不显示 */
 export type RecoveredNotice = Extract<RemoteNotice, { kind: "captureRecovered" | "audioRecovered" }>;

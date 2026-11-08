@@ -279,7 +279,7 @@ The same `airhand.exe` plays several roles depending on its command line (`clien
 |---|---|
 | Capture | Frames are only produced when the screen changes (DXGI on Windows, ScreenCaptureKit on macOS, DAMAGE on X11), so an idle desktop uses almost no bandwidth |
 | Preprocessing | `fast_image_resize` (SIMD) for scaling, `yuvutils-rs` (AVX2) for BGRA→NV12/I420; all buffers are reused |
-| Encoding | **Hardware first**: Media Foundation hardware encoders (NVENC / Quick Sync / AMF) for **AV1 / HEVC / H.264**, low-latency mode, no B-frames, very long GOP; on macOS VideoToolbox (H.264 / HEVC, low-latency rate control for H.264). Without one it falls back to **OpenH264 in screen-content mode** |
+| Encoding | **Hardware first**: Media Foundation hardware encoders (NVENC / Quick Sync / AMF) for **AV1 / HEVC / H.264**, low-latency mode, no B-frames, very long GOP; on macOS VideoToolbox (H.264 / HEVC, low-latency rate control for H.264). Without one it falls back to **OpenH264 in screen-content mode**. Formats are ranked **AV1 > HEVC > H.264**; the most efficient one both sides support (the host can encode, the controller can decode) is picked automatically |
 | Rate control | The controller ACKs every frame. The host caps the number of **in-flight frames** (≈ RTT × fps + 2); on a slow network it waits and **skips to the newest frame** instead of building up lag. Adaptive bitrate steps down under congestion and recovers gradually |
 | Transport | QUIC with **BBR** congestion control (steadier than Cubic on lossy links such as Wi-Fi or cross-border routes). Control messages, audio and video are queued separately, so pings and mouse events never wait behind a large frame |
 | Decoding | The controller decodes on the GPU with **WebCodecs** (`optimizeForLatency`) and paints straight into a `desynchronized` Canvas |
@@ -341,12 +341,12 @@ The delay from painting to the Canvas to the pixels lighting up is estimated at 
 ## Known limitations
 
 - The host supports Windows and Linux **X11** desktops. Under Wayland only X11 (XWayland) applications can be seen and controlled; native Wayland windows are black and the controller suggests logging in with an X11 (Xorg) session. Full Wayland support needs xdg-desktop-portal screen sharing (the local user has to confirm each time) and isn't implemented
-- The Linux host only has OpenH264 software encoding (no VA-API / NVENC yet); when AV1 / HEVC is selected it uses H.264
-- Decoding on a Linux controller relies on WebKitGTK + GStreamer: H.264 needs `gstreamer1.0-plugins-bad` (parsing) and `gstreamer1.0-libav` or openh264 (decoding); AV1 / HEVC depend on the installed GStreamer decoders. If a format turns out not to produce a picture, the controller switches to H.264
+- The Linux host only has OpenH264 software encoding (no VA-API / NVENC yet), so the controller uses H.264
+- Decoding on a Linux controller relies on WebKitGTK + GStreamer: H.264 needs `gstreamer1.0-plugins-bad` (parsing) and `gstreamer1.0-libav` or openh264 (decoding); AV1 / HEVC depend on the installed GStreamer decoders. If a format turns out not to produce a picture, the controller switches to the next available format by priority
 - The Windows host only runs in the console session (the physical screen): Remote Desktop (RDP) sessions can't be controlled. `Ctrl+Alt+Del` can't be sent yet (it needs `SendSAS`). Debug builds run the host in the tray process, without SYSTEM rights, so they can't capture or control UAC prompts and the lock screen (the controller shows a capture error meanwhile)
 - On Linux the lock screen can't be controlled (the screensaver grabs the keyboard and mouse)
 - The macOS host needs the Screen & System Audio Recording and Accessibility permissions, which only the local user can grant in System Settings; since macOS 15 the system also asks again from time to time whether to keep allowing screen recording. The login window and the lock screen can't be captured or controlled
-- A Mac host doesn't offer AV1 (current Apple chips can only decode it in hardware), so AV1 shows as unavailable in the console
+- A Mac host doesn't offer AV1 (current Apple chips can only decode it in hardware), so AV1 shows as unavailable in the console and HEVC is used instead
 - A macOS controller (WKWebView) can't lock the keyboard: in fullscreen, Command+Tab, Command+Space and the like are still handled locally, so use "Send shortcut" in the toolbar. WKWebView on older macOS versions may lack Opus decoding, in which case the console says remote audio can't be played
 - The clipboard syncs text only, not files
 - Audio flows from host to controller only; the controller's microphone isn't forwarded. Audio is captured after the volume control, so a muted host sends silence

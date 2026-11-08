@@ -271,6 +271,13 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>) {
             abr.reset(settings.bitrate_kbps);
             if let Some(e) = &mut enc {
                 e.set_bitrate(settings.bitrate_kbps);
+                // 需要重建编码器（例如换了编码格式）：用上一帧马上重建，画面静止时也立即生效，
+                // 控制端也能马上收到新的 HostMsg::Encoder（界面上显示的是实际在用的格式）
+                if let Some(f) = &last_frame
+                    && !e.compatible(f.width, f.height, &settings)
+                {
+                    ctrl.force_key.store(true, Ordering::Release);
+                }
             }
             info!(?settings, "quality settings updated");
         }

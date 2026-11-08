@@ -1,7 +1,7 @@
 // H.264 Annex-B → AVC 转换（WebKitGTK 只能解码 AVC 格式）：`npm test`
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { annexBToAvc, avcC, splitAnnexB } from "../src/lib/codec.ts";
+import { annexBToAvc, avcC, bestCodec, codecUsable, splitAnnexB } from "../src/lib/codec.ts";
 
 const SPS = [0x67, 0x42, 0xc0, 0x28, 0xda, 0x01];
 const PPS = [0x68, 0xce, 0x3c, 0x80];
@@ -34,4 +34,20 @@ test("非关键帧：多个 slice 都保留", () => {
 test("avcC：profile/level 来自 SPS，NAL 长度字段 4 字节", () => {
   const c = Array.from(avcC(new Uint8Array(SPS), new Uint8Array(PPS)));
   assert.deepEqual(c, [1, 0x42, 0xc0, 0x28, 0xff, 0xe1, 0, SPS.length, ...SPS, 1, 0, PPS.length, ...PPS]);
+});
+
+test("编码格式优先级：AV1 > HEVC > H.264，取双方都支持的里最好的", () => {
+  // 还不知道对方支持什么：只看本机能解码的
+  assert.equal(bestCodec(["H264", "H265", "AV1"]), "AV1");
+  assert.equal(bestCodec(["H264", "H265"]), "H265");
+  assert.equal(bestCodec(["H264"]), "H264");
+  // Mac 被控端没有 AV1 编码器：改用 HEVC，而不是让对方回退到 H.264
+  assert.equal(bestCodec(["H264", "H265", "AV1"], ["H264", "H265"]), "H265");
+  assert.equal(bestCodec(["H264", "AV1"], ["H264", "H265", "AV1"]), "AV1");
+  assert.equal(bestCodec(["H264", "AV1"], ["H264", "H265"]), "H264");
+  // H.264 双方都一定支持
+  assert.equal(bestCodec([], []), "H264");
+  assert.ok(codecUsable("H264", [], []));
+  assert.ok(!codecUsable("AV1", ["H264", "AV1"], ["H264", "H265"]));
+  assert.ok(codecUsable("H265", ["H264", "H265"], ["H264", "H265"]));
 });

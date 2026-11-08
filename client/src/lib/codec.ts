@@ -115,6 +115,22 @@ export function markH264NeedsAvc() {
   needsAvc = true;
 }
 
+/** 编码格式的优先级：同画质下压缩率从高到低（界面上也按这个顺序列出） */
+export const CODEC_PRIORITY: readonly Codec[] = ["AV1", "H265", "H264"];
+
+/**
+ * 这种格式能不能用：本机能解码，并且被控端能编码。H.264 双方都一定支持。
+ * `hostCodecs` 为 undefined 表示还不知道被控端支持什么（还没连上），这时只看本机。
+ */
+export function codecUsable(c: Codec, decoders: Codec[], hostCodecs?: Codec[]): boolean {
+  return c === "H264" || (decoders.includes(c) && (hostCodecs?.includes(c) ?? true));
+}
+
+/** 按 {@link CODEC_PRIORITY} 选出能用的格式里压缩率最高的一个 */
+export function bestCodec(decoders: Codec[], hostCodecs?: Codec[]): Codec {
+  return CODEC_PRIORITY.find((c) => codecUsable(c, decoders, hostCodecs)) ?? "H264";
+}
+
 let probeCache: Promise<Codec[]> | null = null;
 
 /** 探测本机可以（最好是硬件）解码的格式，H.264 必定可用 */

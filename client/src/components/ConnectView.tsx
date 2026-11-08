@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { toProblem, type Problem } from "../lib/api";
 import { useT } from "../lib/i18n";
 import { problemText } from "../lib/messages";
-import { CODEC_LABEL, DEFAULT_PRESET, PRESETS, preferredCodec, presetDesc, presetName, presetSettings } from "../lib/presets";
+import { bestCodec } from "../lib/codec";
+import { CODEC_LABEL, DEFAULT_PRESET, PRESETS, presetDesc, presetName, presetSettings } from "../lib/presets";
 import { RemoteSession } from "../lib/session";
 import { store, useStore } from "../lib/store";
 import { IconBolt, IconMonitor } from "./Icons";
@@ -18,7 +19,8 @@ export function ConnectView() {
   const server = useStore((s) => s.server);
   const decoders = useStore((s) => s.decoders);
   const sessions = useStore((s) => s.sessions);
-  const codec = preferredCodec(decoders);
+  // 还不知道对方支持什么：先按本机能解码的选，连上后会按双方都支持的重新选（见 RemoteSession.fitCodec）
+  const codec = bestCodec(decoders);
   const code = digits.join("");
   const ready = /^\d{6}$/.test(code) && code[0] !== "0";
 

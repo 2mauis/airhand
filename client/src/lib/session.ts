@@ -21,7 +21,7 @@ import {
 } from "./api";
 import { AudioPlayer } from "./audio";
 import { AvSync, type AvSyncStats } from "./avsync";
-import { annexBToAvc, avcC, codecString, h264NeedsAvc, markH264NeedsAvc } from "./codec";
+import { annexBToAvc, avcC, bestCodec, codecString, codecUsable, h264NeedsAvc, markH264NeedsAvc } from "./codec";
 import { t } from "./i18n";
 import { RECOVERS, type SessionNotice } from "./messages";
 import { CODEC_LABEL } from "./presets";
@@ -256,6 +256,7 @@ export class RemoteSession {
     this.attempting = true;
     this.attemptAt = performance.now();
     let info;
+    const sent = this.settings;
     try {
       info = await api.connect(this.code, this.resume, this.settings, sink, this.clipboardSync);
     } finally {
@@ -272,7 +273,8 @@ export class RemoteSession {
     this.state = "live";
     this.retries = 0;
     this.closedReason = null;
-    if (!this.visible) this.pushSettings();
+    // 在后台要降帧率；连接过程中设置变了（例如 Hello 先到，换了编码格式，那时还没有 sid 发不出去）也要重发
+    if (!this.visible || this.settings !== sent) this.pushSettings();
     // 新的会话流默认不发声音，需要重新请求
     this.audioOn = false;
     this.syncAudio();
@@ -376,6 +378,7 @@ export class RemoteSession {
         this.displays = ev.displays;
         this.currentDisplay = ev.current;
         this.hostCodecs = ev.codecs;
+        this.fitCodec();
         break;
       case "displays":
         this.displays = ev.displays;
@@ -583,7 +586,7 @@ export class RemoteSession {
 
   /**
    * 本机实际无法解码这种格式（探测时说支持，但一帧也解不出来）：
-   * H.264 改用 AVC 格式重试；其它格式从可用列表里去掉，并让被控端改用 H.264。
+   * H.264 改用 AVC 格式重试；其它格式从可用列表里去掉，并让被控端按优先级改用下一个能用的格式。
    */
   private onUndecodable(codec: Codec) {
     this.resetDecoder();
@@ -597,11 +600,15 @@ export class RemoteSession {
       this.requestKeyframe();
       return;
     }
-    console.warn(`can't decode ${codec} here, switching to H.264`);
-    store.setDecoders(store.get().decoders.filter((c) => c !== codec));
+    const decoders = store.get().decoders.filter((c) => c !== codec);
+    store.setDecoders(decoders);
     if (this.settings.codec === codec) {
-      this.notice = { kind: "codecFallback", codec: CODEC_LABEL[codec] };
-      this.updateSettings({ ...this.settings, codec: "H264" });
+      const to = bestCodec(decoders, this.hostCodecs);
+      console.warn(`can't decode ${codec} here, switching to ${to}`);
+      this.notice = { kind: "codecFallback", codec: CODEC_LABEL[codec], to: CODEC_LABEL[to] };
+      this.updateSettings({ ...this.settings, codec: to });
+    } else {
+      console.warn(`can't decode ${codec} here`);
     }
     this.requestKeyframe();
   }
@@ -849,6 +856,16 @@ export class RemoteSession {
     this.settings = s;
     this.pushSettings();
     this.emit();
+  }
+
+  /**
+   * 知道对方支持哪些格式之后：当前选的格式双方不是都支持时，按优先级（AV1 > HEVC > H.264）换成能用的里最好的。
+   * 例如 Mac 被控端没有 AV1 编码器：请求 AV1 时对方自己只会回退到 H.264，这里改为请求 HEVC。
+   */
+  private fitCodec() {
+    const decoders = store.get().decoders;
+    if (codecUsable(this.settings.codec, decoders, this.hostCodecs)) return;
+    this.updateSettings({ ...this.settings, codec: bestCodec(decoders, this.hostCodecs) });
   }
 
   private pushSettings() {

@@ -39,11 +39,6 @@ export function matchPreset(s: QualitySettings): PresetId | null {
   return p?.id ?? null;
 }
 
-/** 本机能解码的格式里压缩率最高的一个（被控端没有对应的硬件编码器时会自动回退） */
-export function preferredCodec(decoders: Codec[]): Codec {
-  return (["AV1", "H265"] as const).find((c) => decoders.includes(c)) ?? "H264";
-}
-
 export const CODEC_LABEL: Record<Codec, string> = {
   H264: "H.264",
   H265: "H.265 / HEVC",

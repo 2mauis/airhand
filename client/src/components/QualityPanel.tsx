@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Codec, QualitySettings } from "../lib/api";
 import { useT } from "../lib/i18n";
+import { CODEC_PRIORITY, codecUsable } from "../lib/codec";
 import { CODEC_LABEL, PRESETS, codecHint, matchPreset, presetDesc, presetName, presetSettings } from "../lib/presets";
 import type { RemoteSession } from "../lib/session";
 import { useSession, useStore } from "../lib/store";
@@ -39,7 +40,9 @@ export function QualityPanel({ s, onClose }: { s: RemoteSession; onClose: () => 
   useEffect(() => setDraftKbps(cur.bitrate_kbps), [cur.bitrate_kbps]);
 
   const apply = (patch: Partial<QualitySettings>) => s.updateSettings({ ...s.settings, ...patch });
-  const codecOk = (c: Codec) => s.hostCodecs.includes(c) && decoders.includes(c);
+  const codecOk = (c: Codec) => codecUsable(c, decoders, s.hostCodecs);
+  // 高亮对方实际在用的格式（与工具栏一致）：请求的格式对方建不起来时会回退到 H.264
+  const activeCodec = s.encoder?.codec ?? cur.codec;
 
   return (
     <Popover className="quality-panel" onClose={onClose}>
@@ -113,13 +116,13 @@ export function QualityPanel({ s, onClose }: { s: RemoteSession; onClose: () => 
       <div className="field">
         <label>{t("quality.codec")}</label>
         <div className="codec-list">
-          {(["AV1", "H265", "H264"] as Codec[]).map((c) => {
+          {CODEC_PRIORITY.map((c) => {
             const ok = codecOk(c);
             const why = !decoders.includes(c) ? t("quality.noDecoder") : t("quality.noEncoder");
             return (
               <button
                 key={c}
-                className={`codec-opt ${cur.codec === c ? "active" : ""}`}
+                className={`codec-opt ${activeCodec === c ? "active" : ""}`}
                 disabled={!ok}
                 onClick={() => apply({ codec: c })}
                 title={ok ? codecHint(c) : why}

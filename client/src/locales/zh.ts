@@ -170,7 +170,7 @@ export default {
         : "对方 Mac 没有允许 Airhand 使用“屏幕与系统录音”，看不到画面，也听不到声音。需要那台电脑的用户在“系统设置 → 隐私与安全性 → 屏幕与系统录音”里允许 Airhand，然后重新打开 Airhand",
   // 本机产生的提示
   "notice.h264Undecodable": "本机无法解码 H.264 画面",
-  "notice.codecFallback": "本机无法解码 {codec} 画面，已改用 H.264",
+  "notice.codecFallback": "本机无法解码 {codec} 画面，已改用 {to}",
   "notice.noOpus": "本机不支持 Opus 解码，无法播放远程声音",
   "error.canvas": "无法创建 Canvas",
 

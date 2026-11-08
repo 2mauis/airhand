@@ -160,7 +160,7 @@ const en: Record<MsgKey, Msg> = {
         ? "The remote Mac hasn't allowed Airhand Accessibility, so its keyboard and mouse can't be controlled. Someone at that Mac needs to allow Airhand in System Settings → Privacy & Security → Accessibility"
         : "The remote Mac hasn't allowed Airhand Screen & System Audio Recording, so there's no picture or sound. Someone at that Mac needs to allow Airhand in System Settings → Privacy & Security → Screen & System Audio Recording, then reopen Airhand",
   "notice.h264Undecodable": "This computer can't decode the H.264 video",
-  "notice.codecFallback": "This computer can't decode {codec} video. Switched to H.264",
+  "notice.codecFallback": "This computer can't decode {codec} video. Switched to {to}",
   "notice.noOpus": "This computer can't decode Opus, so remote sound can't be played",
   "error.canvas": "Couldn't create the canvas",
 

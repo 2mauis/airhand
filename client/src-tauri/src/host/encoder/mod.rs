@@ -127,6 +127,9 @@ pub struct Encoder {
 
 impl Encoder {
     /// 创建编码器：按"请求的格式硬件 → H.264 硬件 → OpenH264"顺序尝试。
+    ///
+    /// 格式的优先级（AV1 > HEVC > H.264）由控制端按双方都支持的格式来选（见 [`available_codecs`]），
+    /// 这里不自作主张改用别的高效格式：控制端不一定能解码，只有 H.264 是双方都一定支持的。
     pub fn new(
         src_w: u32,
         src_h: u32,
