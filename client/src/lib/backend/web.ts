@@ -55,7 +55,7 @@ class WebConsole implements Backend {
   private retries = 0;
   private nextId = 1;
   private nextCh = 1;
-  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Problem) => void }>();
+  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Problem) => void; timer: number }>();
   private openWaiters: (() => void)[] = [];
   private chans = new Map<number, Chan>();
   private status: ServerState = { state: "connecting" };
@@ -107,7 +107,7 @@ class WebConsole implements Backend {
   private onClose() {
     this.ws = null;
     this.rtt = null;
-    for (const p of this.pending.values()) p.reject(LOST);
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(LOST); }
     this.pending.clear();
     // 服务那边的会话随这条连接一起结束了：告诉正在进行的会话，它们会自己重试
     const chans = [...this.chans.values()];
@@ -131,18 +131,35 @@ class WebConsole implements Backend {
   private call<T>(cmd: string, args: object = {}): Promise<T> {
     const ws = this.socket();
     if (!ws) return Promise.reject(LOST);
+    if (this.pending.size >= 128) { ws.close(1013, "too many pending calls"); return Promise.reject(LOST); }
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      ws.send(JSON.stringify({ id, cmd, ...args }));
+      const timer = window.setTimeout(() => {
+        this.pending.delete(id);
+        reject(LOST);
+        // Don't leave an orphan session if its connect reply was lost.
+        ws.close(1013, "command timeout");
+      }, 30_000);
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+      try { this.send(ws, JSON.stringify({ id, cmd, ...args })); }
+      catch { clearTimeout(timer); this.pending.delete(id); reject(LOST); }
     });
+  }
+
+  private send(ws: WebSocket, text: string) {
+    if (ws.bufferedAmount + new TextEncoder().encode(text).byteLength > 2 * 1024 * 1024) {
+      ws.close(1013, "outgoing queue overflow");
+      throw LOST;
+    }
+    ws.send(text);
   }
 
   /** 不需要回复的命令 */
   private notify(cmd: string, args: object): Promise<void> {
     const ws = this.socket();
     if (!ws) return Promise.reject(LOST);
-    ws.send(JSON.stringify({ cmd, ...args }));
+    try { this.send(ws, JSON.stringify({ cmd, ...args })); }
+    catch { return Promise.reject(LOST); }
     return Promise.resolve();
   }
 
@@ -182,6 +199,7 @@ class WebConsole implements Backend {
         const p = this.pending.get(msg.id);
         if (!p) return;
         this.pending.delete(msg.id);
+        clearTimeout(p.timer);
         if (msg.err !== undefined) p.reject(msg.err);
         else p.resolve(msg.ok);
         return;

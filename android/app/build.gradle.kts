@@ -5,8 +5,8 @@ plugins {
 }
 
 // 产品版本与桌面客户端一致（client/src-tauri/tauri.conf.json）
-val appVersion = "0.2.0"
-val appVersionCode = 2
+val appVersion = "0.2.1"
+val appVersionCode = 3
 
 /** 构建参数：先找 Gradle 属性（-Pairhand.server=...），再找环境变量（AIRHAND_SERVER） */
 fun setting(prop: String, env: String): String? =
@@ -89,8 +89,9 @@ android {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
     lint {
-        checkReleaseBuilds = false
-        abortOnError = false
+        checkReleaseBuilds = true
+        abortOnError = true
+        fatal += "NewApi"
     }
     testOptions {
         unitTests.isReturnDefaultValues = true

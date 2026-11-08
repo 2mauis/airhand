@@ -38,12 +38,30 @@ export function tauriBackend(): Backend {
     appInfo: () => invoke<AppInfo>("app_info"),
     serverStatus: () => invoke<ServerState>("server_status"),
     onServerStatus: (cb) => unlistenLater(listen<ServerState>("server-status", (e) => cb(e.payload))),
-    connect: (code, resume, settings, sink, clipboard) => {
+    connect: async (code, resume, settings, sink, clipboard) => {
+      let sid: number | null = null;
+      let unacked: number | null = null;
+      let closed = false;
+      const ack = (seq: number) => {
+        if (sid !== null) void invoke("ctrl_ack", { sid, seq }).catch(() => {});
+        else unacked = seq;
+      };
       const video = new Channel<ArrayBuffer>();
-      video.onmessage = (buf) => sink.packet(new Uint8Array(buf));
+      video.onmessage = (buf) => {
+        if (closed) return;
+        // ACK only after the WebView receives this packet, including the IPC hop.
+        if (buf.byteLength >= 24 && new DataView(buf).getUint8(0) === 1) ack(new DataView(buf).getUint32(4, true));
+        sink.packet(new Uint8Array(buf));
+      };
       const events = new Channel<SessionEvent>();
-      events.onmessage = (ev) => sink.event(ev);
-      return invoke<SessionInfo>("ctrl_connect", { code, resume, settings, video, events, clipboard });
+      events.onmessage = (ev) => {
+        if (ev.type === "closed") closed = true;
+        sink.event(ev);
+      };
+      const info = await invoke<SessionInfo>("ctrl_connect", { code, resume, settings, video, events, clipboard });
+      sid = info.sid;
+      if (!closed && unacked !== null) ack(unacked);
+      return info;
     },
     onHostOnline: (cb) => unlistenLater(listen<number>("host-online", (e) => cb(e.payload))),
     clipboardSync: (sid, enabled) => invoke("ctrl_clipboard", { sid, enabled }),

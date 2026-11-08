@@ -54,6 +54,8 @@ class VideoDecoder(
         handler.post {
             if (surface === s) return@post
             surface = s
+            pending.forEach { it.ack() }
+            pending.clear()
             releaseCodec()
             needKey = true
             if (s != null) askKeyframe(force = true)
@@ -68,6 +70,7 @@ class VideoDecoder(
     fun resetStream() {
         handler.post {
             pending.clear()
+            releaseCodec()
             needKey = true
         }
     }
@@ -163,12 +166,19 @@ class VideoDecoder(
     }
 
     private fun configure(p: VideoPacket): Boolean {
+        pending.forEach { it.ack() }
+        pending.clear()
         releaseCodec()
         val s = surface ?: return false
-        val format = MediaFormat.createVideoFormat(p.codec.mime, p.width, p.height)
-        format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, (p.width * p.height * 3 / 2).coerceAtLeast(p.length * 2))
-        csd(p).forEachIndexed { i, b -> format.setByteBuffer("csd-$i", ByteBuffer.wrap(b)) }
-        val lowLatency = MediaFormat(format).apply {
+        // MediaFormat(MediaFormat) is API 29+. Build both variants from the
+        // same recipe so Android 7–9 never calls that constructor.
+        val parameterSets = csd(p)
+        fun basic() = MediaFormat.createVideoFormat(p.codec.mime, p.width, p.height).apply {
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, (p.width * p.height * 3 / 2).coerceAtLeast(p.length * 2))
+            parameterSets.forEachIndexed { i, b -> setByteBuffer("csd-$i", ByteBuffer.wrap(b)) }
+        }
+        val format = basic()
+        val lowLatency = basic().apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
             // 各家芯片自己的低延迟开关（不认识的键会被忽略），与 Moonlight 相同

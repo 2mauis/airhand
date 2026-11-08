@@ -38,7 +38,7 @@ fn env_or(key: &str, default: &str) -> String {
 /// 这里的值兜底那些不发保活的连接。
 pub fn transport_config() -> TransportConfig {
     let mut t = TransportConfig::default();
-    t.max_concurrent_bidi_streams(VarInt::from_u32(64));
+    t.max_concurrent_bidi_streams(VarInt::from_u32(256)); // 3 lanes per session + signaling
     t.max_concurrent_uni_streams(VarInt::from_u32(0));
     t.max_idle_timeout(Some(Duration::from_secs(20).try_into().unwrap()));
     t.keep_alive_interval(Some(Duration::from_secs(4)));
@@ -143,6 +143,7 @@ async fn main() -> Result<()> {
     }
     endpoint.close(VarInt::from_u32(0), b"server shutdown");
     let _ = tokio::time::timeout(Duration::from_secs(3), endpoint.wait_idle()).await;
+    broker.flush_bindings().await;
     Ok(())
 }
 

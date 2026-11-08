@@ -15,11 +15,15 @@ flowchart LR
 
 For how the host is implemented on each platform, see the [table below](#the-host-on-each-platform).
 
-The first bidirectional stream on every QUIC connection is the **control stream** (signaling). For each remote-control session both sides open another bidirectional stream; the server pairs them by session ID and from then on **only forwards bytes, it never parses the video**. Every message is a `u32` length prefix followed by a postcard-encoded payload. When a controller reconnects it presents the resume token it got when it connected; if the host is offline the server remembers the request and sends `HostOnline` when the host is back (see "Resume tokens" in `crates/airhand-proto/src/signal.rs`).
+The first bidirectional stream on every QUIC connection is the **control stream** (signaling). For each remote-control session both sides open three bidirectional streams (session control, video and audio); the server pairs them by session ID and lane, then **only forwards bytes, it never parses the video**. This is protocol v8: update the server and all clients together. Ordering is guaranteed within each lane, not across lanes; capture timestamps synchronize audio and video. Every message is a `u32` length prefix followed by a postcard-encoded payload. When a controller reconnects it presents the resume token it got when it connected; if the host is offline the server remembers the request and sends `HostOnline` when the host is back (see "Resume tokens" in `crates/airhand-proto/src/signal.rs`).
 
-On the session stream the controller first sends a random ID for this run of the app; the host answers with `Hello` (platform, whether it accepts multi-touch, which system actions it supports) and starts sending video. A host may first answer "awaiting approval" and send `Hello` only after the person at it allows the connection (Android does by default; see the module docs of `crates/airhand-proto/src/session.rs`).
+On the session control stream the controller first sends a random ID for this run of the app; the host answers with `Hello` (platform, whether it accepts multi-touch, which system actions it supports) and starts sending video. A host may first answer "awaiting approval" and send `Hello` only after the person at it allows the connection (Android does by default; see the module docs of `crates/airhand-proto/src/session.rs`).
 
 The web console splits the controller on the right in two: the QUIC connection and session handling run in `airhand-web` (the container), while decoding, rendering and input capture stay in the browser, with one WebSocket in between. Packets are forwarded to the browser unchanged (with a 4-byte session number in front), and the browser acknowledges the frames.
+
+The desktop WebView also acknowledges frames after the IPC hop. Controller commands are bounded to 128 messages / 2 MiB, with adjacent mouse movement and superseded state coalesced. Overflow or commands older than two seconds end the session instead of replaying stale operations. WebSocket output has both a message limit and a 32 MiB byte budget.
+
+Fixed codes are queried from an in-memory index. A dedicated SQLite worker coalesces updates per code; registration waits for persistence outside broker locks before publishing, and shutdown also flushes. Disk failures retain in-memory ownership and retry, never treating a failed lookup as an unowned code. A persistence-barrier timeout is logged and service continues in memory; a forced exit can then lose uncommitted updates.
 
 ### Source layout
 
@@ -32,7 +36,7 @@ The web console splits the controller on the right in two: the QUIC connection a
 | `client/src-tauri/` | Desktop client, Rust side: host `host/`, tray, console window and commands |
 | `android/native/` | Android Rust core (JNI): the controller uses `airhand-link`; the host's network side (registering / reclaiming the code, sessions, in-flight frame control and adaptive bitrate, same as the desktop). A separate Cargo workspace like `client/src-tauri/` and `web/` |
 | `android/app/` | Android app (Kotlin + Jetpack Compose): phone and TV interfaces, MediaCodec decoding / encoding, screen recording, accessibility service (remote control) |
-| `client/src/` | Console UI (React 19 + TypeScript, no UI library), shared by the desktop and web consoles, which differ only in `client/src/lib/backend/`; strings in `client/src/locales/` |
+| `client/src/` | `lib/session.ts` manages sessions, `connection-attempt.ts` isolates connection generations, `video.ts` owns decoding / video queues, `input.ts` owns input; console UI (React 19 + TypeScript, no UI library), shared by the desktop and web consoles, which differ only in `client/src/lib/backend/`; strings in `client/src/locales/` |
 | `assets/icon.svg` | Application icon source |
 
 ### The host on each platform
@@ -72,7 +76,7 @@ The same `airhand.exe` plays several roles depending on its command line (`clien
 | Preprocessing | `fast_image_resize` (SIMD) for scaling, `yuvutils-rs` (AVX2) for BGRA→NV12/I420; all buffers are reused |
 | Encoding | **Hardware first**: Media Foundation hardware encoders (NVENC / Quick Sync / AMF) for **AV1 / HEVC / H.264**, low-latency mode, no B-frames, very long GOP; on macOS VideoToolbox (H.264 / HEVC, low-latency rate control for H.264). Without one it falls back to **OpenH264 in screen-content mode**. Formats are ranked **AV1 > HEVC > H.264**; the most efficient one both sides support (the host can encode, the controller can decode) is picked automatically |
 | Rate control | The controller ACKs every frame. The host caps the number of **in-flight frames** (≈ RTT × fps + 2); on a slow network it waits and **skips to the newest frame** instead of building up lag. Adaptive bitrate steps down under congestion and recovers gradually |
-| Transport | QUIC with **BBR** congestion control (steadier than Cubic on lossy links such as Wi-Fi or cross-border routes). Control messages, audio and video are queued separately, so pings and mouse events never wait behind a large frame |
+| Transport | QUIC with **BBR**. Control, audio and video use separate bounded queues and QUIC streams, avoiding video stream head-of-line blocking. Connection bandwidth is still shared; the web console's final hop remains a single WebSocket |
 | Decoding | The controller decodes on the GPU with **WebCodecs** (`optimizeForLatency`) and paints straight into a `desynchronized` Canvas |
 | Cursor | The remote cursor's **shape** is mirrored to the local cursor and movement is handled locally, so there is **no perceptible cursor lag** |
 | Background sessions | Sessions that aren't on screen drop to 5 fps |
@@ -87,7 +91,7 @@ The host's system sound (not the microphone) is streamed to the controller:
 |---|---|
 | Capture | Loopback capture of the default output device, converted to 48 kHz stereo; follows the default device when it changes (e.g. you plug in headphones) |
 | Encoding | Opus at 96 kbps, 20 ms per packet; **no packets during silence** |
-| Transport | Same stream as the video, queued after control messages and before video; when the queue is full packets are dropped instead of building up lag |
+| Transport | Independent audio QUIC stream, prioritized below control and above video; a full queue drops packets rather than blocking capture |
 | Playback | WebCodecs decoding → AudioWorklet adaptive jitter buffer: about 40 ms on a stable network, growing under jitter and shrinking back once stable. A ±1–2% speed adjustment cancels the clock drift between the two sound cards, and a large backlog is skipped |
 
 Only the session you are looking at plays audio (none do in the multi-screen overview); the other hosts are told to stop capturing.

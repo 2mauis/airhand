@@ -1,270 +1,315 @@
-//! 固定控制码的绑定表（见 `airhand_proto::signal` 模块说明的"固定控制码"），存在 SQLite 数据库里。
-//!
-//! 每个绑定记录控制码、密钥的哈希（不是密钥本身：数据库泄露了也取不回控制码）和最后一次在线的时间。
-//! 数据库默认和证书放在一起（`/data/airhand.db`），服务器重启后照样有效。每次修改立即写入（WAL 模式），
-//! 服务器被强行结束也不会丢。
-//!
-//! 数据库打不开时（例如目录没有写权限）退回到只在内存里记，服务器照常工作，只是重启后忘掉这些绑定；
-//! 运行中读写出错时按"没有绑定"处理（和没有这个功能时一样：控制码空闲就还给来取的被控端）。
-
-use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
+//! Fixed control codes: authoritative in-memory index plus a dedicated SQLite
+//! writer. Broker locks never cover disk I/O. Writes are coalesced per code (the
+//! namespace has 900,000 entries), retried on failure, and drained on shutdown.
+//! A disk error never makes an existing binding appear unowned.
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
-/// 这么久没有上线的绑定会被清理，控制码可以再分给别人
 pub const BINDING_TTL: Duration = Duration::from_secs(180 * 24 * 3600);
-
-/// 数据库结构的版本（`PRAGMA user_version`）。修改结构时加 1，并在 [`migrate`] 里补上升级步骤
 const SCHEMA_VERSION: i64 = 1;
-
-pub struct Bindings {
-    db: Connection,
+#[derive(Clone)]
+struct Binding {
+    hash: Vec<u8>,
+    last_seen: i64,
 }
-
+#[derive(Default)]
+struct Writes {
+    dirty: HashMap<u32, Option<Binding>>,
+    writing: bool,
+    stop: bool,
+}
+#[derive(Default)]
+struct Store {
+    state: Mutex<Writes>,
+    cv: Condvar,
+}
+pub struct Bindings {
+    entries: HashMap<u32, Binding>,
+    store: Option<Arc<Store>>,
+}
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
 }
-
 fn secret_hash(secret: &[u8; 16]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(b"airhand code binding v1\0");
     h.update(secret);
     h.finalize().into()
 }
-
 fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).ok();
+        std::fs::create_dir_all(dir)?;
     }
     let db = Connection::open(path)?;
     db.busy_timeout(Duration::from_secs(5))?;
-    // 更新的服务器建的数据库：什么都不改
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version > SCHEMA_VERSION {
-        bail!("the database was created by a newer airhand-server (schema version {version})");
+        bail!("database schema {version} is newer than this server");
     }
-    // WAL：写入不阻塞读取，也不用每次提交都刷盘（NORMAL 下断电最多丢最后几次提交，数据库不会损坏）
-    let mode: String = db.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        warn!("{}: journal mode is {mode}, not WAL", path.display());
+    db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+    if version < 1 {
+        db.execute_batch("BEGIN;
+            CREATE TABLE fixed_codes (code INTEGER PRIMARY KEY, secret_hash BLOB NOT NULL, last_seen INTEGER NOT NULL);
+            CREATE INDEX fixed_codes_last_seen ON fixed_codes (last_seen);
+            PRAGMA user_version = 1; COMMIT;")?;
     }
-    db.execute_batch("PRAGMA synchronous = NORMAL;")?;
-    migrate(&db)?;
     Ok(db)
 }
-
-/// 建表 / 升级到 [`SCHEMA_VERSION`]
-fn migrate(db: &Connection) -> Result<()> {
-    let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version < 1 {
-        db.execute_batch(
-            "BEGIN;
-             CREATE TABLE fixed_codes (
-                 code        INTEGER PRIMARY KEY,  -- 6 位控制码
-                 secret_hash BLOB    NOT NULL,     -- SHA-256(\"airhand code binding v1\\0\" || 密钥)
-                 last_seen   INTEGER NOT NULL      -- 最后在线的 Unix 时间（秒）
-             );
-             CREATE INDEX fixed_codes_last_seen ON fixed_codes (last_seen);
-             PRAGMA user_version = 1;
-             COMMIT;",
-        )?;
-    }
-    Ok(())
+fn load(db: &Connection) -> Result<HashMap<u32, Binding>> {
+    let mut stmt = db.prepare("SELECT code, secret_hash, last_seen FROM fixed_codes")?;
+    Ok(stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                Binding {
+                    hash: r.get(1)?,
+                    last_seen: r.get(2)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?)
 }
-
-fn memory() -> Connection {
-    let db = Connection::open_in_memory().expect("SQLite in-memory database");
-    migrate(&db).expect("in-memory schema");
-    db
-}
-
-/// 运行中的数据库错误：记日志，按 `fallback` 继续
-fn or_log<T>(r: rusqlite::Result<T>, what: &str, fallback: T) -> T {
-    r.unwrap_or_else(|e| {
-        warn!("fixed control codes: can't {what}: {e}");
-        fallback
-    })
-}
-
-impl Bindings {
-    /// 打开（不存在时创建）数据库；`None` 表示只在内存里（测试用）
-    pub fn open(path: Option<&Path>) -> Self {
-        let db = match path {
-            Some(p) => match open(p).with_context(|| format!("can't open {}", p.display())) {
-                Ok(db) => {
-                    let b = Self { db };
-                    info!("{} fixed control code(s) in {}", b.len(), p.display());
-                    return b;
-                }
-                Err(e) => {
-                    error!(
-                        "{e:#}; fixed control codes are only kept in memory until the server restarts"
-                    );
-                    memory()
-                }
-            },
-            None => memory(),
-        };
-        Self { db }
-    }
-
-    pub fn len(&self) -> usize {
-        let r = self
-            .db
-            .query_row("SELECT COUNT(*) FROM fixed_codes", [], |r| {
-                r.get::<_, i64>(0)
-            });
-        or_log(r, "count", 0) as usize
-    }
-
-    fn hash(&self, code: u32) -> Option<Vec<u8>> {
-        let r = self
-            .db
-            .prepare_cached("SELECT secret_hash FROM fixed_codes WHERE code = ?1")
-            .and_then(|mut s| s.query_row([code], |r| r.get(0)).optional());
-        or_log(r, "look up a code", None)
-    }
-
-    pub fn contains(&self, code: u32) -> bool {
-        self.hash(code).is_some()
-    }
-
-    /// `Some(true)`：绑定给了持有这个密钥的被控端；`Some(false)`：绑定给了别人；`None`：没有绑定
-    pub fn check(&self, code: u32, secret: &[u8; 16]) -> Option<bool> {
-        self.hash(code)
-            .map(|h| h.as_slice() == secret_hash(secret).as_slice())
-    }
-
-    /// 绑定（或者刷新最后在线时间）
-    pub fn bind(&mut self, code: u32, secret: &[u8; 16]) {
-        let r = self
-            .db
-            .prepare_cached(
-                "INSERT INTO fixed_codes (code, secret_hash, last_seen) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (code) DO UPDATE SET secret_hash = excluded.secret_hash, last_seen = excluded.last_seen",
-            )
-            .and_then(|mut s| s.execute(params![code, secret_hash(secret).as_slice(), now()]));
-        or_log(r, "save a code", 0);
-    }
-
-    /// 刷新最后在线时间（被控端断开时）
-    pub fn touch(&mut self, code: u32) {
-        let r = self
-            .db
-            .prepare_cached("UPDATE fixed_codes SET last_seen = ?2 WHERE code = ?1")
-            .and_then(|mut s| s.execute(params![code, now()]));
-        or_log(r, "update a code", 0);
-    }
-
-    pub fn remove(&mut self, code: u32) -> bool {
-        let r = self
-            .db
-            .prepare_cached("DELETE FROM fixed_codes WHERE code = ?1")
-            .and_then(|mut s| s.execute([code]));
-        or_log(r, "remove a code", 0) > 0
-    }
-
-    /// 清理很久没有上线的绑定（`online` 的控制码正在线上，跳过）
-    pub fn expire(&mut self, online: impl Fn(u32) -> bool) {
-        let limit = now() - BINDING_TTL.as_secs() as i64;
-        let r = (|| -> rusqlite::Result<usize> {
-            let tx = self.db.transaction()?;
-            let old: Vec<u32> = tx
-                .prepare_cached("SELECT code FROM fixed_codes WHERE last_seen < ?1")?
-                .query_map([limit], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            let mut n = 0;
-            for code in old.into_iter().filter(|c| !online(*c)) {
-                n += tx.execute("DELETE FROM fixed_codes WHERE code = ?1", [code])?;
+fn writer(mut db: Connection, store: Arc<Store>) {
+    loop {
+        let batch = {
+            let mut s = store.state.lock().unwrap();
+            while s.dirty.is_empty() && !s.stop {
+                s = store.cv.wait(s).unwrap();
             }
-            tx.commit()?;
-            Ok(n)
+            if s.dirty.is_empty() && s.stop {
+                break;
+            }
+            s.writing = true;
+            std::mem::take(&mut s.dirty)
+        };
+        let result = (|| -> rusqlite::Result<()> {
+            let tx = db.transaction()?;
+            for (code, binding) in &batch {
+                match binding {
+                    Some(b) => {
+                        tx.execute(
+                        "INSERT INTO fixed_codes (code, secret_hash, last_seen) VALUES (?1, ?2, ?3)
+                         ON CONFLICT (code) DO UPDATE SET secret_hash = excluded.secret_hash, last_seen = excluded.last_seen",
+                        params![code, &b.hash, b.last_seen])?;
+                    }
+                    None => {
+                        tx.execute("DELETE FROM fixed_codes WHERE code = ?1", [code])?;
+                    }
+                }
+            }
+            tx.commit()
         })();
-        let n = or_log(r, "expire old codes", 0);
-        if n > 0 {
-            info!("{n} fixed control code(s) expired");
+        let failed = result.is_err();
+        let mut s = store.state.lock().unwrap();
+        s.writing = false;
+        if let Err(e) = result {
+            warn!("fixed control codes: persistence failed, retaining bindings and retrying: {e}");
+            if s.stop {
+                store.cv.notify_all();
+                break;
+            }
+            for (code, b) in batch {
+                s.dirty.entry(code).or_insert(b);
+            }
+        }
+        store.cv.notify_all();
+        drop(s);
+        if failed {
+            std::thread::sleep(Duration::from_millis(250));
         }
     }
 }
-
+impl Bindings {
+    pub fn open(path: Option<&Path>) -> Self {
+        let Some(path) = path else {
+            return Self {
+                entries: HashMap::new(),
+                store: None,
+            };
+        };
+        let loaded = open(path)
+            .and_then(|db| Ok((load(&db)?, db)))
+            .with_context(|| format!("can't open {}", path.display()));
+        match loaded {
+            Ok((entries, db)) => {
+                info!(
+                    "{} fixed control code(s) in {}",
+                    entries.len(),
+                    path.display()
+                );
+                let store = Arc::new(Store::default());
+                let worker = store.clone();
+                std::thread::Builder::new()
+                    .name("airhand-codes".into())
+                    .spawn(move || writer(db, worker))
+                    .expect("spawn code persistence worker");
+                Self {
+                    entries,
+                    store: Some(store),
+                }
+            }
+            Err(e) => {
+                error!("{e:#}; fixed codes are only kept in memory until restart");
+                Self {
+                    entries: HashMap::new(),
+                    store: None,
+                }
+            }
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn contains(&self, code: u32) -> bool {
+        self.entries.contains_key(&code)
+    }
+    pub fn check(&self, code: u32, secret: &[u8; 16]) -> Option<bool> {
+        self.entries
+            .get(&code)
+            .map(|b| b.hash.as_slice() == secret_hash(secret))
+    }
+    fn persist(&self, code: u32) {
+        if let Some(store) = &self.store {
+            store
+                .state
+                .lock()
+                .unwrap()
+                .dirty
+                .insert(code, self.entries.get(&code).cloned());
+            store.cv.notify_one();
+        }
+    }
+    pub fn bind(&mut self, code: u32, secret: &[u8; 16]) {
+        self.entries.insert(
+            code,
+            Binding {
+                hash: secret_hash(secret).to_vec(),
+                last_seen: now(),
+            },
+        );
+        self.persist(code);
+    }
+    pub fn touch(&mut self, code: u32) {
+        if let Some(b) = self.entries.get_mut(&code) {
+            b.last_seen = now();
+            self.persist(code);
+        }
+    }
+    pub fn remove(&mut self, code: u32) -> bool {
+        let removed = self.entries.remove(&code).is_some();
+        if removed {
+            self.persist(code);
+        }
+        removed
+    }
+    pub fn expire(&mut self, online: impl Fn(u32) -> bool) {
+        let limit = now() - BINDING_TTL.as_secs() as i64;
+        let old: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(code, b)| b.last_seen < limit && !online(**code))
+            .map(|(code, _)| *code)
+            .collect();
+        for code in old {
+            self.remove(code);
+        }
+    }
+    /// Clone a barrier while holding the broker lock, then wait OUTSIDE it on
+    /// a blocking worker. Used at orderly shutdown (and persistence tests).
+    pub fn flush_barrier(&self) -> impl FnOnce(Duration) -> bool + Send + 'static {
+        let store = self.store.clone();
+        move |timeout| {
+            let Some(store) = store else {
+                return true;
+            };
+            let deadline = Instant::now() + timeout;
+            let mut s = store.state.lock().unwrap();
+            while s.writing || !s.dirty.is_empty() {
+                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                    return false;
+                };
+                s = store.cv.wait_timeout(s, left).unwrap().0;
+            }
+            true
+        }
+    }
+}
+impl Drop for Bindings {
+    fn drop(&mut self) {
+        if let Some(store) = &self.store {
+            store.state.lock().unwrap().stop = true;
+            store.cv.notify_one();
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    fn temp() -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!("airhand-codes-test-{:016x}", rand::random::<u64>()))
+            .join("airhand.db")
+    }
     #[test]
     fn roundtrip_and_expiry() {
-        let dir =
-            std::env::temp_dir().join(format!("airhand-codes-test-{:016x}", rand::random::<u64>()));
-        let path = dir.join("airhand.db");
+        let path = temp();
         let mut b = Bindings::open(Some(&path));
-        b.bind(123_456, &[1; 16]);
-        b.bind(654_321, &[2; 16]);
-        b.db.execute(
-            "UPDATE fixed_codes SET last_seen = 1 WHERE code = 654321",
-            [],
-        )
-        .unwrap();
+        b.bind(123456, &[1; 16]);
+        b.bind(654321, &[2; 16]);
+        b.entries.get_mut(&654321).unwrap().last_seen = 1;
+        b.persist(654321);
+        assert!(b.flush_barrier()(Duration::from_secs(5)));
         drop(b);
-
-        // 重新打开（服务器重启）
-        let mut again = Bindings::open(Some(&path));
-        assert_eq!(again.len(), 2);
-        assert_eq!(again.check(123_456, &[1; 16]), Some(true));
-        assert_eq!(again.check(123_456, &[2; 16]), Some(false));
-        assert_eq!(again.check(111_111, &[1; 16]), None);
-
-        // 过期的绑定被清理，正在线上的不清理
-        again.expire(|c| c == 999_999);
-        assert!(again.contains(123_456) && !again.contains(654_321));
-        again.bind(999_999, &[3; 16]);
-        again
-            .db
-            .execute(
-                "UPDATE fixed_codes SET last_seen = 1 WHERE code = 999999",
-                [],
-            )
-            .unwrap();
-        again.expire(|c| c == 999_999);
-        assert!(again.contains(999_999));
-
-        // 重新绑定（换了密钥）、删除
-        again.bind(999_999, &[4; 16]);
-        assert_eq!(again.check(999_999, &[4; 16]), Some(true));
-        assert!(again.remove(123_456));
-        assert!(!again.remove(123_456));
-        drop(again);
-        let last = Bindings::open(Some(&path));
-        assert!(!last.contains(123_456) && last.contains(999_999));
-        drop(last);
-        let _ = std::fs::remove_dir_all(dir);
+        let mut b = Bindings::open(Some(&path));
+        assert_eq!(b.len(), 2);
+        assert_eq!(b.check(123456, &[1; 16]), Some(true));
+        assert_eq!(b.check(123456, &[2; 16]), Some(false));
+        b.expire(|_| false);
+        assert!(!b.contains(654321));
+        b.remove(123456);
+        b.bind(123456, &[3; 16]); // latest write wins, including remove/rebind
+        assert!(b.flush_barrier()(Duration::from_secs(5)));
+        let again = Bindings::open(Some(&path));
+        assert_eq!(again.check(123456, &[3; 16]), Some(true));
+        assert_eq!(again.len(), 1);
     }
-
-    /// 更新的服务器建的数据库：不碰它，只在内存里记
+    #[test]
+    fn locked_database_does_not_block_broker_or_lose_ownership() {
+        let path = temp();
+        let mut b = Bindings::open(Some(&path));
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let start = Instant::now();
+        b.bind(123456, &[1; 16]);
+        assert_eq!(b.check(123456, &[2; 16]), Some(false));
+        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(!b.flush_barrier()(Duration::from_millis(20)));
+        db.execute_batch("ROLLBACK").unwrap();
+        assert!(b.flush_barrier()(Duration::from_secs(6)));
+    }
     #[test]
     fn newer_schema_is_left_alone() {
-        let dir =
-            std::env::temp_dir().join(format!("airhand-codes-test-{:016x}", rand::random::<u64>()));
-        let path = dir.join("airhand.db");
-        std::fs::create_dir_all(&dir).unwrap();
+        let path = temp();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         Connection::open(&path)
             .unwrap()
-            .execute_batch("PRAGMA user_version = 99;")
+            .execute_batch("PRAGMA user_version = 99")
             .unwrap();
         let mut b = Bindings::open(Some(&path));
-        b.bind(123_456, &[1; 16]);
-        assert!(b.contains(123_456));
-        drop(b);
+        b.bind(123456, &[1; 16]);
+        assert!(b.contains(123456));
         let v: i64 = Connection::open(&path)
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, 99);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

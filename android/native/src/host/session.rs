@@ -13,12 +13,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use airhand_link::tasks::OwnedTask;
+use airhand_link::transport::{SessionStreams, open_session, write_lane};
 use airhand_proto::framing::{self, read_msg};
 use airhand_proto::session::{
     ByeReason, ControllerMsg, HostHello, HostMsg, Notice, Platform, QualitySettings,
 };
-use airhand_proto::{MAX_SESSION_MSG, Role, SessionHeader};
-use anyhow::{Context, Result, anyhow};
+use airhand_proto::{MAX_SESSION_MSG, Role};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use quinn::Connection;
 use serde_json::json;
@@ -58,56 +60,61 @@ async fn until(deadline: Option<tokio::time::Instant>) {
     }
 }
 
+/// The parent JoinSet may cancel us at any await (network loss/new code/stop).
+/// Cleanup must therefore be owned, not just statements after the main loop.
+struct SessionGuard {
+    shared: Arc<Shared>,
+    id: u64,
+}
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.shared.take_pending(self.id);
+        self.shared.video.remove(self.id);
+        self.shared.audio.unsubscribe(self.id);
+        self.shared
+            .event(json!({ "type": "input", "events": ["ReleaseAll"] }));
+    }
+}
+
 pub async fn run(
     conn: Connection,
     session_id: u64,
     mut kick: watch::Receiver<ByeReason>,
     shared: Arc<Shared>,
 ) -> Result<()> {
-    let (mut send, mut recv) = conn
-        .open_bi()
-        .await
-        .context("can't open the session stream")?;
-    send.write_all(
-        &SessionHeader {
-            session_id,
-            role: Role::Host,
-        }
-        .encode(),
-    )
-    .await?;
+    let guard = SessionGuard {
+        shared: shared.clone(),
+        id: session_id,
+    };
+    let SessionStreams {
+        control: (send, mut recv),
+        video: (video_send, _video_recv),
+        audio: (audio_send, _audio_recv),
+    } = open_session(&conn, session_id, Role::Host).await?;
 
-    // 控制类小消息走优先队列，声音其次，画面最后（与桌面版相同）
-    let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<Bytes>();
-    let (audio_tx, mut audio_rx) = mpsc::channel::<Bytes>(audio::QUEUE);
-    let (video_tx, mut video_rx) = mpsc::channel::<Bytes>(video::QUEUE);
+    // Independent bounded queues and streams, shared with the desktop transport.
+    let (ctl_tx, ctl_rx) = mpsc::channel::<Bytes>(32);
+    let (audio_tx, audio_rx) = mpsc::channel::<Bytes>(audio::QUEUE);
+    let (video_tx, video_rx) = mpsc::channel::<Bytes>(video::QUEUE);
     let mut video_tx = Some(video_tx);
     let mut bcast = shared.broadcast.subscribe();
     let ctl = |m: &HostMsg| -> Result<()> {
         ctl_tx
-            .send(Bytes::from(framing::encode(m)?))
+            .try_send(Bytes::from(framing::encode(m)?))
             .map_err(|_| anyhow!("the session is closed"))
     };
 
-    let writer = tokio::spawn(async move {
-        loop {
-            let buf = tokio::select! {
-                biased;
-                Some(b) = ctl_rx.recv() => b,
-                Some(b) = audio_rx.recv() => b,
-                Some(b) = video_rx.recv() => b,
-                else => break,
-            };
-            if send.write_chunk(buf).await.is_err() {
-                break;
-            }
-        }
-        let _ = send.finish();
-    });
+    let mut writer = OwnedTask(tokio::spawn(async move {
+        tokio::try_join!(
+            write_lane(send, ctl_rx),
+            write_lane(video_send, video_rx),
+            write_lane(audio_send, audio_rx)
+        )
+    }));
 
     // 读任务：read_msg 不是取消安全的，单独放在一个任务里
     let (in_tx, mut in_rx) = mpsc::channel::<ControllerMsg>(64);
-    let reader = tokio::spawn(async move {
+    let mut reader = OwnedTask(tokio::spawn(async move {
         let mut buf = Vec::with_capacity(1024);
         loop {
             match read_msg::<_, ControllerMsg>(&mut recv, MAX_SESSION_MSG, &mut buf).await {
@@ -120,7 +127,7 @@ pub async fn run(
                 Err(e) => return Err(anyhow!(e)),
             }
         }
-    });
+    }));
 
     // 同意之前收到的设置，同意之后再生效
     let mut settings: Option<QualitySettings> = None;
@@ -274,13 +281,14 @@ pub async fn run(
                 b = bcast.recv() => match b {
                     // 同意之前不转发（Hello 里会带上那时的状态）
                     Ok(b) => if is_open {
-                        ctl_tx.send(b).map_err(|_| anyhow!("the session is closed"))?;
+                        ctl_tx.try_send(b).map_err(|_| anyhow!("session control queue overflow"))?;
                     },
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(session_id, n, "missed broadcast messages");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
+                r = &mut writer.0 => return Err(anyhow!("session writer ended: {r:?}")),
                 _ = watchdog.tick() => {
                     if last_msg.elapsed() > PEER_TIMEOUT {
                         anyhow::bail!("the controller stopped responding");
@@ -292,18 +300,17 @@ pub async fn run(
     }
     .await;
 
-    shared.take_pending(session_id);
-    shared.video.remove(session_id);
-    shared.audio.unsubscribe(session_id);
-    // 松开可能还按着的手指 / 按键
-    shared.event(json!({ "type": "input", "events": ["ReleaseAll"] }));
+    drop(guard);
+    drop(video_tx);
     drop(audio_tx);
     drop(ctl_tx);
     reader.abort();
     // 等写任务把已排队的数据（例如 Bye）发完
-    let _ = tokio::time::timeout(Duration::from_secs(1), writer).await;
+    if !writer.is_finished() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer.0).await;
+    }
     let result = match result {
-        Ok(()) => match reader.await {
+        Ok(()) => match (&mut reader.0).await {
             Ok(Err(e)) => Err(e),
             _ => Ok(()),
         },
@@ -314,4 +321,63 @@ pub async fn run(
         Err(e) => warn!(session_id, "session failed: {e:#}"),
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{Host, HostConfig};
+    #[tokio::test]
+    async fn cancellation_releases_subscriptions_and_pending_approval() {
+        let cfg: HostConfig = serde_json::from_value(json!({
+            "server": "127.0.0.1:1", "fingerprint": "", "name": "test", "os": "test",
+            "version": "test", "reclaim": null, "displays": [], "codecs": ["H264"],
+            "input": false, "approval": true
+        }))
+        .unwrap();
+        let host = Host::start(cfg).unwrap();
+        let sh = host.shared.clone();
+        let (video_tx, _video_rx) = mpsc::channel(video::QUEUE);
+        let (audio_tx, _audio_rx) = mpsc::channel(audio::QUEUE);
+        let (approval_tx, approval_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = SessionGuard {
+                shared: sh.clone(),
+                id: 7,
+            };
+            sh.video.add(7, video_tx);
+            sh.audio.subscribe(7, audio_tx);
+            sh.add_pending(7, approval_tx);
+            for i in 0..3 {
+                sh.video.push(
+                    &[1],
+                    i == 0,
+                    false,
+                    0,
+                    airhand_proto::session::Codec::AV1,
+                    8,
+                    8,
+                );
+            }
+            ready_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready_rx.await.unwrap();
+        assert!(!host.shared.video.wait_window(Duration::ZERO));
+        task.abort();
+        let _ = task.await;
+        assert!(approval_rx.await.is_err());
+        assert!(host.shared.video.wait_window(Duration::ZERO));
+        let mut video_off = false;
+        let mut audio_off = false;
+        while let Some(event) = host.poll_event(Duration::ZERO) {
+            let v: serde_json::Value = serde_json::from_str(&event).unwrap();
+            if v["active"] == false {
+                video_off |= v["type"] == "video";
+                audio_off |= v["type"] == "audio";
+            }
+        }
+        assert!(video_off && audio_off);
+    }
 }

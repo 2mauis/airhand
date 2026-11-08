@@ -9,9 +9,10 @@
 //! Kotlin 的渲染线程每一轮调用 [`VideoHub::tick`]：设置变了（帧率、分辨率上限、编码格式、码率）
 //! 或者需要关键帧时返回一个 JSON，见 [`Tick`]。
 
-use std::collections::{HashMap, VecDeque};
+use airhand_link::flow::{Abr, FlowState as Flow};
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use airhand_proto::framing;
 use airhand_proto::session::{Codec, HostMsg, QualitySettings, VideoFrame};
@@ -101,7 +102,7 @@ impl VideoHub {
             id,
             Out {
                 tx,
-                flow: Flow::new(),
+                flow: Flow::default(),
                 need_key: true,
             },
         );
@@ -178,7 +179,14 @@ impl VideoHub {
 
     /// 等到所有会话的在途帧都低于窗口。返回 false 表示超时（算一次阻塞，自适应码率据此下调）
     pub fn wait_window(&self, timeout: Duration) -> bool {
-        let st = self.st.lock().unwrap();
+        let mut st = self.st.lock().unwrap();
+        // Defensive cleanup as well as the session's RAII guard: a closed
+        // transport can never acknowledge any outstanding frames.
+        let was_active = !st.sessions.is_empty();
+        st.sessions.retain(|_, o| !o.tx.is_closed());
+        if was_active && st.sessions.is_empty() {
+            self.report_active(false);
+        }
         let fps = st.settings.fps;
         let (mut st, _) = self
             .cv
@@ -301,150 +309,6 @@ impl State {
     }
 }
 
-// ───────────────────────────── 在途帧控制（与桌面版相同） ─────────────────────────────
-
-struct Flow {
-    sent: u32,
-    acked: u32,
-    pending: VecDeque<(u32, Instant)>,
-    srtt_ms: f64,
-    /// 近 10 秒的最小 RTT（基础时延）
-    min_rtt: (f64, Instant),
-}
-
-impl Flow {
-    fn new() -> Self {
-        Self {
-            sent: 0,
-            acked: 0,
-            pending: VecDeque::new(),
-            srtt_ms: 0.0,
-            min_rtt: (f64::MAX, Instant::now()),
-        }
-    }
-
-    fn on_sent(&mut self, seq: u32) {
-        if self.pending.is_empty() {
-            // 序号是所有会话共用的：这个会话没收到的序号都当作已确认
-            self.acked = seq.wrapping_sub(1);
-        }
-        self.sent = seq;
-        self.pending.push_back((seq, Instant::now()));
-        if self.pending.len() > 256 {
-            self.pending.pop_front();
-        }
-    }
-
-    fn on_ack(&mut self, seq: u32) {
-        if seq.wrapping_sub(self.acked) as i32 <= 0 || seq.wrapping_sub(self.sent) as i32 > 0 {
-            return;
-        }
-        self.acked = seq;
-        let now = Instant::now();
-        while let Some(&(s, t)) = self.pending.front() {
-            if s.wrapping_sub(seq) as i32 > 0 {
-                break;
-            }
-            self.pending.pop_front();
-            if s == seq {
-                let rtt = now.duration_since(t).as_secs_f64() * 1000.0;
-                self.srtt_ms = if self.srtt_ms == 0.0 {
-                    rtt
-                } else {
-                    self.srtt_ms * 0.875 + rtt * 0.125
-                };
-                if rtt < self.min_rtt.0
-                    || now.duration_since(self.min_rtt.1) > Duration::from_secs(10)
-                {
-                    self.min_rtt = (rtt, now);
-                }
-            }
-        }
-    }
-
-    /// 已发送、未确认的帧数（序号是所有会话共用的，这个会话跳过的帧不算）
-    fn inflight(&self) -> u32 {
-        self.pending.len() as u32
-    }
-
-    /// 窗口 = 基础时延内可发出的帧数 + 2，限制在 [2, 8]
-    fn window(&self, fps: u8) -> u32 {
-        if self.min_rtt.0 == f64::MAX {
-            return 3;
-        }
-        let frames = (self.min_rtt.0 / 1000.0 * fps as f64).ceil() as u32 + 2;
-        frames.clamp(2, 8)
-    }
-
-    fn rtt(&self) -> (f64, f64) {
-        (
-            self.srtt_ms,
-            if self.min_rtt.0 == f64::MAX {
-                0.0
-            } else {
-                self.min_rtt.0
-            },
-        )
-    }
-}
-
-// ───────────────────────────── 自适应码率（与桌面版相同） ─────────────────────────────
-
-struct Abr {
-    target: u32,
-    current: u32,
-    blocked: u32,
-    window_start: Instant,
-    calm_since: Instant,
-}
-
-impl Abr {
-    fn new(target: u32) -> Self {
-        Self {
-            target,
-            current: target,
-            blocked: 0,
-            window_start: Instant::now(),
-            calm_since: Instant::now(),
-        }
-    }
-
-    fn reset(&mut self, target: u32) {
-        *self = Self::new(target);
-    }
-
-    fn floor(&self) -> u32 {
-        (self.target / 6).max(300).min(self.target)
-    }
-
-    fn tick(&mut self, srtt: f64, min_rtt: f64) {
-        let now = Instant::now();
-        if now.duration_since(self.window_start) < Duration::from_secs(1) {
-            return;
-        }
-        let congested = self.blocked >= 3 || (min_rtt > 0.0 && srtt > min_rtt * 2.0 + 60.0);
-        if congested {
-            let next = ((self.current as f64) * 0.75) as u32;
-            self.current = next.max(self.floor());
-            self.calm_since = now;
-            debug!(
-                kbps = self.current,
-                srtt,
-                min_rtt,
-                blocked = self.blocked,
-                "network congested, lowering the bitrate"
-            );
-        } else if now.duration_since(self.calm_since) > Duration::from_secs(3)
-            && self.current < self.target
-        {
-            self.current = ((self.current as f64 * 1.12) as u32 + 100).min(self.target);
-            self.calm_since = now - Duration::from_secs(2);
-        }
-        self.blocked = 0;
-        self.window_start = now;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +427,21 @@ mod tests {
         assert!(rx.try_recv().is_err());
         hub.push(&[4], true, false, 0, Codec::AV1, 8, 8);
         assert_eq!(decode(&rx.try_recv().unwrap()).data, [4]);
+    }
+
+    #[test]
+    fn closed_subscriber_cannot_block_new_session() {
+        let (hub, _) = hub();
+        let (tx, rx) = mpsc::channel(QUEUE);
+        hub.add(1, tx);
+        for i in 0..3 {
+            hub.push(&[1], i == 0, false, 0, Codec::AV1, 8, 8);
+        }
+        assert!(!hub.wait_window(Duration::ZERO));
+        drop(rx);
+        let (tx, _rx) = mpsc::channel(QUEUE);
+        hub.add(2, tx);
+        assert!(hub.wait_window(Duration::ZERO));
     }
 
     #[test]

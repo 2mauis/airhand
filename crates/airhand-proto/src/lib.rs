@@ -10,9 +10,9 @@
 //! ```
 //!
 //! * 每条 QUIC 连接上客户端打开的**第一条**双向流是"控制流"，承载 [`signal`] 消息。
-//! * 之后每建立一个远控会话，双方各自打开一条新的双向流，先写入 [`SessionHeader`]，
-//!   服务器据此把两条流配对，然后**零拷贝透传**（服务器不解析画面数据）。
-//! * 会话流上承载 [`session`] 消息。
+//! * 每个远控会话双方各打开三条双向流（控制、视频、音频），先写入 [`SessionHeader`]。
+//!   服务器按会话 ID 和 [`SessionLane`] 配对，然后**零拷贝透传**，不解析画面数据。
+//! * 三条流承载 [`session`] 消息，各自有序；跨流没有顺序保证，音画用采集时间同步。
 //!
 //! 所有消息使用 `u32 LE 长度前缀 + postcard` 编码，紧凑且解析极快。
 
@@ -23,7 +23,7 @@ pub mod signal;
 /// 协议版本，服务器与客户端不一致时拒绝连接（见 [`signal`] 模块的"版本握手"）。
 ///
 /// 任何不兼容的改动（增删字段、调整枚举变体顺序……）都要把它加 1。
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 
 /// QUIC ALPN 标识。与版本握手一样永远不变，否则旧客户端连 TLS 握手都过不了，无法得知版本不一致。
 pub const ALPN: &[u8] = b"airhand/1";
@@ -49,15 +49,29 @@ pub enum Role {
     Controller,
 }
 
-/// 会话流头部（固定 13 字节）：`magic[4] | session_id u64 LE | role u8`。
+/// Three independent ordered streams per session. Video loss/backpressure must
+/// not block audio or control messages. Values are fixed wire identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SessionLane {
+    Control = 0,
+    Video = 1,
+    Audio = 2,
+}
+impl SessionLane {
+    pub const ALL: [Self; 3] = [Self::Control, Self::Video, Self::Audio];
+}
+
+/// 会话流头部（固定 14 字节）：`magic[4] | session_id u64 LE | role u8 | lane u8`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionHeader {
     pub session_id: u64,
     pub role: Role,
+    pub lane: SessionLane,
 }
 
 impl SessionHeader {
-    pub const LEN: usize = 13;
+    pub const LEN: usize = 14;
 
     pub fn encode(&self) -> [u8; Self::LEN] {
         let mut b = [0u8; Self::LEN];
@@ -67,6 +81,7 @@ impl SessionHeader {
             Role::Host => 1,
             Role::Controller => 2,
         };
+        b[13] = self.lane as u8;
         b
     }
 
@@ -80,7 +95,17 @@ impl SessionHeader {
             2 => Role::Controller,
             _ => return None,
         };
-        Some(Self { session_id, role })
+        let lane = match b[13] {
+            0 => SessionLane::Control,
+            1 => SessionLane::Video,
+            2 => SessionLane::Audio,
+            _ => return None,
+        };
+        Some(Self {
+            session_id,
+            role,
+            lane,
+        })
     }
 }
 
@@ -112,10 +137,14 @@ mod tests {
         let h = SessionHeader {
             session_id: 0xdead_beef_1234,
             role: Role::Controller,
+            lane: SessionLane::Video,
         };
         assert_eq!(SessionHeader::decode(&h.encode()), Some(h));
         let mut bad = h.encode();
         bad[0] = b'X';
+        assert_eq!(SessionHeader::decode(&bad), None);
+        let mut bad = h.encode();
+        bad[13] = 3;
         assert_eq!(SessionHeader::decode(&bad), None);
     }
 

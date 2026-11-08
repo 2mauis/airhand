@@ -106,7 +106,7 @@ pub struct Signal {
 
 pub fn transport_config() -> TransportConfig {
     let mut t = TransportConfig::default();
-    t.max_concurrent_bidi_streams(VarInt::from_u32(64));
+    t.max_concurrent_bidi_streams(VarInt::from_u32(256)); // 3 lanes per session + signaling
     t.max_concurrent_uni_streams(VarInt::from_u32(0));
     // 短保活间隔：既能防止 NAT 映射过期，也能让掉线在 10 秒内被发现并重连
     t.max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));

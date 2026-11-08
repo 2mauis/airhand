@@ -459,6 +459,11 @@ async fn ctrl_audio(
 }
 
 #[tauri::command]
+async fn ctrl_ack(state: tauri::State<'_, AppState>, sid: u32, seq: u32) -> Result<(), Problem> {
+    state.controller()?.ack(sid, seq)
+}
+
+#[tauri::command]
 async fn ctrl_input(
     state: tauri::State<'_, AppState>,
     sid: u32,
@@ -560,6 +565,7 @@ pub fn run() {
             server_status,
             ctrl_connect,
             ctrl_input,
+            ctrl_ack,
             ctrl_settings,
             ctrl_keyframe,
             ctrl_display,

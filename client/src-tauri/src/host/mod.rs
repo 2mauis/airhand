@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use airhand_link::ServerState;
 use airhand_link::net::{self, Reconnect};
+use airhand_link::tasks::OwnedTask;
 use airhand_proto::framing::{read_msg, write_msg};
 use airhand_proto::session::ByeReason;
 use airhand_proto::signal::{ClientMsg, Reclaim, ServerMsg};
@@ -173,7 +174,7 @@ async fn connect_once(
             }
         }
     });
-    let _reader = AbortOnDrop(reader);
+    let _reader = OwnedTask(reader);
 
     let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
         .await
@@ -251,12 +252,5 @@ async fn connect_once(
             }
             reason = sig.conn.closed() => bail!(reason),
         }
-    }
-}
-
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }

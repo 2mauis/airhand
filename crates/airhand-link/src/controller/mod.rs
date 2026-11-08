@@ -11,6 +11,7 @@
 //! 被控端重新上线时服务器通知，本服务调用 [`HostOnline`]，控制台这时再连一次即可，等待期间不需要反复尝试。
 //! 与服务器的连接断过之后服务器不再记得谁在等谁，控制台在重新连上服务器时再连一次（还不在线的话会重新登记）。
 
+mod queue;
 mod session;
 
 use std::collections::HashMap;
@@ -20,12 +21,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::transport::{HostReceiver, open_session};
 use airhand_proto::framing::{read_msg, write_msg};
 use airhand_proto::session::{
     ControllerHello, ControllerMsg, InputEvent, MAX_CLIPBOARD_TEXT, QualitySettings,
 };
 use airhand_proto::signal::{ClientMsg, ConnectError, ResumeToken, ServerMsg, SessionGrant};
-use airhand_proto::{MAX_SIGNAL_MSG, Role, SessionHeader};
+use airhand_proto::{MAX_SIGNAL_MSG, Role};
 use anyhow::{Result, anyhow};
 use quinn::Connection;
 use serde::Serialize;
@@ -51,7 +53,7 @@ pub trait ClipboardSync: Send + 'static {
 
 /// 控制台在哪里。
 pub enum Frontend {
-    /// 桌面控制台，与本服务在同一台电脑上：收到画面立即确认，并同步这台电脑的剪贴板
+    /// 桌面控制台：由 WebView 收到画面后确认，并同步这台电脑的剪贴板
     Desktop {
         clipboard: Box<dyn ClipboardSync>,
         /// 是否同步剪贴板（之后可用 [`ControllerService::set_clipboard_sync`] 切换）
@@ -74,12 +76,12 @@ type Pending = Arc<Mutex<HashMap<u32, oneshot::Sender<Result<SessionGrant, Conne
 #[derive(Clone)]
 struct Live {
     conn: Connection,
-    tx: mpsc::UnboundedSender<ClientMsg>,
+    tx: mpsc::Sender<ClientMsg>,
     pending: Pending,
 }
 
 struct SessionHandle {
-    tx: mpsc::UnboundedSender<ControllerMsg>,
+    tx: queue::Sender,
     task: AbortHandle,
     /// 桌面版：是否同步剪贴板
     clipboard: Option<Arc<AtomicBool>>,
@@ -155,9 +157,23 @@ impl ControllerService {
             .ok_or(Problem::NotConnected)?;
         let req_id = self.inner.next_req.fetch_add(1, Ordering::Relaxed);
         let (otx, orx) = oneshot::channel();
-        live.pending.lock().unwrap().insert(req_id, otx);
+        {
+            let mut pending = live.pending.lock().unwrap();
+            if pending.len() >= 64 {
+                return Err(Problem::failed("too many pending connections"));
+            }
+            pending.insert(req_id, otx);
+        }
+        // Also remove cancelled requests, not just requests that time out.
+        struct RequestGuard(Pending, u32);
+        impl Drop for RequestGuard {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().remove(&self.1);
+            }
+        }
+        let _request = RequestGuard(live.pending.clone(), req_id);
         live.tx
-            .send(ClientMsg::Connect {
+            .try_send(ClientMsg::Connect {
                 req_id,
                 code,
                 resume,
@@ -173,13 +189,11 @@ impl ControllerService {
             }
         };
 
-        let (mut send, recv) = live.conn.open_bi().await.map_err(Problem::failed)?;
-        let header = SessionHeader {
-            session_id: grant.session_id,
-            role: Role::Controller,
-        }
-        .encode();
-        send.write_all(&header).await.map_err(Problem::failed)?;
+        let streams = open_session(&live.conn, grant.session_id, Role::Controller)
+            .await
+            .map_err(Problem::failed)?;
+        let (mut send, recv) = streams.control;
+        let recv = HostReceiver::new(recv, streams.video, streams.audio);
         let hello = ControllerMsg::Hello(ControllerHello {
             device: self.inner.device,
         });
@@ -191,7 +205,7 @@ impl ControllerService {
             .map_err(Problem::failed)?;
 
         let sid = self.inner.next_sid.fetch_add(1, Ordering::Relaxed) + 1;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = queue::channel();
         let (mode, clipboard) = match frontend {
             Frontend::Desktop { clipboard, sync } => {
                 let enabled = Arc::new(AtomicBool::new(sync));
@@ -211,11 +225,14 @@ impl ControllerService {
         };
         let inner = self.inner.clone();
         let tx2 = tx.clone();
+        // Hold the registry lock until insertion; a fast EOF must not remove a
+        // not-yet-inserted entry and leave a dead handle behind.
+        let mut sessions = self.inner.sessions.lock().unwrap();
         let handle = self.inner.rt.spawn(async move {
             session::run(sid, io, tx2, rx).await;
             inner.sessions.lock().unwrap().remove(&sid);
         });
-        self.inner.sessions.lock().unwrap().insert(
+        sessions.insert(
             sid,
             SessionHandle {
                 tx,
@@ -236,7 +253,7 @@ impl ControllerService {
     fn send(&self, sid: u32, msg: ControllerMsg) -> Result<(), Problem> {
         let sessions = self.inner.sessions.lock().unwrap();
         let s = sessions.get(&sid).ok_or(Problem::NoSession)?;
-        s.tx.send(msg).map_err(|_| Problem::SessionEnded)
+        s.tx.send(msg)
     }
 
     pub fn input(&self, sid: u32, events: Vec<InputEvent>) -> Result<(), Problem> {
@@ -259,7 +276,7 @@ impl ControllerService {
         self.send(sid, ControllerMsg::Audio { enabled })
     }
 
-    /// 浏览器收到了这一帧（[`Frontend::Browser`]）。确认是累积的：确认第 n 帧也就确认了之前所有的帧
+    /// 前端收到了这一帧（桌面 WebView / 浏览器 / Android）。确认是累积的。
     pub fn ack(&self, sid: u32, seq: u32) -> Result<(), Problem> {
         self.send(sid, ControllerMsg::Ack { seq })
     }
@@ -331,7 +348,7 @@ async fn run(inner: Arc<Inner>, report: Report) {
 
 async fn connect_once(inner: &Arc<Inner>, report: &Report) -> Result<()> {
     let sig = net::connect_signal(&inner.cfg, Role::Controller).await?;
-    let (tx, mut rx) = mpsc::unbounded_channel::<ClientMsg>();
+    let (tx, mut rx) = mpsc::channel::<ClientMsg>(64);
     let pending: Pending = Arc::default();
     *inner.live.lock().unwrap() = Some(Live {
         conn: sig.conn.clone(),

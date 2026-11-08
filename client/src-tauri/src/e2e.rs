@@ -8,12 +8,13 @@
 
 use std::time::{Duration, Instant};
 
+use airhand_link::transport::{HostReceiver, open_session};
 use airhand_proto::framing::{read_msg, write_msg};
 use airhand_proto::session::{
     ByeReason, Codec, ControllerHello, ControllerMsg, HostMsg, InputEvent, Notice, QualitySettings,
 };
 use airhand_proto::signal::{ClientMsg, ConnectError, ServerMsg};
-use airhand_proto::{MAX_SESSION_MSG, MAX_SIGNAL_MSG, Role, SessionHeader};
+use airhand_proto::{MAX_SIGNAL_MSG, Role};
 
 use airhand_link::ServerState;
 
@@ -131,16 +132,11 @@ async fn e2e_roundtrip() {
     };
     println!("会话已授权: {} ({})", grant.host_name, grant.host_os);
 
-    let (mut send, mut recv) = sig.conn.open_bi().await.unwrap();
-    send.write_all(
-        &SessionHeader {
-            session_id: grant.session_id,
-            role: Role::Controller,
-        }
-        .encode(),
-    )
-    .await
-    .unwrap();
+    let streams = open_session(&sig.conn, grant.session_id, Role::Controller)
+        .await
+        .unwrap();
+    let (mut send, recv) = streams.control;
+    let mut recv = HostReceiver::new(recv, streams.video, streams.audio);
     // 和真正的控制端一样：先报上本次运行的标识，再发画质设置
     write_msg(
         &mut send,
@@ -220,7 +216,6 @@ async fn e2e_roundtrip() {
     let mut clip_back = false;
     let started = Instant::now();
     let mut last_ping = Instant::now() - Duration::from_secs(1);
-    let mut rbuf = Vec::new();
 
     while started.elapsed() < Duration::from_secs(8) {
         if last_ping.elapsed() > Duration::from_millis(500) {
@@ -255,13 +250,8 @@ async fn e2e_roundtrip() {
                 .await
                 .unwrap();
         }
-        let msg = match tokio::time::timeout(
-            Duration::from_secs(1),
-            read_msg::<_, HostMsg>(&mut recv, MAX_SESSION_MSG, &mut rbuf),
-        )
-        .await
-        {
-            Ok(m) => m.expect("读取会话消息").expect("会话被关闭"),
+        let msg = match tokio::time::timeout(Duration::from_secs(1), recv.recv()).await {
+            Ok(m) => m.expect("读取会话消息"),
             Err(_) => continue, // 画面静止时不会有帧
         };
         match msg {
@@ -359,9 +349,9 @@ async fn e2e_roundtrip() {
     _host.send(crate::host::HostCmd::KickAll);
     let bye = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            match read_msg::<_, HostMsg>(&mut recv, MAX_SESSION_MSG, &mut rbuf).await {
-                Ok(Some(HostMsg::Bye(reason))) => break Some(reason),
-                Ok(Some(_)) => continue,
+            match recv.recv().await {
+                Ok(HostMsg::Bye(reason)) => break Some(reason),
+                Ok(_) => continue,
                 _ => break None,
             }
         }

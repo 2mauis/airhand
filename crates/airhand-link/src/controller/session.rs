@@ -4,16 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use airhand_proto::MAX_SESSION_MSG;
-use airhand_proto::framing::{read_msg, write_msg};
+use crate::transport::HostReceiver;
 use airhand_proto::session::{
     AudioFrame, Codec, ControllerMsg, CursorState, DisplayInfo, HostMsg, Notice, Platform,
     SystemAction, VideoFrame,
 };
 use anyhow::Result;
-use quinn::{RecvStream, SendStream};
+use quinn::SendStream;
 use serde::Serialize;
-use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::{CLIPBOARD_POLL, ClipboardSync};
@@ -220,7 +218,7 @@ impl Default for Stats {
 
 pub(super) struct SessionIo {
     pub send: SendStream,
-    pub recv: RecvStream,
+    pub recv: HostReceiver,
     pub ui: Arc<dyn SessionUi>,
     pub mode: Mode,
 }
@@ -239,8 +237,8 @@ pub(super) enum Mode {
 pub(super) async fn run(
     sid: u32,
     io: SessionIo,
-    tx: mpsc::UnboundedSender<ControllerMsg>,
-    mut rx: mpsc::UnboundedReceiver<ControllerMsg>,
+    tx: super::queue::Sender,
+    mut rx: super::queue::Receiver,
 ) {
     let SessionIo {
         mut send,
@@ -252,14 +250,13 @@ pub(super) async fn run(
         Mode::Desktop { clip, enabled } => Some((clip, enabled)),
         Mode::Browser => None,
     };
-    // 桌面版收到画面立即确认；浏览器自己确认（见 Frontend::Browser）
-    let ack_here = local_clip.is_some();
-
+    // Every frontend acknowledges after its last IPC/network hop, not here.
     let writer = async move {
-        while let Some(msg) = rx.recv().await {
-            write_msg(&mut send, &msg).await?;
+        loop {
+            let bytes = rx.recv().await?;
+            tokio::time::timeout(Duration::from_secs(2), send.write_chunk(bytes)).await??;
         }
-        let _ = send.finish();
+        #[allow(unreachable_code)]
         anyhow::Ok(())
     };
 
@@ -268,22 +265,13 @@ pub(super) async fn run(
 
     let out = ui.clone();
     let st = stats.clone();
-    let ack_tx = tx.clone();
     let clip_in = local_clip.clone();
     let reader = async move {
-        let mut buf = Vec::with_capacity(256 * 1024);
         loop {
-            let Some(msg) = read_msg::<_, HostMsg>(&mut recv, MAX_SESSION_MSG, &mut buf).await?
-            else {
-                return Err(Problem::HostEnded.into());
-            };
+            let msg = recv.recv().await?;
             st.lock().unwrap().last_msg = Instant::now();
             match msg {
                 HostMsg::Video(v) => {
-                    // 收到即确认，被控端据此控制在途帧数量
-                    if ack_here {
-                        let _ = ack_tx.send(ControllerMsg::Ack { seq: v.seq });
-                    }
                     {
                         let mut s = st.lock().unwrap();
                         s.frames += 1;
@@ -384,9 +372,9 @@ pub(super) async fn run(
                 s.bytes = 0;
                 e
             };
-            let _ = out.event(event);
+            out.event(event).map_err(|_| ui_closed())?;
             // 也是保活：被控端很久收不到控制端的消息就会结束会话
-            let _ = ping_tx.send(ControllerMsg::Ping { t: now_us() });
+            ping_tx.send(ControllerMsg::Ping { t: now_us() })?;
         }
         #[allow(unreachable_code)]
         anyhow::Ok(())

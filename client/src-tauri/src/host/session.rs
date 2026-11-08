@@ -1,13 +1,17 @@
 //! 被控端的单个远控会话。
 
+use airhand_link::flow::Flow;
+use airhand_link::tasks::OwnedTask;
+use airhand_link::transport::{SessionStreams, open_session, write_lane};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use airhand_proto::framing::{self, read_msg};
 use airhand_proto::session::{
     ByeReason, ControllerMsg, DisplayInfo, HostHello, HostMsg, Notice, Platform, QualitySettings,
 };
-use airhand_proto::{MAX_SESSION_MSG, Role, SessionHeader};
-use anyhow::{Context, Result, anyhow};
+use airhand_proto::{MAX_SESSION_MSG, Role};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use quinn::Connection;
 use tokio::sync::{mpsc, watch};
@@ -61,18 +65,11 @@ pub async fn run(
     session_id: u64,
     mut kick: watch::Receiver<ByeReason>,
 ) -> Result<()> {
-    let (mut send, mut recv) = conn
-        .open_bi()
-        .await
-        .context("can't open the session stream")?;
-    send.write_all(
-        &SessionHeader {
-            session_id,
-            role: Role::Host,
-        }
-        .encode(),
-    )
-    .await?;
+    let SessionStreams {
+        control: (send, mut recv),
+        video: (video_send, _video_recv),
+        audio: (audio_send, _audio_recv),
+    } = open_session(&conn, session_id, Role::Host).await?;
 
     let (mut displays, codecs, notice) = tokio::task::spawn_blocking(|| {
         (
@@ -87,14 +84,13 @@ pub async fn run(
     let (hostname, os) = crate::sysinfo::host_identity();
     info!(session_id, displays = displays.len(), "session started");
 
-    // 视频走有界队列（背压），控制类小消息走优先队列，不会排在视频帧后面；
-    // 声音包很小、对卡顿敏感，排在控制消息之后、视频之前，队列满了直接丢
-    let (out_tx, mut out_rx) = mpsc::channel::<Bytes>(2);
-    let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<Bytes>();
-    let (audio_tx, mut audio_rx) = mpsc::channel::<Bytes>(audio::QUEUE);
+    // Independent bounded queues AND QUIC streams: video loss cannot hold up Pong/audio.
+    let (out_tx, out_rx) = mpsc::channel::<Bytes>(2);
+    let (ctl_tx, ctl_rx) = mpsc::channel::<Bytes>(32);
+    let (audio_tx, audio_rx) = mpsc::channel::<Bytes>(audio::QUEUE);
     let ctl = |m: &HostMsg| -> Result<()> {
         ctl_tx
-            .send(Bytes::from(framing::encode(m)?))
+            .try_send(Bytes::from(framing::encode(m)?))
             .map_err(|_| anyhow!("the session is closed"))
     };
     ctl(&HostMsg::Hello(HostHello {
@@ -121,26 +117,17 @@ pub async fn run(
         ctl(&HostMsg::Notice(permission_notice(missing)))?;
     }
 
-    // 写任务：所有发往控制端的数据都经过这里（Bytes 零拷贝交给 QUIC）
-    let writer = tokio::spawn(async move {
-        loop {
-            let buf = tokio::select! {
-                biased;
-                Some(b) = ctl_rx.recv() => b,
-                Some(b) = audio_rx.recv() => b,
-                Some(b) = out_rx.recv() => b,
-                else => break,
-            };
-            if send.write_chunk(buf).await.is_err() {
-                break;
-            }
-        }
-        let _ = send.finish();
-    });
+    let mut writer = OwnedTask(tokio::spawn(async move {
+        tokio::try_join!(
+            write_lane(send, ctl_rx),
+            write_lane(video_send, out_rx),
+            write_lane(audio_send, audio_rx)
+        )
+    }));
 
     // 读任务：read_msg 不是取消安全的，单独放在一个任务里，通过通道交给主循环
     let (in_tx, mut in_rx) = mpsc::channel::<ControllerMsg>(64);
-    let reader = tokio::spawn(async move {
+    let mut reader = OwnedTask(tokio::spawn(async move {
         let mut buf = Vec::with_capacity(1024);
         loop {
             match read_msg::<_, ControllerMsg>(&mut recv, MAX_SESSION_MSG, &mut buf).await {
@@ -153,11 +140,19 @@ pub async fn run(
                 Err(e) => return Err(anyhow!(e)),
             }
         }
-    });
+    }));
 
     let mut settings = QualitySettings::default();
-    let mut pipeline =
-        (!displays.is_empty()).then(|| Pipeline::start(current, settings, out_tx.clone()));
+    let flow = Arc::new(Flow::default());
+    let mut pipeline = (!displays.is_empty()).then(|| {
+        Pipeline::start(
+            current,
+            settings,
+            out_tx.clone(),
+            ctl_tx.clone(),
+            flow.clone(),
+        )
+    });
     let mut injector = Injector::new();
     let mut sound: Option<AudioSubscription> = None;
     let fallback = DisplayInfo {
@@ -190,11 +185,7 @@ pub async fn run(
                             let d = displays.get(current as usize).unwrap_or(&fallback);
                             injector.handle(&events, d);
                         }
-                        ControllerMsg::Ack { seq } => {
-                            if let Some(p) = &pipeline {
-                                p.ack(seq);
-                            }
-                        }
+                        ControllerMsg::Ack { seq } => flow.ack(seq),
                         ControllerMsg::Settings(s) => {
                             settings = s.sanitized();
                             if let Some(p) = &pipeline {
@@ -211,8 +202,8 @@ pub async fn run(
                                 current = index;
                                 injector.release_all();
                                 // 先停旧管线再启动新管线（新管线从关键帧开始）
-                                drop(pipeline.take());
-                                pipeline = Some(Pipeline::start(current, settings, out_tx.clone()));
+                                if let Some(p) = pipeline.take() { p.stop().await; }
+                                pipeline = Some(Pipeline::start(current, settings, out_tx.clone(), ctl_tx.clone(), flow.clone()));
                                 ctl(&HostMsg::Displays { displays: displays.clone(), current })?;
                             }
                         }
@@ -244,6 +235,9 @@ pub async fn run(
                     info!(session_id, ?reason, "the local user disconnected the controller");
                     ctl(&HostMsg::Bye(reason))?;
                     break;
+                }
+                r = &mut writer.0 => {
+                    return Err(anyhow!("session writer ended: {r:?}"));
                 }
                 _ = watchdog.tick() => {
                     if last_msg.elapsed() > PEER_TIMEOUT {
@@ -279,8 +273,8 @@ pub async fn run(
                         if next != current || pipeline.is_none() {
                             current = next;
                             injector.release_all();
-                            drop(pipeline.take());
-                            pipeline = Some(Pipeline::start(current, settings, out_tx.clone()));
+                            if let Some(p) = pipeline.take() { p.stop().await; }
+                            pipeline = Some(Pipeline::start(current, settings, out_tx.clone(), ctl_tx.clone(), flow.clone()));
                         }
                         ctl(&HostMsg::Displays { displays: displays.clone(), current })?;
                     }
@@ -292,16 +286,20 @@ pub async fn run(
     .await;
 
     injector.release_all();
-    drop(pipeline);
+    if let Some(p) = pipeline {
+        p.stop().await;
+    }
     drop(sound);
     drop(audio_tx);
     drop(out_tx);
     drop(ctl_tx);
     reader.abort();
     // 等待写任务把已排队的数据（例如 Bye）发完
-    let _ = tokio::time::timeout(Duration::from_secs(1), writer).await;
+    if !writer.is_finished() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer.0).await;
+    }
     let result = match result {
-        Ok(()) => match reader.await {
+        Ok(()) => match (&mut reader.0).await {
             Ok(Err(e)) => Err(e),
             _ => Ok(()),
         },

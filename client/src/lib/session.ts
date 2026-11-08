@@ -13,7 +13,6 @@ import {
   type Codec,
   type DisplayInfo,
   type InputEvent,
-  type MouseButton,
   type Problem,
   type QualitySettings,
   type ResumeToken,
@@ -22,8 +21,11 @@ import {
   type SystemAction,
 } from "./api";
 import { AudioPlayer } from "./audio";
+import { ConnectionAttempt } from "./connection-attempt";
+import { RemoteInput } from "./input";
 import { AvSync, type AvSyncStats } from "./avsync";
-import { annexBToAvc, avcC, bestCodec, codecString, codecUsable, h264NeedsAvc, markH264NeedsAvc } from "./codec";
+import { bestCodec, codecUsable } from "./codec";
+import { VideoPlayer } from "./video";
 import { t } from "./i18n";
 import { RECOVERS, type SessionNotice } from "./messages";
 import { CODEC_LABEL } from "./presets";
@@ -51,9 +53,6 @@ export interface EncoderState {
   height: number;
 }
 
-const CODEC_BY_ID: Codec[] = ["H264", "H265", "AV1"];
-const BUTTONS: MouseButton[] = ["Left", "Middle", "Right", "Back", "Forward"];
-const MOVE_INTERVAL_MS = 8;
 const BACKGROUND_FPS = 5;
 const MAX_RETRIES = 30;
 /** 等对方上线时，保险起见每隔这么久也试一次（正常情况下服务器会在对方上线时马上通知） */
@@ -66,39 +65,6 @@ const GIVE_UP = new Set<Problem["kind"]>(["codeNotFound", "rateLimited", "invali
 const NO_SERVER = new Set<Problem["kind"]>(["notConnected", "serverLost", "serverUnreachable", "consoleLost"]);
 /** 二进制包头长度，见 crates/airhand-link/src/controller/session.rs */
 const HEADER_LEN = 24;
-/** 等待显示的画面帧太多（异常情况）时全部立即解码 */
-const MAX_QUEUED_FRAMES = 120;
-/** 解码器送进去这么多帧、过了这么久还一帧都没输出，就认为本机解不了这种格式 */
-const UNDECODABLE_CHUNKS = 10;
-const UNDECODABLE_MS = 2000;
-
-/** 本机（控制端）是 macOS：键盘事件有两处和其它系统不一样，见 bindInput */
-const IS_MAC = typeof navigator !== "undefined" && /Mac/.test(navigator.platform || navigator.userAgent);
-const META_KEYS = new Set(["MetaLeft", "MetaRight"]);
-const MODIFIER_KEYS = new Set([
-  "ShiftLeft",
-  "ShiftRight",
-  "ControlLeft",
-  "ControlRight",
-  "AltLeft",
-  "AltRight",
-  "MetaLeft",
-  "MetaRight",
-  "CapsLock",
-  "Fn",
-]);
-
-interface PendingVideo {
-  key: boolean;
-  codec: Codec;
-  seq: number;
-  width: number;
-  height: number;
-  hostUs: number;
-  data: Uint8Array;
-  /** 送去解码的本地时刻 */
-  due: number;
-}
 
 let nextId = 1;
 
@@ -148,43 +114,25 @@ export class RemoteSession {
   version = 0;
   private listeners = new Set<() => void>();
 
-  private ctx: CanvasRenderingContext2D;
-  private gen = 0;
+  private readonly video: VideoPlayer;
+  private readonly attempt = new ConnectionAttempt();
   private disposed = false;
   private retryTimer: number | undefined;
   /** 控制码（数字），用来认出 hostOnline 通知 */
   private readonly codeNum: number;
   /** 重连凭证：连上过就有，重连时带上（对方换了控制码就作废） */
   private resume: ResumeToken | null = null;
-  /** start() 还没有结果 */
-  private attempting = false;
   /** 最近一次开始连接、最近一次收到对方上线通知的时刻 */
   private attemptAt = 0;
   private onlineAt = -1;
 
-  // 解码
-  private decoder: VideoDecoder | null = null;
-  private decoderKey = "";
-  private waitKey = true;
   private lastKeyReq = 0;
-  private pendingDecode = new Map<number, { t0: number; hostUs: number }>();
-  private decodeAvg = 0;
-  /** 当前解码器用的是 AVC 格式（WebKitGTK 不支持 Annex-B，见 codec.ts 的 annexBToAvc） */
-  private avcMode = false;
-  private decoderCodec: Codec = "H264";
-  /** 当前解码器配置后送进去的帧数 / 成功输出的帧数 / 配置时刻（用来判断本机能不能解这种格式） */
-  private chunksSinceConfig = 0;
-  private decodedSinceConfig = 0;
-  private configuredAt = 0;
 
   // 声音
   readonly audio = new AudioPlayer();
   private readonly sync = new AvSync();
-  /** 音画同步时等待解码的画面帧（按顺序） */
-  private videoQueue: PendingVideo[] = [];
-  private videoTimer: number | undefined;
   /** 最近一次画出的帧的采集时间（被控端时钟，微秒），调试用 */
-  lastDrawnHostUs = 0;
+  get lastDrawnHostUs() { return this.video.lastDrawnHostUs; }
   private foreground = false;
   /** 当前是否已让被控端发送声音 */
   private audioOn = false;
@@ -196,11 +144,7 @@ export class RemoteSession {
   // 输入
   private interactive = false;
   private visible = true;
-  private queue: InputEvent[] = [];
-  private moveTimer: number | undefined;
-  private flushQueued = false;
-  private wheelAcc = { x: 0, y: 0 };
-  private pressed = new Set<string>();
+  private readonly input: RemoteInput;
 
   // 光标
   private cursorRaw: { w: number; h: number; hx: number; hy: number; rgba: Uint8ClampedArray } | null = null;
@@ -228,8 +172,18 @@ export class RemoteSession {
     this.canvas.height = 9;
     const ctx = this.canvas.getContext("2d", { alpha: false, desynchronized: true });
     if (!ctx) throw new Error(t("error.canvas"));
-    this.ctx = ctx;
-    this.bindInput();
+    this.video = new VideoPlayer({
+      canvas: this.canvas, ctx, sync: this.sync,
+      requestKeyframe: () => this.requestKeyframe(),
+      unsupported: (codec) => this.onUndecodable(codec),
+      resized: () => this.layout(),
+      recovered: () => {
+        if (this.notice?.kind === "h264Undecodable") { this.notice = null; this.emit(); }
+      },
+    });
+    this.input = new RemoteInput(this.canvas, () => this.sid !== null && !this.disposed, (events) => {
+      if (this.sid !== null) void api.input(this.sid, events).catch(() => {});
+    });
     this.audio.onClock = (hostUs, localMs, appliedMs) => {
       this.sync.onAudioClock(hostUs, localMs, appliedMs);
       const extra = this.sync.update(performance.now());
@@ -258,33 +212,37 @@ export class RemoteSession {
 
   /** 建立连接。首次连接失败会抛出错误。 */
   async start(): Promise<void> {
-    const gen = ++this.gen;
+    const gen = this.attempt.begin();
     // 重连后旧连接的数据可能还会到达，按 gen 丢掉
     const sink = {
       packet: (data: Uint8Array) => {
-        if (gen === this.gen) this.onBinary(data);
+        if (this.attempt.accepts(gen)) this.onBinary(data);
       },
       event: (ev: SessionEvent) => {
-        if (gen === this.gen) this.onEvent(ev);
+        if (this.attempt.accepts(gen)) this.onEvent(ev);
       },
     };
-    this.resetDecoder();
+    this.video.reset();
     this.audio.reset();
     this.sync.reset();
     // 在连接之前清掉旧提示：被控端紧跟在 Hello 后面发的提示可能比 connect 的返回值先到
     this.notice = null;
     this.audioError = null;
-    this.attempting = true;
     this.attemptAt = performance.now();
     let info;
     const sent = this.settings;
     try {
       info = await api.connect(this.code, this.resume, this.settings, sink, this.clipboardSync);
+    } catch (e) {
+      // A Closed event already decided whether to retry. An old failure must
+      // not overwrite that decision, or restart a deliberately declined call.
+      if (!this.attempt.accepts(gen) || this.disposed) return;
+      throw e;
     } finally {
-      if (gen === this.gen) this.attempting = false;
+      this.attempt.finish(gen);
     }
-    if (gen !== this.gen || this.disposed) {
-      void api.disconnect(info.sid);
+    if (!this.attempt.accepts(gen) || this.disposed) {
+      void api.disconnect(info.sid).catch(() => {});
       return;
     }
     this.resume = info.resume;
@@ -366,7 +324,7 @@ export class RemoteSession {
   private retryNow() {
     clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
-    if (this.disposed || this.attempting) return;
+    if (this.disposed || this.attempt.attempting) return;
     this.start().catch((e) => this.scheduleRetry(toProblem(e)));
   }
 
@@ -394,16 +352,13 @@ export class RemoteSession {
 
   dispose() {
     this.disposed = true;
-    this.gen++;
+    this.attempt.invalidate();
     clearTimeout(this.retryTimer);
-    clearTimeout(this.moveTimer);
-    clearTimeout(this.videoTimer);
-    this.videoQueue = [];
-    if (this.sid !== null) void api.disconnect(this.sid);
+    this.input.dispose();
+    this.video.reset();
+    if (this.sid !== null) void api.disconnect(this.sid).catch(() => {});
     this.sid = null;
     this.state = "closed";
-    this.decoder?.close();
-    this.decoder = null;
     this.audio.disable();
     this.detach();
     this.emit();
@@ -440,7 +395,7 @@ export class RemoteSession {
           rttMs: ev.rttMs,
           width: ev.width,
           height: ev.height,
-          decodeMs: this.decodeAvg,
+          decodeMs: this.video.decodeAvg,
         };
         this.syncStats = this.sync.stats();
         break;
@@ -470,6 +425,10 @@ export class RemoteSession {
       }
       case "closed":
         if (this.disposed) return;
+        this.attempt.invalidate();
+        clearTimeout(this.retryTimer);
+        this.input.reset();
+        this.video.reset();
         if (ev.retry) {
           this.scheduleRetry(ev.reason);
         } else {
@@ -494,23 +453,12 @@ export class RemoteSession {
     const kind = dv.getUint8(0);
     // 采集时间（被控端时钟，微秒）；在 2^53 以内，转成 number 不丢精度
     const hostUs = Number(dv.getBigUint64(16, true));
-    if (kind === 1) this.onVideo(dv, pkt, hostUs);
+    if (kind === 1) this.video.push(dv, pkt, hostUs);
     else if (kind === 2) this.onCursor(dv, pkt);
     else if (kind === 3) this.audio.push(dv.getUint8(1) === 1, hostUs, pkt.subarray(HEADER_LEN));
   }
 
   // ───────────────────────── 解码 ─────────────────────────
-
-  private resetDecoder() {
-    if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
-    this.decoder = null;
-    this.decoderKey = "";
-    this.waitKey = true;
-    this.pendingDecode.clear();
-    clearTimeout(this.videoTimer);
-    this.videoTimer = undefined;
-    this.videoQueue = [];
-  }
 
   private requestKeyframe() {
     const now = performance.now();
@@ -524,131 +472,14 @@ export class RemoteSession {
     return this.sync.enabled;
   }
 
-  private onVideo(dv: DataView, pkt: Uint8Array, hostUs: number) {
-    const key = dv.getUint8(1) === 1;
-    const v: PendingVideo = {
-      key,
-      codec: CODEC_BY_ID[dv.getUint16(2, true)] ?? "H264",
-      seq: dv.getUint32(4, true),
-      width: dv.getUint16(8, true),
-      height: dv.getUint16(10, true),
-      hostUs,
-      data: pkt.subarray(HEADER_LEN),
-      due: 0,
-    };
-    if (key) {
-      this.waitKey = false;
-    } else if (this.waitKey) {
-      // 还没有关键帧（刚连接或解码器重置）：丢弃并请求关键帧
-      this.requestKeyframe();
-      return;
-    }
-    const now = performance.now();
-    // 同步没生效时（关闭或静音）返回 now，画面照常立即显示
-    v.due = this.sync.onVideo(hostUs, now, this.decodeAvg);
-    // 先处理到期的（窗口在后台时定时器会被节流，每来一帧都检查一次）
-    this.pumpVideo();
-    if (this.videoQueue.length === 0 && v.due <= now + 1) {
-      this.decodeVideo(v);
-      return;
-    }
-    this.videoQueue.push(v);
-    if (this.videoQueue.length > MAX_QUEUED_FRAMES) this.flushVideo();
-    else this.scheduleVideo();
-  }
-
-  /** 按到期时间把排队的帧送去解码 */
-  private pumpVideo = () => {
-    clearTimeout(this.videoTimer);
-    this.videoTimer = undefined;
-    const now = performance.now();
-    while (this.videoQueue.length > 0 && this.videoQueue[0].due <= now + 1) this.decodeVideo(this.videoQueue.shift()!);
-    this.scheduleVideo();
-  };
-
-  private scheduleVideo() {
-    if (this.videoTimer !== undefined || this.videoQueue.length === 0) return;
-    this.videoTimer = window.setTimeout(this.pumpVideo, Math.max(0, this.videoQueue[0].due - performance.now()));
-  }
-
-  /** 关闭音画同步等：排队的帧立即解码 */
-  private flushVideo() {
-    clearTimeout(this.videoTimer);
-    this.videoTimer = undefined;
-    const q = this.videoQueue;
-    this.videoQueue = [];
-    for (const v of q) this.decodeVideo(v);
-  }
-
-  private decodeVideo(v: PendingVideo) {
-    let data = v.data;
-    if (v.key) {
-      const codecStr = codecString(v.codec, v.data);
-      // 本机 WebView 不支持 Annex-B H.264（WebKitGTK）：转换为 AVC 格式，参数集放进 description
-      let description: Uint8Array | undefined;
-      if (v.codec === "H264" && h264NeedsAvc()) {
-        const conv = annexBToAvc(v.data);
-        if (!conv.sps || !conv.pps) {
-          this.waitKey = true;
-          this.requestKeyframe();
-          return;
-        }
-        description = avcC(conv.sps, conv.pps);
-        data = conv.data;
-      }
-      const cfgKey = `${codecStr}/${v.width}x${v.height}/${description?.join(",") ?? "annexb"}`;
-      if (!this.decoder || this.decoder.state === "closed" || cfgKey !== this.decoderKey) {
-        this.configureDecoder(v.codec, codecStr, v.width, v.height, cfgKey, description);
-      }
-    } else if (!this.decoder || this.decoder.state === "closed") {
-      // 解码器出错被重置：等下一个关键帧
-      this.waitKey = true;
-      this.requestKeyframe();
-      return;
-    }
-
-    const dec = this.decoder!;
-    // 送进去不少帧了却一帧也没解出来，也没报错（例如 WebKitGTK 的部分 HEVC/AV1 解码器）：本机实际无法解码这种格式
-    if (
-      this.decodedSinceConfig === 0 &&
-      this.chunksSinceConfig >= UNDECODABLE_CHUNKS &&
-      performance.now() - this.configuredAt > UNDECODABLE_MS
-    ) {
-      this.onUndecodable(this.decoderCodec);
-      return;
-    }
-    if (dec.decodeQueueSize > 8) {
-      // 解码跟不上（极少见）：清空并从下一个关键帧重新开始
-      this.resetDecoder();
-      this.requestKeyframe();
-      return;
-    }
-    if (this.avcMode && !v.key) data = annexBToAvc(v.data).data;
-    this.chunksSinceConfig++;
-    const ts = v.seq * 1000;
-    this.pendingDecode.set(ts, { t0: performance.now(), hostUs: v.hostUs });
-    try {
-      dec.decode(new EncodedVideoChunk({ type: v.key ? "key" : "delta", timestamp: ts, data }));
-    } catch {
-      this.resetDecoder();
-      this.requestKeyframe();
-    }
-  }
-
   /**
    * 本机实际无法解码这种格式（探测时说支持，但一帧也解不出来）：
    * H.264 改用 AVC 格式重试；其它格式从可用列表里去掉，并让被控端按优先级改用下一个能用的格式。
    */
   private onUndecodable(codec: Codec) {
-    this.resetDecoder();
     if (codec === "H264") {
-      if (h264NeedsAvc()) {
-        this.notice = { kind: "h264Undecodable" };
-        this.emit();
-      } else {
-        markH264NeedsAvc();
-      }
-      this.requestKeyframe();
+      this.notice = { kind: "h264Undecodable" };
+      this.emit();
       return;
     }
     const decoders = store.get().decoders.filter((c) => c !== codec);
@@ -662,75 +493,6 @@ export class RemoteSession {
       console.warn(`can't decode ${codec} here`);
     }
     this.requestKeyframe();
-  }
-
-  private configureDecoder(
-    kind: Codec,
-    codec: string,
-    width: number,
-    height: number,
-    cfgKey: string,
-    description?: Uint8Array,
-  ) {
-    if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
-    const avc = description !== undefined;
-    this.avcMode = avc;
-    this.decoderCodec = kind;
-    this.decodedSinceConfig = 0;
-    this.chunksSinceConfig = 0;
-    this.configuredAt = performance.now();
-    const decoder = new VideoDecoder({
-      output: (frame) => {
-        if (this.decoder === decoder && this.decodedSinceConfig++ === 0 && this.notice?.kind === "h264Undecodable") {
-          this.notice = null;
-          this.emit();
-        }
-        this.draw(frame);
-      },
-      error: (e) => {
-        console.warn("video decoder error", e);
-        // 一帧都没解出来就出错：本机不支持这种码流（例如 WebKitGTK 不支持 Annex-B 的 H.264）
-        if (this.decoder === decoder && this.decodedSinceConfig === 0) {
-          this.onUndecodable(kind);
-          return;
-        }
-        if (this.decoder === decoder) {
-          this.decoder = null;
-          this.waitKey = true;
-          this.requestKeyframe();
-        }
-      },
-    });
-    decoder.configure({
-      codec,
-      codedWidth: width,
-      codedHeight: height,
-      optimizeForLatency: true,
-      hardwareAcceleration: "no-preference",
-      ...(description ? { description } : {}),
-    });
-    this.decoder = decoder;
-    this.decoderKey = cfgKey;
-  }
-
-  private draw(frame: VideoFrame) {
-    const pending = this.pendingDecode.get(frame.timestamp);
-    if (pending !== undefined) {
-      this.pendingDecode.delete(frame.timestamp);
-      const ms = performance.now() - pending.t0;
-      this.decodeAvg = this.decodeAvg === 0 ? ms : this.decodeAvg * 0.9 + ms * 0.1;
-      this.lastDrawnHostUs = pending.hostUs;
-    }
-    if (this.pendingDecode.size > 32) this.pendingDecode.clear();
-    const w = frame.displayWidth;
-    const h = frame.displayHeight;
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w;
-      this.canvas.height = h;
-      this.layout();
-    }
-    this.ctx.drawImage(frame, 0, 0);
-    frame.close();
   }
 
   // ───────────────────────── 光标 ─────────────────────────
@@ -870,7 +632,7 @@ export class RemoteSession {
   /** 同步只在开关打开且正在播放声音时生效；不生效时排队的画面立即显示，声音也不再为画面额外等待 */
   private applySyncState() {
     this.sync.enabled = this.avSync && this.audioOn;
-    if (!this.sync.enabled) this.flushVideo();
+    if (!this.sync.enabled) this.video.flush();
     const extra = this.sync.update(performance.now());
     if (extra !== null) this.audio.setExtraDelay(extra);
     this.syncStats = this.sync.stats();
@@ -899,6 +661,7 @@ export class RemoteSession {
 
   setInteractive(v: boolean) {
     this.interactive = v;
+    this.input.interactive = v;
     if (!v) this.releaseAll();
     this.layout();
   }
@@ -965,147 +728,7 @@ export class RemoteSession {
     for (let i = 0; i < t.length; i += 512) this.enqueue([{ Text: { text: t.slice(i, i + 512) } }], true);
   }
 
-  focus() {
-    this.canvas.focus({ preventScroll: true });
-  }
-
-  private releaseAll() {
-    this.pressed.clear();
-    this.enqueue(["ReleaseAll"], true);
-  }
-
-  /**
-   * macOS 的 Caps Lock：打开时只有 keydown，关闭时只有 keyup（中间不会抬起）。
-   * 每次都当作"按一下"发给对方，两边的大小写锁定状态才能保持一致。
-   */
-  private tapCapsLock() {
-    this.enqueue(
-      [{ Key: { code: "CapsLock", down: true } }, { Key: { code: "CapsLock", down: false } }],
-      true,
-    );
-  }
-
-  private enqueue(evs: InputEvent[], urgent: boolean) {
-    if (this.sid === null) return;
-    for (const ev of evs) {
-      const last = this.queue[this.queue.length - 1];
-      if (typeof ev === "object" && "MouseMove" in ev && last && typeof last === "object" && "MouseMove" in last) {
-        this.queue[this.queue.length - 1] = ev;
-      } else {
-        this.queue.push(ev);
-      }
-    }
-    if (urgent) {
-      if (!this.flushQueued) {
-        this.flushQueued = true;
-        queueMicrotask(() => this.flush());
-      }
-    } else if (this.moveTimer === undefined) {
-      this.moveTimer = window.setTimeout(() => this.flush(), MOVE_INTERVAL_MS);
-    }
-  }
-
-  private flush() {
-    this.flushQueued = false;
-    clearTimeout(this.moveTimer);
-    this.moveTimer = undefined;
-    if (this.queue.length === 0 || this.sid === null) {
-      this.queue = [];
-      return;
-    }
-    const batch = this.queue;
-    this.queue = [];
-    void api.input(this.sid, batch).catch(() => {});
-  }
-
-  private normPos(e: MouseEvent): { x: number; y: number } {
-    const r = this.canvas.getBoundingClientRect();
-    return {
-      x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
-      y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
-    };
-  }
-
-  private bindInput() {
-    const c = this.canvas;
-    const on = <K extends keyof HTMLElementEventMap>(
-      type: K,
-      fn: (e: HTMLElementEventMap[K]) => void,
-      opts?: AddEventListenerOptions,
-    ) => c.addEventListener(type, fn as EventListener, opts);
-
-    on("pointermove", (e) => {
-      if (!this.interactive) return;
-      this.enqueue([{ MouseMove: this.normPos(e) }], false);
-    });
-    on("pointerdown", (e) => {
-      if (!this.interactive) return;
-      e.preventDefault();
-      this.focus();
-      c.setPointerCapture(e.pointerId);
-      const button = BUTTONS[e.button];
-      if (!button) return;
-      this.enqueue([{ MouseMove: this.normPos(e) }, { MouseButton: { button, down: true } }], true);
-    });
-    on("pointerup", (e) => {
-      if (!this.interactive) return;
-      e.preventDefault();
-      const button = BUTTONS[e.button];
-      if (!button) return;
-      this.enqueue([{ MouseMove: this.normPos(e) }, { MouseButton: { button, down: false } }], true);
-    });
-    on("contextmenu", (e) => e.preventDefault());
-    on("auxclick", (e) => e.preventDefault());
-    on(
-      "wheel",
-      (e) => {
-        if (!this.interactive) return;
-        e.preventDefault();
-        // 浏览器：像素/行/页 → Windows：120 = 一格（向上为正）
-        const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 120 * 3 : 1.2;
-        this.wheelAcc.x += e.deltaX * unit;
-        this.wheelAcc.y -= e.deltaY * unit;
-        const dx = Math.trunc(this.wheelAcc.x);
-        const dy = Math.trunc(this.wheelAcc.y);
-        if (dx === 0 && dy === 0) return;
-        this.wheelAcc.x -= dx;
-        this.wheelAcc.y -= dy;
-        const clamp = (v: number) => Math.max(-32000, Math.min(32000, v));
-        this.enqueue([{ Wheel: { dx: clamp(dx), dy: clamp(dy) } }], true);
-      },
-      { passive: false },
-    );
-    on("keydown", (e) => {
-      if (!this.interactive) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (!e.code || e.code === "Unidentified") return;
-      if (IS_MAC && e.code === "CapsLock") return this.tapCapsLock();
-      if (e.repeat && !this.pressed.has(e.code)) return;
-      this.pressed.add(e.code);
-      this.enqueue([{ Key: { code: e.code, down: true } }], true);
-    });
-    on("keyup", (e) => {
-      if (!this.interactive) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (!e.code || e.code === "Unidentified") return;
-      if (IS_MAC && e.code === "CapsLock") return this.tapCapsLock();
-      this.pressed.delete(e.code);
-      const evs: InputEvent[] = [];
-      // macOS：按住 Command 时其它键抬起不产生 keyup（例如 Command+C 只有 C 的 keydown），
-      // Command 抬起时把这期间按下的普通键一起抬起，否则对方那边会一直按着
-      if (IS_MAC && META_KEYS.has(e.code)) {
-        for (const code of this.pressed) {
-          if (MODIFIER_KEYS.has(code)) continue;
-          this.pressed.delete(code);
-          evs.push({ Key: { code, down: false } });
-        }
-      }
-      evs.push({ Key: { code: e.code, down: false } });
-      this.enqueue(evs, true);
-    });
-    // 失焦（Alt+Tab 切走等）时释放所有按键，避免对端粘键
-    on("blur", () => this.releaseAll());
-  }
+  focus() { this.input.focus(); }
+  private releaseAll() { this.input.releaseAll(); }
+  private enqueue(events: InputEvent[], urgent: boolean) { this.input.enqueue(events, urgent); }
 }

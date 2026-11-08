@@ -50,14 +50,31 @@ pub struct Config {
     pub db: Option<std::path::PathBuf>,
 }
 
+/// Bounded signaling output. A non-reading peer is disconnected on overflow,
+/// rather than retaining arbitrarily many replies or silently losing grants.
+#[derive(Clone)]
+struct SignalTx {
+    tx: mpsc::Sender<ServerMsg>,
+    conn: quinn::Connection,
+}
+impl SignalTx {
+    fn send(&self, msg: ServerMsg) -> Result<(), ()> {
+        self.tx.try_send(msg).map_err(|_| {
+            self.conn
+                .close(VarInt::from_u32(3), b"signal queue overflow");
+        })
+    }
+}
+
 struct HostEntry {
     conn_id: u64,
+    ready: bool,
     secret: [u8; 16],
     /// 被控端发过 [`ClientMsg::Release`]：断开后不再保留这个控制码
     released: bool,
     name: String,
     os: String,
-    tx: mpsc::UnboundedSender<ServerMsg>,
+    tx: SignalTx,
     conn: quinn::Connection,
     sessions: Arc<AtomicUsize>,
 }
@@ -90,7 +107,7 @@ fn same_token(a: &ResumeToken, b: &ResumeToken) -> bool {
 struct Waiter {
     conn_id: u64,
     resume: ResumeToken,
-    tx: mpsc::UnboundedSender<ServerMsg>,
+    tx: SignalTx,
 }
 
 /// 发起连接请求的控制端（一条连接）
@@ -100,7 +117,7 @@ struct Ctrl<'a> {
     ip: IpAddr,
     peer: SocketAddr,
     name: &'a str,
-    tx: &'a mpsc::UnboundedSender<ServerMsg>,
+    tx: &'a SignalTx,
 }
 
 /// 连接请求被拒绝的原因（发给控制端的是 [`Denied::error`]）
@@ -141,7 +158,8 @@ struct Pending {
     host_conn: u64,
     ctrl_conn: u64,
     created: Instant,
-    waiting: Option<(Role, SendStream, RecvStream)>,
+    host_streams: [Option<(SendStream, RecvStream)>; 3],
+    ctrl_streams: [Option<(SendStream, RecvStream)>; 3],
     slot: SlotGuard,
     label: String,
 }
@@ -177,6 +195,7 @@ impl Broker {
     /// 周期性清理过期数据。
     pub async fn janitor(self: Arc<Self>) {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut next_expiry = Instant::now();
         loop {
             tick.tick().await;
             let now = Instant::now();
@@ -192,7 +211,7 @@ impl Broker {
             };
             for p in expired {
                 debug!("session pairing timed out: {}", p.label);
-                if let Some((_, mut s, mut r)) = p.waiting {
+                for (mut s, mut r) in p.host_streams.into_iter().chain(p.ctrl_streams).flatten() {
                     let _ = s.reset(VarInt::from_u32(1));
                     let _ = r.stop(VarInt::from_u32(1));
                 }
@@ -201,11 +220,24 @@ impl Broker {
                 v.retain(|t| now - *t < FAIL_WINDOW);
                 !v.is_empty()
             });
-            {
+            if now >= next_expiry {
                 let hosts = self.hosts.lock().unwrap();
                 let mut bindings = self.bindings.lock().unwrap();
                 bindings.expire(|code| hosts.contains_key(&code));
+                next_expiry = now + Duration::from_secs(3600);
             }
+        }
+    }
+
+    pub async fn flush_bindings(&self) {
+        let flush = self.bindings.lock().unwrap().flush_barrier();
+        if !tokio::task::spawn_blocking(move || flush(Duration::from_secs(6)))
+            .await
+            .unwrap_or(false)
+        {
+            warn!(
+                "fixed control codes: persistence barrier did not complete; keeping in-memory ownership"
+            );
         }
     }
 
@@ -287,8 +319,16 @@ impl Broker {
         .await?;
         info!(%peer, conn_id, ?role, %name, %os, "client connected");
 
-        let (tx, rx) = mpsc::unbounded_channel::<ServerMsg>();
-        let writer = tokio::spawn(writer_loop(send, rx));
+        let (tx, rx) = mpsc::channel::<ServerMsg>(64);
+        let tx = SignalTx {
+            tx,
+            conn: conn.clone(),
+        };
+        let writer_conn = conn.clone();
+        let writer = tokio::spawn(async move {
+            writer_loop(send, rx).await;
+            writer_conn.close(VarInt::from_u32(3), b"signal writer ended");
+        });
         let acceptor = tokio::spawn(self.clone().accept_sessions(conn.clone(), conn_id, role));
 
         let res = match role {
@@ -319,7 +359,7 @@ impl Broker {
         peer: SocketAddr,
         name: String,
         os: String,
-        tx: mpsc::UnboundedSender<ServerMsg>,
+        tx: SignalTx,
         mut recv: RecvStream,
         buf: &mut Vec<u8>,
     ) -> Result<()> {
@@ -327,7 +367,11 @@ impl Broker {
         while let Some(msg) = read_msg::<_, ClientMsg>(&mut recv, MAX_SIGNAL_MSG, buf).await? {
             match msg {
                 ClientMsg::Register { reclaim, keep } if !registered => {
-                    let code = self.register(conn, conn_id, &name, &os, &tx, reclaim, keep);
+                    let code = self.register(conn, conn_id, &name, &os, &tx, reclaim, keep)?;
+                    // Persistence waits outside ALL broker locks. Ordinary
+                    // registrations are committed before they become visible.
+                    self.flush_bindings().await;
+                    self.announce(conn_id, code);
                     registered = true;
                     info!(%peer, conn_id, code, keep, reclaimed = reclaim.is_some_and(|r| r.code == code), "host registered");
                 }
@@ -351,10 +395,10 @@ impl Broker {
         conn_id: u64,
         name: &str,
         os: &str,
-        tx: &mpsc::UnboundedSender<ServerMsg>,
+        tx: &SignalTx,
         reclaim: Option<Reclaim>,
         keep: bool,
-    ) -> u32 {
+    ) -> Result<u32> {
         let mut hosts = self.hosts.lock().unwrap();
         let mut reserved = self.reserved.lock().unwrap();
         let mut bindings = self.bindings.lock().unwrap();
@@ -381,18 +425,22 @@ impl Broker {
             }
         }
 
-        let (code, secret) = chosen.unwrap_or_else(|| {
-            let secret: [u8; 16] = rng.random();
-            loop {
-                let code = rng.random_range(CODE_MIN..=CODE_MAX);
-                if !hosts.contains_key(&code)
-                    && !reserved.contains_key(&code)
-                    && !bindings.contains(code)
-                {
-                    break (code, secret);
-                }
+        let (code, secret) = match chosen {
+            Some(chosen) => chosen,
+            None => {
+                let count = CODE_MAX - CODE_MIN + 1;
+                let start = rng.random_range(0..count);
+                let code = (0..count)
+                    .map(|i| CODE_MIN + (start + i) % count)
+                    .find(|c| {
+                        !hosts.contains_key(c)
+                            && !reserved.contains_key(c)
+                            && !bindings.contains(*c)
+                    })
+                    .ok_or_else(|| anyhow!("control code namespace exhausted"))?;
+                (code, rng.random())
             }
-        });
+        };
         if keep {
             bindings.bind(code, &secret);
         } else if bindings.check(code, &secret) == Some(true) {
@@ -405,6 +453,7 @@ impl Broker {
             code,
             HostEntry {
                 conn_id,
+                ready: false,
                 secret,
                 released: false,
                 name: name.to_string(),
@@ -414,6 +463,17 @@ impl Broker {
                 sessions: Arc::new(AtomicUsize::new(0)),
             },
         );
+        Ok(code)
+    }
+
+    fn announce(&self, conn_id: u64, code: u32) {
+        let mut hosts = self.hosts.lock().unwrap();
+        let Some(h) = hosts.get_mut(&code).filter(|h| h.conn_id == conn_id) else {
+            return;
+        };
+        h.ready = true;
+        let secret = h.secret;
+        let tx = &h.tx;
         // 在通知控制端之前（并且还持有锁）发出：被控端收到的第一条消息必须是 Registered，
         // 控制端收到通知后马上发起的会话（Incoming）只能排在它后面
         let _ = tx.send(ServerMsg::Registered { code, secret });
@@ -430,7 +490,6 @@ impl Broker {
                 let _ = w.tx.send(ServerMsg::HostOnline { code });
             }
         }
-        code
     }
 
     fn unregister(&self, conn_id: u64) {
@@ -470,7 +529,7 @@ impl Broker {
         conn_id: u64,
         peer: SocketAddr,
         name: String,
-        tx: mpsc::UnboundedSender<ServerMsg>,
+        tx: SignalTx,
         mut recv: RecvStream,
         buf: &mut Vec<u8>,
     ) -> Result<()> {
@@ -543,6 +602,15 @@ impl Broker {
                 hosts.get(&code).ok_or(Denied::Unknown)?
             }
         };
+        if !host.ready {
+            return Err(match resume {
+                Some(token) => {
+                    self.wait(ctrl, code, token, waiting);
+                    Denied::Offline
+                }
+                None => Denied::Vanished,
+            });
+        }
         // 预占一个会话槽位
         let prev = host.sessions.fetch_add(1, Ordering::AcqRel);
         let slot = SlotGuard(host.sessions.clone());
@@ -562,7 +630,8 @@ impl Broker {
                 host_conn: host.conn_id,
                 ctrl_conn: ctrl.conn_id,
                 created: Instant::now(),
-                waiting: None,
+                host_streams: std::array::from_fn(|_| None),
+                ctrl_streams: std::array::from_fn(|_| None),
                 slot,
                 label: label.clone(),
             },
@@ -633,13 +702,20 @@ impl Broker {
     }
 
     async fn accept_sessions(self: Arc<Self>, conn: quinn::Connection, conn_id: u64, role: Role) {
-        while let Ok((send, recv)) = conn.accept_bi().await {
-            let me = self.clone();
-            tokio::spawn(async move {
-                if let Err(e) = me.attach_stream(conn_id, role, send, recv).await {
-                    debug!(conn_id, "session stream rejected: {e:#}");
+        let mut tasks = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                stream = conn.accept_bi() => {
+                    let Ok((send, recv)) = stream else { break; };
+                    let me = self.clone();
+                    tasks.spawn(async move {
+                        if let Err(e) = me.attach_stream(conn_id, role, send, recv).await {
+                            debug!(conn_id, "session stream rejected: {e:#}");
+                        }
+                    });
                 }
-            });
+                Some(_) = tasks.join_next() => {}
+            }
         }
     }
 
@@ -678,42 +754,49 @@ impl Broker {
             reject(send, recv);
             bail!("the session doesn't belong to this connection");
         }
-        match p.waiting.take() {
-            None => {
-                p.waiting = Some((role, send, recv));
-                Ok(())
-            }
-            Some(w) if w.0 == role => {
-                p.waiting = Some(w);
-                drop(pending);
-                reject(send, recv);
-                bail!("duplicate session stream");
-            }
-            Some((_, other_send, other_recv)) => {
-                let p = pending.remove(&h.session_id).unwrap();
-                drop(pending);
-                let session_id = h.session_id;
-                info!(session_id, "{}: session established", p.label);
-                tokio::spawn(async move {
-                    let started = Instant::now();
-                    let (up, down) = relay((send, recv), (other_send, other_recv)).await;
-                    info!(
-                        session_id,
-                        secs = started.elapsed().as_secs(),
-                        "{}: session ended ({} / {} bytes)",
-                        p.label,
-                        up,
-                        down
-                    );
-                    drop(p.slot);
-                });
-                Ok(())
-            }
+        let slot = match role {
+            Role::Host => &mut p.host_streams[h.lane as usize],
+            Role::Controller => &mut p.ctrl_streams[h.lane as usize],
+        };
+        if slot.is_some() {
+            drop(pending);
+            reject(send, recv);
+            bail!("duplicate session lane");
         }
+        send.set_priority(match h.lane {
+            airhand_proto::SessionLane::Control => 10,
+            airhand_proto::SessionLane::Audio => 5,
+            airhand_proto::SessionLane::Video => 0,
+        })?;
+        *slot = Some((send, recv));
+        if !p
+            .host_streams
+            .iter()
+            .chain(&p.ctrl_streams)
+            .all(Option::is_some)
+        {
+            return Ok(());
+        }
+        let p = pending.remove(&h.session_id).unwrap();
+        drop(pending);
+        let session_id = h.session_id;
+        info!(session_id, "{}: session established (3 lanes)", p.label);
+        tokio::spawn(async move {
+            let mut relays = tokio::task::JoinSet::new();
+            for (a, b) in p.host_streams.into_iter().zip(p.ctrl_streams) {
+                relays.spawn(relay(a.unwrap(), b.unwrap()));
+            }
+            // Every lane is required; closing any one tears down the whole session.
+            let _ = relays.join_next().await;
+            drop(relays);
+            info!(session_id, "{}: session ended", p.label);
+            drop(p.slot);
+        });
+        Ok(())
     }
 }
 
-async fn writer_loop(mut send: SendStream, mut rx: mpsc::UnboundedReceiver<ServerMsg>) {
+async fn writer_loop(mut send: SendStream, mut rx: mpsc::Receiver<ServerMsg>) {
     while let Some(msg) = rx.recv().await {
         if write_msg(&mut send, &msg).await.is_err() {
             break;
@@ -901,6 +984,108 @@ mod tests {
         broker.waiters.lock().unwrap().values().map(Vec::len).sum()
     }
 
+    #[tokio::test]
+    async fn blocked_video_lane_does_not_block_control_or_audio() {
+        use airhand_link::transport::{HostReceiver, open_session};
+        use airhand_proto::session::{AudioFrame, ByeReason, HostMsg};
+        let (_broker, cfg) = start().await;
+        let (mut host, id) = register(&cfg, None).await;
+        let mut ctrl = connect_signal(&cfg, Role::Controller).await.unwrap();
+        let grant = ask(&mut ctrl, 1, id.code, None).await.unwrap();
+        assert!(matches!(next(&mut host).await, ServerMsg::Incoming { .. }));
+        let h = open_session(&host.conn, grant.session_id, Role::Host)
+            .await
+            .unwrap();
+        let c = open_session(&ctrl.conn, grant.session_id, Role::Controller)
+            .await
+            .unwrap();
+        let (mut host_control, _host_control_rx) = h.control;
+        let (mut host_audio, _host_audio_rx) = h.audio;
+        let (_ctrl_control_tx, mut ctrl_control) = c.control;
+        let (_ctrl_audio_tx, mut ctrl_audio) = c.audio;
+        let _video = c.video; // deliberately never read it
+        let (mut video_tx, _video_rx) = h.video;
+        let stalled = tokio::spawn(async move {
+            let chunk = vec![0u8; 1024 * 1024];
+            for _ in 0..128 {
+                video_tx.write_all(&chunk).await.unwrap();
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !stalled.is_finished(),
+            "video must be blocked by the unread lane"
+        );
+        write_msg(&mut host_control, &HostMsg::Pong { t: 77 })
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let msg: HostMsg = timeout(
+            Duration::from_secs(2),
+            read_msg(&mut ctrl_control, airhand_proto::MAX_SESSION_MSG, &mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(matches!(msg, HostMsg::Pong { t: 77 }));
+        write_msg(
+            &mut host_audio,
+            &HostMsg::Audio(AudioFrame {
+                seq: 1,
+                start: true,
+                capture_us: 0,
+                data: vec![1],
+            }),
+        )
+        .await
+        .unwrap();
+        let msg: HostMsg = timeout(
+            Duration::from_secs(2),
+            read_msg(&mut ctrl_audio, airhand_proto::MAX_SESSION_MSG, &mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(matches!(msg, HostMsg::Audio(_)));
+        stalled.abort();
+        let _ = stalled.await;
+        // Also verify receiver cancellation does not damage framing, and clean
+        // media EOF cannot hide a deliberate terminal control message.
+        let grant = ask(&mut ctrl, 2, id.code, None).await.unwrap();
+        let _ = next(&mut host).await;
+        let h = open_session(&host.conn, grant.session_id, Role::Host)
+            .await
+            .unwrap();
+        let c = open_session(&ctrl.conn, grant.session_id, Role::Controller)
+            .await
+            .unwrap();
+        let (_send, recv) = c.control;
+        let mut receiver = HostReceiver::new(recv, c.video, c.audio);
+        assert!(
+            timeout(Duration::from_millis(10), receiver.recv())
+                .await
+                .is_err()
+        );
+        let (mut ctl, _r) = h.control;
+        let (mut audio, _r2) = h.audio;
+        let (mut video, _r3) = h.video;
+        write_msg(&mut ctl, &HostMsg::Bye(ByeReason::Kicked))
+            .await
+            .unwrap();
+        ctl.finish().unwrap();
+        audio.finish().unwrap();
+        video.finish().unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            HostMsg::Bye(ByeReason::Kicked)
+        ));
+    }
+
     /// 带凭证的请求：凭证不对时什么也不透露；被控端掉线期间一直重连不算猜码、不受限速影响，
     /// 被控端回来时马上收到通知
     #[tokio::test]
@@ -1064,6 +1249,7 @@ mod tests {
         let (host, id) = register_with(&cfg, None, true).await;
         host.conn.close(VarInt::from_u32(0), b"");
         wait_until("the host is gone", || old.stats().0 == 0).await;
+        old.flush_bindings().await;
         drop((host, old));
 
         let (broker, cfg) = start_with(Some(file.clone())).await;
@@ -1087,7 +1273,8 @@ mod tests {
         host.conn.close(VarInt::from_u32(0), b"");
         wait_until("the host is gone", || broker.stats().0 == 1).await;
         assert!(!broker.reserved.lock().unwrap().contains_key(&id.code));
-        // 已经写进数据库（另开一个连接读）
+        // Persistence is asynchronous; await the disk barrier outside broker locks.
+        broker.flush_bindings().await;
         assert!(!Bindings::open(Some(&file)).contains(id.code));
         let _ = std::fs::remove_dir_all(dir);
     }

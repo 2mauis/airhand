@@ -1,7 +1,7 @@
 [package]
 name = "airhand-link"
 description = "Airhand client side of the relay link: QUIC with certificate pinning and reconnects, UI-independent controller sessions"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 
@@ -10,6 +10,7 @@ license = "MIT"
 [dependencies]
 airhand-proto = { path = "../airhand-proto" }
 anyhow = "1"
+bytes = "1"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rand = "0.9"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }

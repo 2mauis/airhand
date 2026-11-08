@@ -6,8 +6,11 @@
 //! * [`Problem`]：显示给用户的问题，以类型而不是文字的形式传给界面。
 
 pub mod controller;
+pub mod flow;
 pub mod net;
 mod problem;
+pub mod tasks;
+pub mod transport;
 
 pub use net::{LinkConfig, ServerState};
 pub use problem::Problem;

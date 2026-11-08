@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
@@ -186,15 +186,37 @@ fn same_origin(headers: &HeaderMap) -> bool {
         .any(|h| h.trim().eq_ignore_ascii_case(origin))
 }
 
+struct QueuedMessage {
+    message: Message,
+    _bytes: OwnedSemaphorePermit,
+}
+
 #[derive(Clone)]
 struct Outbox {
-    tx: mpsc::Sender<Message>,
+    tx: mpsc::Sender<QueuedMessage>,
     overflow: Arc<Notify>,
+    budget: Arc<Semaphore>,
 }
 
 impl Outbox {
     fn push(&self, m: Message) -> Result<(), UiClosed> {
-        match self.tx.try_send(m) {
+        let len = match &m {
+            Message::Text(t) => t.len(),
+            Message::Binary(b) | Message::Ping(b) | Message::Pong(b) => b.len(),
+            Message::Close(_) => 128,
+        };
+        let permit = self
+            .budget
+            .clone()
+            .try_acquire_many_owned(len.max(1).min(u32::MAX as usize) as u32)
+            .map_err(|_| {
+                self.overflow.notify_one();
+                UiClosed
+            })?;
+        match self.tx.try_send(QueuedMessage {
+            message: m,
+            _bytes: permit,
+        }) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 self.overflow.notify_one();
@@ -258,18 +280,19 @@ async fn run(socket: WebSocket, app: Arc<App>, peer: SocketAddr) {
     let out = Outbox {
         tx,
         overflow: overflow.clone(),
+        budget: Arc::new(Semaphore::new(32 * 1024 * 1024)),
     };
 
     let writer = async move {
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.tick().await;
         loop {
-            let msg = tokio::select! {
+            let (msg, _permit) = tokio::select! {
                 m = rx.recv() => match m {
-                    Some(m) => m,
+                    Some(m) => (m.message, Some(m._bytes)),
                     None => break,
                 },
-                _ = ping.tick() => Message::Ping(Bytes::new()),
+                _ = ping.tick() => (Message::Ping(Bytes::new()), None),
             };
             if let Err(e) = sink.send(msg).await {
                 debug!(%peer, "sending to the browser failed: {e}");
@@ -388,6 +411,12 @@ impl Console {
                 settings,
                 ch,
             } => {
+                while self.tasks.try_join_next().is_some() {}
+                if self.tasks.len() >= 64 {
+                    self.out
+                        .reply(req.id, Err(Problem::failed("too many pending connections")));
+                    return;
+                }
                 let (svc, out) = (self.svc.clone(), self.out.clone());
                 self.tasks.spawn(async move {
                     let r = connect(&svc, &out, &code, resume, settings, ch).await;
@@ -437,6 +466,25 @@ mod tests {
     use airhand_proto::session::Codec;
     use axum::http::HeaderValue;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn outbox_limits_bytes_and_releases_budget_on_drop() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let out = Outbox {
+            tx,
+            overflow: Arc::new(Notify::new()),
+            budget: Arc::new(Semaphore::new(10)),
+        };
+        out.push(Message::Binary(Bytes::from_static(b"123456")))
+            .unwrap();
+        assert!(
+            out.push(Message::Binary(Bytes::from_static(b"123456")))
+                .is_err()
+        );
+        drop(rx.recv().await);
+        out.push(Message::Binary(Bytes::from_static(b"123456")))
+            .unwrap();
+    }
 
     #[test]
     fn parse_requests() {
