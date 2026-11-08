@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "airhand-android"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "airhand-link",
  "airhand-proto",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "airhand-link"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "airhand-proto",
  "anyhow",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "airhand-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "postcard",
  "serde",
