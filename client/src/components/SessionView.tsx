@@ -1,7 +1,8 @@
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { closeTab, fmtCode, toggleFullscreen } from "../lib/actions";
 import { api, type Platform } from "../lib/api";
 import { type MsgKey, t, useT } from "../lib/i18n";
-import { errorText, noticeText, problemText } from "../lib/messages";
+import { errorText, noticeText, problemText, sessionStateText } from "../lib/messages";
 import { CODEC_LABEL } from "../lib/presets";
 import type { RemoteSession } from "../lib/session";
 import { store, useSession, useStore } from "../lib/store";
@@ -84,30 +85,22 @@ const combosFor = (platform: Platform | null, os: string) => {
   return os === "" || /windows/i.test(os) ? WINDOWS_COMBOS : /^macos/i.test(os) ? MAC_COMBOS : LINUX_COMBOS;
 };
 
-type Menu = null | "quality" | "keys" | "display" | "clipboard" | "audio";
-
-// Keyboard Lock API：全屏时捕获 Win、Alt+Tab 等系统快捷键并发送给远端
-type KeyboardLock = { lock?: (codes?: string[]) => Promise<void>; unlock?: () => void };
-const keyboardApi = () => (navigator as Navigator & { keyboard?: KeyboardLock }).keyboard;
+type Menu = null | "quality" | "keys" | "display" | "clipboard" | "audio" | "sessions";
 
 export function SessionView({ s }: { s: RemoteSession }) {
   // 订阅语言切换（文案直接用导入的 t）
   useT();
   useSession(s);
   const immersive = useStore((st) => st.immersive);
+  const multi = useStore((st) => st.sessions.length > 1);
   const [menu, setMenu] = useState<Menu>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const closeMenu = useCallback(() => setMenu(null), []);
+  // 菜单关掉后键盘回到远程画面（例如按 Esc 关掉画质面板后接着打字）
+  const closeMenu = useCallback(() => {
+    setMenu(null);
+    s.focus();
+  }, [s]);
   const toggleMenu = (m: Menu) => setMenu((cur) => (cur === m ? null : m));
-
-  // 窗口退出全屏（例如按了系统快捷键）时同步状态
-  useEffect(
-    () =>
-      api.onWindowFullscreenExit(() => {
-        if (store.get().immersive) store.setImmersive(false);
-      }),
-    [],
-  );
 
   useEffect(() => {
     if (!toast) return;
@@ -115,33 +108,11 @@ export function SessionView({ s }: { s: RemoteSession }) {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const toggleFullscreen = async () => {
-    const next = !immersive;
-    store.setImmersive(next);
-    if (next) {
-      // 先进入网页全屏（Keyboard Lock 的前提），再让窗口全屏
-      await document.documentElement.requestFullscreen?.().catch(() => {});
-      await keyboardApi()?.lock?.().catch(() => {});
-    } else {
-      keyboardApi()?.unlock?.();
-      if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
-    }
-    await api.setWindowFullscreen(next).catch(() => {});
+  const fullscreen = async () => {
+    setMenu(null);
+    await toggleFullscreen();
     s.focus();
   };
-
-  // 网页全屏被系统退出（例如长按 Esc）时同步窗口状态
-  useEffect(() => {
-    const onChange = () => {
-      if (!document.fullscreenElement && store.get().immersive) {
-        keyboardApi()?.unlock?.();
-        store.setImmersive(false);
-        void api.setWindowFullscreen(false).catch(() => {});
-      }
-    };
-    document.addEventListener("fullscreenchange", onChange);
-    return () => document.removeEventListener("fullscreenchange", onChange);
-  }, []);
 
   const typeClipboard = async () => {
     try {
@@ -164,39 +135,58 @@ export function SessionView({ s }: { s: RemoteSession }) {
     <div className={`session-view ${immersive ? "immersive" : ""}`}>
       {immersive && <div className="hot-edge" />}
       <header className="toolbar">
-        <div className="tb-left">
-          <div className="tb-title">
-            <span className={`dot ${s.state}`} />
-            <span className="host">{s.hostName || s.code}</span>
-            <span className="code">{s.code}</span>
+        {/* 像浏览器的地址栏：连的是哪台、现在怎么样 */}
+        <div className="addr">
+          {immersive && multi ? (
+            // 全屏时看不到标签栏：在这里切换到其它连接
+            <div className="menu-anchor addr-switch">
+              <button
+                className={`addr-title switcher ${menu === "sessions" ? "on" : ""}`}
+                title={t("session.switchSession")}
+                onClick={() => toggleMenu("sessions")}
+              >
+                <span className={`dot ${s.state}`} />
+                <span className="host">{s.hostName || fmtCode(s.code)}</span>
+                <IconChevron size={14} />
+              </button>
+              {menu === "sessions" && <SessionSwitcher current={s} onClose={closeMenu} />}
+            </div>
+          ) : (
+            <div className="addr-title">
+              <span className={`dot ${s.state}`} />
+              <span className="host">{s.hostName || fmtCode(s.code)}</span>
+            </div>
+          )}
+          <span className="addr-code">{fmtCode(s.code)}</span>
+
+          <div className="addr-stats">
+            {live ? (
+              <>
+                <span>{Math.round(st.fps)} fps</span>
+                <span>{fmtKbps(st.kbps)}</span>
+                <span className={`rtt ${rttClass}`}>{rtt != null ? `${rtt} ms` : "— ms"}</span>
+                {s.syncActive && s.syncStats.videoDelayMs >= 5 && (
+                  <span className="muted" title={t("session.syncTitle")}>
+                    {t("session.sync", { ms: Math.round(s.syncStats.videoDelayMs) })}
+                  </span>
+                )}
+                {st.width > 0 && (
+                  <span className="muted stat-res">
+                    {st.width}×{st.height}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="muted">{sessionStateText(s)}</span>
+            )}
           </div>
-          {s.encoder && (
+          {s.encoder && live && (
             <span className={`tag ${s.encoder.hardware ? "hw" : ""}`} title={s.encoder.name}>
               <IconCpu size={13} />
               <span className="tag-text">
                 {CODEC_LABEL[s.encoder.codec]} · {s.encoder.hardware ? t("session.hwEncoding") : t("session.swEncoding")}
               </span>
             </span>
-          )}
-        </div>
-
-        <div className="tb-stats">
-          {live && (
-            <>
-              <span>{Math.round(st.fps)} fps</span>
-              <span>{fmtKbps(st.kbps)}</span>
-              <span className={`rtt ${rttClass}`}>{rtt != null ? `${rtt} ms` : "— ms"}</span>
-              {s.syncActive && s.syncStats.videoDelayMs >= 5 && (
-                <span className="muted" title={t("session.syncTitle")}>
-                  {t("session.sync", { ms: Math.round(s.syncStats.videoDelayMs) })}
-                </span>
-              )}
-              {st.width > 0 && (
-                <span className="muted">
-                  {st.width}×{st.height}
-                </span>
-              )}
-            </>
           )}
         </div>
 
@@ -375,13 +365,14 @@ export function SessionView({ s }: { s: RemoteSession }) {
             <IconFit size={17} />
           </button>
           <button
-            className="tb-btn icon"
+            className={`tb-btn icon ${immersive ? "on" : ""}`}
             title={immersive ? t("session.exitFullscreen") : t("session.fullscreen")}
-            onClick={toggleFullscreen}
+            onClick={fullscreen}
           >
             {immersive ? <IconShrink size={17} /> : <IconExpand size={17} />}
           </button>
-          <button className="tb-btn icon danger" title={t("session.disconnect")} onClick={() => store.remove(s.id)}>
+          <span className="tb-sep" />
+          <button className="tb-btn icon danger" title={t("session.disconnect")} onClick={() => closeTab(s.id)}>
             <IconPower size={17} />
           </button>
         </div>
@@ -402,7 +393,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
                     <IconRefresh size={16} />
                     {t("session.reconnect")}
                   </button>
-                  <button className="ghost-btn" onClick={() => store.remove(s.id)}>
+                  <button className="ghost-btn" onClick={() => closeTab(s.id)}>
                     {t("session.close")}
                   </button>
                 </div>
@@ -413,7 +404,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
                 <div className="overlay-title">{t("session.approving", { name: s.hostName || s.code })}</div>
                 <div className="muted small">{t("session.approvingHint")}</div>
                 <div className="overlay-actions">
-                  <button className="ghost-btn" onClick={() => store.remove(s.id)}>
+                  <button className="ghost-btn" onClick={() => closeTab(s.id)}>
                     {t("session.close")}
                   </button>
                 </div>
@@ -424,7 +415,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
                 <div className="overlay-title">{t("session.waiting")}</div>
                 <div className="muted small">{t("session.waitingHint")}</div>
                 <div className="overlay-actions">
-                  <button className="ghost-btn" onClick={() => store.remove(s.id)}>
+                  <button className="ghost-btn" onClick={() => closeTab(s.id)}>
                     {t("session.close")}
                   </button>
                 </div>
@@ -470,6 +461,39 @@ function syncHint(s: RemoteSession): string {
   const before = skew >= 0 ? t("sync.wasAudioLate", { ms: skew }) : t("sync.wasVideoLate", { ms: -skew });
   if (extraMs > 0) return t("sync.audioDelayed", { ms: Math.round(extraMs), before });
   return t("sync.videoDelayed", { ms: Math.round(videoDelayMs), before });
+}
+
+/** 全屏时切换到其它连接（标签栏藏起来了），仍然保持全屏 */
+function SessionSwitcher({ current, onClose }: { current: RemoteSession; onClose: () => void }) {
+  const sessions = useStore((st) => st.sessions);
+  return (
+    <Dropdown onClose={onClose} className="left session-menu">
+      {sessions.map((x) => (
+        <SwitcherItem
+          key={x.id}
+          s={x}
+          active={x === current}
+          onPick={() => {
+            onClose();
+            store.setView(x.id);
+          }}
+        />
+      ))}
+    </Dropdown>
+  );
+}
+
+function SwitcherItem({ s, active, onPick }: { s: RemoteSession; active: boolean; onPick: () => void }) {
+  useSession(s);
+  return (
+    <button className={`dd-item ${active ? "active" : ""}`} onClick={onPick}>
+      <span className="dd-main">
+        <span className={`dot ${s.state}`} />
+        <span className="ellipsis">{s.hostName || fmtCode(s.code)}</span>
+      </span>
+      <span className="muted small">{s.state === "live" ? fmtCode(s.code) : sessionStateText(s)}</span>
+    </button>
+  );
 }
 
 function Dropdown({ children, onClose, className = "" }: { children: ReactNode; onClose: () => void; className?: string }) {

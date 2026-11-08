@@ -1,4 +1,6 @@
+import { closeTab, fmtCode } from "../lib/actions";
 import { useT } from "../lib/i18n";
+import { sessionStateText } from "../lib/messages";
 import type { RemoteSession } from "../lib/session";
 import { store, useSession, useStore } from "../lib/store";
 import { IconClose, IconPlus } from "./Icons";
@@ -13,15 +15,12 @@ export function GridView() {
   const cols = total <= 1 ? 1 : total <= 4 ? 2 : total <= 9 ? 3 : 4;
   return (
     <div className="grid-view">
-      <div className="grid-head">
-        <h2>{t("sidebar.grid")}</h2>
-        <span className="muted">{t("grid.summary", { n })}</span>
-      </div>
+      <div className="grid-head muted small">{t("grid.summary", { n })}</div>
       <div className="grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
         {sessions.map((s) => (
           <Tile key={s.id} s={s} />
         ))}
-        <button className="tile add" onClick={() => store.setView("new")}>
+        <button className="tile add" onClick={store.newTab}>
           <IconPlus size={26} />
           <span>{t("grid.add")}</span>
         </button>
@@ -33,34 +32,31 @@ export function GridView() {
 function Tile({ s }: { s: RemoteSession }) {
   const t = useT();
   useSession(s);
+  const name = s.hostName || fmtCode(s.code);
   return (
-    <div className="tile" onClick={() => store.setView(s.id)}>
+    <div className={`tile ${s.state}`} onClick={() => store.setView(s.id)} title={t("grid.open")}>
       <div className="tile-screen">
         <CanvasHost s={s} interactive={false} />
         {s.state !== "live" && (
-          <div className="tile-overlay">{s.state === "closed" ? (
-            t("common.disconnected")
-          ) : s.state === "waiting" ? (
-            t("common.waiting")
-          ) : s.state === "approving" ? (
-            t("common.approving")
-          ) : (
-            <span className="spinner" />
-          )}</div>
+          <div className="tile-overlay">
+            {s.state === "closed" || s.state === "waiting" || s.state === "approving" ? (
+              <span>{sessionStateText(s)}</span>
+            ) : (
+              <span className="spinner" />
+            )}
+          </div>
         )}
       </div>
       <div className="tile-bar">
         <span className={`dot ${s.state}`} />
-        <span className="tile-name">{s.hostName || s.code}</span>
-        <span className="muted small">
-          {s.state === "live" ? `${Math.round(s.stats.fps)} fps · ${s.stats.rttMs != null ? Math.round(s.stats.rttMs) : "—"} ms` : ""}
-        </span>
+        <span className="tile-name">{name}</span>
+        <span className="muted small tile-stats">{s.state === "live" ? sessionStateText(s) : fmtCode(s.code)}</span>
         <button
           className="icon-btn subtle"
           title={t("common.disconnect")}
           onClick={(e) => {
             e.stopPropagation();
-            store.remove(s.id);
+            closeTab(s.id);
           }}
         >
           <IconClose size={14} />

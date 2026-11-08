@@ -221,6 +221,23 @@ export interface Backend {
   setWindowFullscreen(on: boolean): Promise<void>;
   /** 窗口退出了全屏（例如按了系统快捷键） */
   onWindowFullscreenExit(cb: () => void): () => void;
+  /** 桌面版的无边框窗口（标题栏和窗口按钮由界面自己画）；网页版在浏览器里，为 null */
+  readonly frame: WindowFrame | null;
+}
+
+/** 无边框窗口的操作。拖动和双击最大化由 Tauri 按 data-tauri-drag-region 处理 */
+export interface WindowFrame {
+  minimize(): Promise<void>;
+  toggleMaximize(): Promise<void>;
+  isMaximized(): Promise<boolean>;
+  /** 窗口大小变化（包括最大化 / 还原）。返回取消订阅的函数 */
+  onResized(cb: () => void): () => void;
+  /** 请求关闭：和点系统的关闭按钮、Alt+F4 一样，先经过 onCloseRequested */
+  close(): Promise<void>;
+  /** 直接关闭，不再询问（关闭控制台 = 回到被控端模式） */
+  destroy(): Promise<void>;
+  /** 用户要关闭窗口：回调返回 false 时先不关（界面询问之后再调用 destroy）。返回取消订阅的函数 */
+  onCloseRequested(cb: () => boolean): () => void;
 }
 
 export const api: Backend = isTauri() ? tauriBackend() : webBackend();

@@ -2,7 +2,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AppInfo, Backend, ServerState, SessionEvent, SessionInfo } from "../api";
+import type { AppInfo, Backend, ServerState, SessionEvent, SessionInfo, WindowFrame } from "../api";
 import type { Lang } from "../i18n";
 
 /** 把异步注册的监听变成同步返回的取消函数 */
@@ -10,8 +10,30 @@ function unlistenLater(p: Promise<UnlistenFn>): () => void {
   return () => void p.then((f) => f());
 }
 
+function windowFrame(): WindowFrame {
+  const w = getCurrentWindow();
+  return {
+    minimize: () => w.minimize(),
+    toggleMaximize: () => w.toggleMaximize(),
+    isMaximized: () => w.isMaximized(),
+    onResized: (cb) => unlistenLater(w.onResized(() => cb())),
+    close: () => w.close(),
+    destroy: () => w.destroy(),
+    onCloseRequested: (cb) =>
+      unlistenLater(
+        w.onCloseRequested((e) => {
+          if (cb()) return;
+          e.preventDefault();
+          // 例如在任务栏上关闭最小化的窗口：先把窗口拿出来，用户才看得到询问
+          void w.unminimize().then(() => w.setFocus());
+        }),
+      ),
+  };
+}
+
 export function tauriBackend(): Backend {
   return {
+    frame: windowFrame(),
     kind: "desktop",
     appInfo: () => invoke<AppInfo>("app_info"),
     serverStatus: () => invoke<ServerState>("server_status"),

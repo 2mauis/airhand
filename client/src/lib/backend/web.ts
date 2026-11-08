@@ -48,6 +48,8 @@ const MIN_BINARY = 4 + 24;
 
 class WebConsole implements Backend {
   readonly kind = "web" as const;
+  /** 在浏览器的标签页里，没有自己的窗口 */
+  readonly frame = null;
 
   private ws: WebSocket | null = null;
   private retries = 0;

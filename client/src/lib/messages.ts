@@ -4,6 +4,7 @@
 // 词条在 i18n.ts 的 problem.* / notice.*；每种 kind 都必须有词条（下面的 `as const` 让 TypeScript 检查）。
 import { toProblem, type Problem, type RemoteNotice } from "./api";
 import { t } from "./i18n";
+import type { RemoteSession } from "./session";
 
 /** 本机产生的提示 */
 export type LocalNotice =
@@ -33,6 +34,24 @@ export function problemText(p: Problem): string {
 export function noticeText(n: SessionNotice): string {
   const { kind, ...params } = n;
   return t(`notice.${kind}` as const, params);
+}
+
+/** 会话现在的状态（标签的提示、多屏总览、全屏时的切换菜单）：连着时是帧率和延迟 */
+export function sessionStateText(s: RemoteSession): string {
+  switch (s.state) {
+    case "live":
+      return `${Math.round(s.stats.fps)} fps · ${s.stats.rttMs != null ? Math.round(s.stats.rttMs) : "—"} ms`;
+    case "reconnecting":
+      return t("common.reconnecting");
+    case "waiting":
+      return t("common.waiting");
+    case "approving":
+      return t("common.approving");
+    case "connecting":
+      return t("common.connecting");
+    case "closed":
+      return s.closedReason ? problemText(s.closedReason) : t("common.disconnected");
+  }
 }
 
 /** 任意异常的说明文字（Rust 命令失败时是 Problem） */

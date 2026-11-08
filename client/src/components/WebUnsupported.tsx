@@ -4,8 +4,8 @@
 // airhand-web 在同一个端口上同时支持 HTTP 和 HTTPS，所以只要把地址换成 https:// 就行。
 import { api } from "../lib/api";
 import { useT } from "../lib/i18n";
+import { LangSwitch } from "./AppMenu";
 import { IconWarn } from "./Icons";
-import { LangSwitch } from "./Sidebar";
 
 export type Unsupported = "insecure" | "noWebCodecs";
 
@@ -22,27 +22,39 @@ export function WebUnsupported({ reason }: { reason: Unsupported }) {
   https.protocol = "https:";
   return (
     <div className="app">
-      <main className="main connect-view">
-        <div className="connect-card">
-        <div className="hero-icon">
-          <IconWarn size={30} />
-        </div>
-          {reason === "insecure" ? (
-            <>
-              <h1>{t("web.insecure.title")}</h1>
-              <p className="muted">{t("web.insecure.body")}</p>
-              <a className="primary-btn link-btn" href={https.href}>
-                {https.href}
-              </a>
-              <p className="muted">{t("web.insecure.cert")}</p>
-            </>
-          ) : (
-            <>
-              <h1>{t("web.unsupported.title")}</h1>
-              <p className="muted">{t("web.unsupported.body")}</p>
-            </>
-          )}
-          <LangSwitch />
+      <main className="main">
+        <div className="newtab">
+          <div className="nt-wrap">
+            <section className="nt-card">
+              <div className="nt-head">
+                <div className="hero-icon">
+                  <IconWarn size={26} />
+                </div>
+                {reason === "insecure" ? (
+                  <>
+                    <h1>{t("web.insecure.title")}</h1>
+                    <p className="muted">{t("web.insecure.body")}</p>
+                  </>
+                ) : (
+                  <>
+                    <h1>{t("web.unsupported.title")}</h1>
+                    <p className="muted">{t("web.unsupported.body")}</p>
+                  </>
+                )}
+              </div>
+              {reason === "insecure" && (
+                <>
+                  <a className="primary-btn link-btn" href={https.href}>
+                    {https.href}
+                  </a>
+                  <p className="muted small center">{t("web.insecure.cert")}</p>
+                </>
+              )}
+              <div className="center">
+                <LangSwitch />
+              </div>
+            </section>
+          </div>
         </div>
       </main>
     </div>

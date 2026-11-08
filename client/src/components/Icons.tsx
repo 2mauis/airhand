@@ -110,3 +110,25 @@ export const IconCpu = (p: P) =>
   );
 export const IconWarn = (p: P) =>
   base(p, <path d="M12 3.5l9.5 16.5h-19L12 3.5zM12 10v4.5M12 17.5h.01" />);
+export const IconHistory = (p: P) =>
+  base(p, <path d="M3.5 12a8.5 8.5 0 1 0 2.5-6M3.5 4v4h4M12 7.5V12l3 2" />);
+export const IconArrowRight = (p: P) => base(p, <path d="M5 12h14M13 6l6 6-6 6" />);
+
+// 窗口按钮：细线图标（10×10），与 Windows 11 的标题栏按钮一致
+function win(children: React.ReactNode) {
+  return (
+    <svg width={10} height={10} viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth={1} aria-hidden>
+      {children}
+    </svg>
+  );
+}
+export const IconWinMinimize = () => win(<path d="M0 5h10" />);
+export const IconWinMaximize = () => win(<rect x="0.5" y="0.5" width="9" height="9" rx="1.2" />);
+export const IconWinRestore = () =>
+  win(
+    <>
+      <rect x="0.5" y="2.5" width="7" height="7" rx="1.2" />
+      <path d="M2.5 2.5v-.8c0-.66.54-1.2 1.2-1.2h4.6c.66 0 1.2.54 1.2 1.2v4.6c0 .66-.54 1.2-1.2 1.2h-.8" />
+    </>,
+  );
+export const IconWinClose = () => win(<path d="M.5.5l9 9M9.5.5l-9 9" />);

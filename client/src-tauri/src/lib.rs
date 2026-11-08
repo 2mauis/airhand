@@ -188,7 +188,7 @@ fn open_console(app: &AppHandle) {
                 .push(dir.clone());
             builder.data_directory(dir)
         };
-        let built = builder
+        let builder = builder
             .title(console_title())
             // 首屏就用当前语言（之后的切换通过 lang-changed 事件通知）
             .initialization_script(format!(
@@ -196,13 +196,22 @@ fn open_console(app: &AppHandle) {
                 i18n::current().code()
             ))
             .inner_size(1360.0, 860.0)
-            .min_inner_size(960.0, 620.0)
+            .min_inner_size(820.0, 560.0)
             .center()
             .incognito(true)
             .disable_drag_drop_handler()
-            .background_color(tauri::window::Color(11, 13, 20, 255))
-            .theme(Some(tauri::Theme::Dark))
-            .build();
+            .background_color(tauri::window::Color(9, 11, 16, 255))
+            .theme(Some(tauri::Theme::Dark));
+        // 无边框：标题栏就是控制台顶部的标签栏（拖动、双击最大化、窗口按钮都由界面处理）。
+        // macOS 保留系统的红绿灯按钮，叠在标签栏左侧（垂直居中于 40px 高的标签栏）
+        #[cfg(target_os = "macos")]
+        let builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true)
+            .traffic_light_position(tauri::LogicalPosition::new(16.0, 22.0));
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.decorations(false);
+        let built = builder.build();
         match built {
             Ok(w) => {
                 let _ = w.set_focus();
