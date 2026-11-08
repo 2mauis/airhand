@@ -147,6 +147,10 @@
     <string name="mode_touch_phone_short">Just like your phone</string>
     <string name="play_audio">Play the remote sound</string>
     <string name="play_audio_desc">Turn on sound when connected</string>
+    <string name="av_sync">A/V sync</string>
+    <string name="av_sync_desc">Align picture and sound for videos, with extra control latency. Active while sound is playing.</string>
+    <string name="menu_av_sync_on">A/V sync on</string>
+    <string name="menu_av_sync_off">A/V sync off</string>
     <string name="nav_keys">Navigation keys for phones</string>
     <string name="nav_keys_desc">Back, Home and Recents below the screen when controlling a phone</string>
     <string name="settings_data">Data</string>

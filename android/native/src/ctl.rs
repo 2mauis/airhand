@@ -5,8 +5,8 @@
 //!   （第一个字节是类型 1 / 2 / 3，见 [`airhand_link::controller::HEADER_LEN`]），会话事件是 JSON（第一个字节是 `{`）；
 //! * 命令：JSON（[`Cmd`]），[`Ctl::call`] 执行。画面的确认走单独的 [`Ctl::ack`]（每帧一次）。
 //!
-//! 和网页控制台一样用 [`Frontend::Browser`]：画面在 Kotlin 那边送进解码器之后才确认，
-//! 手机解码慢的时候被控端的在途帧控制也能感觉到；剪贴板也由 Kotlin 自己处理。
+//! 和网页控制台一样用 [`Frontend::Browser`]：画面在 Kotlin 那边确认；默认送进解码器后确认，
+//! 音画同步时进入有界等待队列后确认，避免主动等待被当成网络拥塞。剪贴板也由 Kotlin 自己处理。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

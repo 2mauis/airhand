@@ -144,6 +144,10 @@
     <string name="mode_touch_phone_short">和用手机一样</string>
     <string name="play_audio">播放对方的声音</string>
     <string name="play_audio_desc">连接后自动打开声音</string>
+    <string name="av_sync">音画同步</string>
+    <string name="av_sync_desc">看视频时让画面与声音对齐，会增加操作延迟；播放声音时生效</string>
+    <string name="menu_av_sync_on">音画同步：开</string>
+    <string name="menu_av_sync_off">音画同步：关</string>
     <string name="nav_keys">控制手机时显示导航键</string>
     <string name="nav_keys_desc">在画面下方显示返回、主页、最近任务</string>
     <string name="settings_data">数据</string>

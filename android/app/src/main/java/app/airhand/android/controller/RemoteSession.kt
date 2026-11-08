@@ -90,6 +90,7 @@ class RemoteSession(
     val videoSize = MutableStateFlow<Pair<Int, Int>?>(null)
     val cursor = MutableStateFlow(CursorState())
     val audioOn = MutableStateFlow(app.settings.value.audio)
+    val avSyncOn = MutableStateFlow(app.settings.value.avSync)
 
     /** 本机播放声音出错 */
     val audioError = MutableStateFlow<String?>(null)
@@ -121,8 +122,10 @@ class RemoteSession(
     private val wake = Object()
     private var woken = false
 
-    private val decoder = VideoDecoder(requestKeyframe = { command(JSONObject().put("op", "keyframe")) })
-    private var audio: AudioPlayer? = null
+    private val sync = AvSync()
+    private val decoder = VideoDecoder(sync, requestKeyframe = { command(JSONObject().put("op", "keyframe")) })
+    @Volatile private var audio: AudioPlayer? = null
+    private var audioToken = 0L
     private val sender = InputSender { events ->
         if (!viewOnly) command(JSONObject().put("op", "input").put("events", events))
     }
@@ -222,6 +225,7 @@ class RemoteSession(
             Log.e(TAG, "session thread failed", e)
             _phase.value = Phase.Failed(Problem("failed", e.toString()))
         } finally {
+            stopAudio()
             client.release()
             if (closed) _phase.value = Phase.Closed
         }
@@ -335,7 +339,7 @@ class RemoteSession(
                     cursor.value = CursorState(visible, bmp, bb.getShort(12).toInt() and 0xffff, bb.getShort(14).toInt() and 0xffff)
                 }
             }
-            3 -> audio?.submit(AudioPacket(b[1].toInt() == 1, b, HEADER, b.size - HEADER))
+            3 -> audio?.submit(AudioPacket(b[1].toInt() == 1, bb.getLong(16), b, HEADER, b.size - HEADER))
         }
     }
 
@@ -446,18 +450,45 @@ class RemoteSession(
         if (on) startAudio() else stopAudio()
     }
 
+    @Synchronized
+    fun setAvSync(on: Boolean) {
+        avSyncOn.value = on
+        app.updateSettings { it.copy(avSync = on) }
+        sync.setEnabled(on && audio != null)
+        decoder.refreshTiming()
+    }
+
+    @Synchronized
     private fun startAudio() {
+        if (closed || background || !audioOn.value) return
         if (audio == null) {
             audioError.value = null
-            audio = AudioPlayer { audioError.value = it }
+            val token = sync.reset()
+            audioToken = token
+            sync.setEnabled(avSyncOn.value)
+            audio = AudioPlayer(sync, token) { error ->
+                synchronized(this) {
+                    if (audioToken == token) {
+                        audioError.value = error
+                        audio = null
+                        audioToken = sync.reset()
+                        sync.setEnabled(false)
+                        decoder.refreshTiming()
+                    }
+                }
+            }
         }
         command(JSONObject().put("op", "audio").put("enabled", true))
     }
 
+    @Synchronized
     private fun stopAudio() {
         command(JSONObject().put("op", "audio").put("enabled", false))
         audio?.release()
         audio = null
+        audioToken = sync.reset()
+        sync.setEnabled(false)
+        decoder.refreshTiming()
     }
 
     /** 把文本同步到对方的剪贴板（对方之后可以粘贴） */
@@ -501,9 +532,8 @@ class RemoteSession(
                 Native.ctlCall(h, JSONObject().put("op", "close").put("sid", s).toString())
             }
         }
+        stopAudio()
         decoder.release()
-        audio?.release()
-        audio = null
         scope.cancel()
         if (_phase.value !is Phase.Failed) _phase.value = Phase.Closed
     }

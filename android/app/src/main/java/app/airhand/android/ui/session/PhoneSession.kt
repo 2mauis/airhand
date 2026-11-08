@@ -43,6 +43,7 @@ import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Crop
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material.icons.outlined.HighQuality
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.KeyboardCommandKey
 import androidx.compose.material.icons.outlined.KeyboardHide
@@ -421,6 +422,7 @@ private fun MainMenu(
     val encoder by session.encoder.collectAsState()
     val displays by session.displays.collectAsState()
     val audioOn by session.audioOn.collectAsState()
+    val avSyncOn by session.avSyncOn.collectAsState()
     val hostOs by session.hostOs.collectAsState()
 
     Row(Modifier.padding(horizontal = 20.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -469,6 +471,9 @@ private fun MainMenu(
         Action(if (audioOn) Icons.AutoMirrored.Outlined.VolumeUp else Icons.AutoMirrored.Outlined.VolumeOff, stringResource(if (audioOn) R.string.menu_sound_on else R.string.menu_sound_off), cell, active = audioOn) {
             session.setAudio(!audioOn)
         }
+        Action(Icons.Outlined.Sync, stringResource(if (avSyncOn) R.string.menu_av_sync_on else R.string.menu_av_sync_off), cell, active = avSyncOn, enabled = audioOn) {
+            session.setAvSync(!avSyncOn)
+        }
         Action(Icons.Outlined.HighQuality, stringResource(R.string.menu_quality), cell) { onPage(Page.QUALITY) }
         Action(Icons.Outlined.ContentPaste, stringResource(R.string.menu_clipboard), cell) { onPage(Page.CLIPBOARD) }
         if (displays.size > 1) {
@@ -481,7 +486,7 @@ private fun MainMenu(
         Action(Icons.AutoMirrored.Outlined.HelpOutline, stringResource(R.string.menu_help), cell) { onPage(Page.HELP) }
         Action(Icons.Outlined.LinkOff, stringResource(R.string.disconnect), cell, danger = true, onClick = onDisconnect)
         // 补齐最后一行，保持格子宽度一致
-        repeat((4 - (8 + (if (displays.size > 1) 1 else 0)) % 4) % 4) { Spacer(cell) }
+        repeat((4 - (9 + (if (displays.size > 1) 1 else 0)) % 4) % 4) { Spacer(cell) }
     }
 }
 

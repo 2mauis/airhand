@@ -13,7 +13,7 @@ import android.view.Surface
 import app.airhand.android.core.Codec
 import java.nio.ByteBuffer
 
-/** 一帧画面（`airhand_link` 的视频包去掉 24 字节头），`ack` 在送进解码器之后调用 */
+/** 一帧画面（`airhand_link` 的视频包去掉 24 字节头），确认回调至多执行一次。 */
 class VideoPacket(
     val seq: Int,
     val key: Boolean,
@@ -24,17 +24,28 @@ class VideoPacket(
     val data: ByteArray,
     val offset: Int,
     val length: Int,
-    val ack: () -> Unit,
-)
+    ack: () -> Unit,
+) {
+    private val acknowledge = ack
+    private var acknowledged = false
+    var decodeDeadlineNs = 0L
+
+    fun ack() {
+        if (acknowledged) return
+        acknowledged = true
+        acknowledge()
+    }
+}
 
 /**
- * 硬件解码（MediaCodec 异步模式），解出来的画面立即渲染到 Surface（TextureView）。
+ * 硬件解码（MediaCodec 异步模式），支持按音频播放时钟定时显示到 Surface（TextureView）。
  *
- * * 只有送进解码器之后才确认这一帧：手机解码跟不上时，被控端的在途帧控制会放慢，延迟不会越积越多；
+ * * 低延迟模式送入解码器后确认；音画同步模式在有界等待队列中确认，避免主动等待被误判为网络拥塞；
  * * 格式 / 分辨率变了、解码出错、Surface 换了：重建解码器，从下一个关键帧开始（主动向被控端要关键帧）；
  * * 没有 Surface（应用在后台）时收到的帧直接确认、丢掉。
  */
 class VideoDecoder(
+    private val sync: AvSync,
     private val requestKeyframe: () -> Unit,
     private val onError: (String) -> Unit = {},
 ) {
@@ -49,6 +60,15 @@ class VideoDecoder(
     private var needKey = true
     private var lastKeyRequest = 0L
     private var released = false
+    private var pendingBytes = 0L
+    private var decodeAvgNs = 0L
+    private val decoding = LinkedHashMap<Long, Long>()
+    private val feedTask = Runnable { feed() }
+
+    /** 开关改变、声音结束：重新计算等待时间，让画面及时恢复低延迟。 */
+    fun refreshTiming() {
+        handler.post { feed() }
+    }
 
     fun setSurface(s: Surface?) {
         handler.post {
@@ -120,23 +140,40 @@ class VideoDecoder(
             }
             needKey = false
         }
+        val arrivalNs = System.nanoTime()
+        sync.onVideo(p.ptsUs, arrivalNs, decodeAvgNs)
+        p.decodeDeadlineNs = arrivalNs + 500_000_000L
         pending.addLast(p)
-        if (pending.size > MAX_PENDING) {
+        pendingBytes += p.length
+        if (pending.size > (if (sync.enabled) MAX_SYNC_PENDING else MAX_PENDING) || pendingBytes > MAX_PENDING_BYTES) {
             // 解码器卡住了：丢掉排队的帧，等下一个关键帧
             Log.w(TAG, "decoder is not keeping up (${pending.size} frames queued), waiting for a keyframe")
             pending.forEach { it.ack() }
             pending.clear()
+            releaseCodec()
             needKey = true
             askKeyframe(force = true)
             return
         }
+        if (sync.enabled) p.ack()
         feed()
     }
 
     private fun feed() {
+        handler.removeCallbacks(feedTask)
         val mc = codec ?: return
-        while (pending.isNotEmpty() && freeInputs.isNotEmpty()) {
+        while (pending.isNotEmpty() && freeInputs.isNotEmpty() && decoding.size < MAX_PENDING) {
+            val first = pending.first()
+            val now = System.nanoTime()
+            // 等待期间音频可能停了或重新缓冲，以最新播放时钟为准。
+            val dueNs = minOf(first.decodeDeadlineNs, sync.decodeTimeNs(first.ptsUs, now, decodeAvgNs))
+            val waitNs = dueNs - now
+            if (waitNs > 1_000_000) {
+                handler.postDelayed(feedTask, (waitNs / 1_000_000).coerceAtMost(20))
+                return
+            }
             val p = pending.removeFirst()
+            pendingBytes -= p.length
             val idx = freeInputs.removeFirst()
             try {
                 val buf: ByteBuffer = mc.getInputBuffer(idx) ?: throw IllegalStateException("no input buffer")
@@ -145,6 +182,7 @@ class VideoDecoder(
                     throw IllegalStateException("frame of ${p.length} bytes doesn't fit the ${buf.capacity()} byte input buffer")
                 }
                 buf.put(p.data, p.offset, p.length)
+                decoding[p.ptsUs] = System.nanoTime()
                 mc.queueInputBuffer(idx, 0, p.length, p.ptsUs, if (p.key) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
             } catch (e: Exception) {
                 Log.w(TAG, "can't queue a frame: $e")
@@ -215,6 +253,10 @@ class VideoDecoder(
     }
 
     private fun releaseCodec() {
+        handler.removeCallbacks(feedTask)
+        pendingBytes = 0
+        decoding.clear()
+        decodeAvgNs = 0
         val mc = codec ?: return
         codec = null
         config = null
@@ -233,9 +275,18 @@ class VideoDecoder(
         override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
             if (codec !== this@VideoDecoder.codec) return
             try {
-                codec.releaseOutputBuffer(index, info.size > 0 || (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) == 0)
+                val now = System.nanoTime()
+                decoding.remove(info.presentationTimeUs)?.let { sent ->
+                    val elapsed = (now - sent).coerceIn(0, 500_000_000)
+                    decodeAvgNs = if (decodeAvgNs == 0L) elapsed else decodeAvgNs + (elapsed - decodeAvgNs) / 10
+                }
+                val render = info.size > 0 || (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) == 0
+                if (render && sync.enabled) codec.releaseOutputBuffer(index, sync.renderTimeNs(info.presentationTimeUs, now))
+                else codec.releaseOutputBuffer(index, render)
+                feed()
             } catch (e: Exception) {
                 Log.w(TAG, "releaseOutputBuffer: $e")
+                fail("render: $e")
             }
         }
 
@@ -251,6 +302,8 @@ class VideoDecoder(
     companion object {
         private const val TAG = "airhand"
         private const val MAX_PENDING = 12
+        private const val MAX_SYNC_PENDING = 120
+        private const val MAX_PENDING_BYTES = 32 * 1024 * 1024
 
         /** 从关键帧里取出参数集，作为 csd-0 / csd-1（有的解码器只认这种方式） */
         fun csd(p: VideoPacket): List<ByteArray> {

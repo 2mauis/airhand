@@ -60,6 +60,8 @@ data class Settings(
     val touchMode: TouchMode = TouchMode.AUTO,
     /** 连接后播放对方的声音 */
     val audio: Boolean = true,
+    /** 看视频时让画面与声音对齐，关闭时优先操作延迟。 */
+    val avSync: Boolean = false,
     /** 控制手机时显示返回 / 主页 / 最近任务按钮 */
     val navKeys: Boolean = true,
     /** 别人连接本机时先请我同意 */
@@ -74,6 +76,7 @@ data class Settings(
         .put("preset", preset)
         .put("touchMode", touchMode.id)
         .put("audio", audio)
+        .put("avSync", avSync)
         .put("navKeys", navKeys)
         .put("requireApproval", requireApproval)
         .put("tipsSeen", JSONArray(tipsSeen.toList()))
@@ -89,6 +92,7 @@ data class Settings(
                 preset = o.optString("preset", d.preset),
                 touchMode = TouchMode.of(o.optStringOrNull("touchMode")),
                 audio = o.optBoolean("audio", d.audio),
+                avSync = o.optBoolean("avSync", d.avSync),
                 navKeys = o.optBoolean("navKeys", d.navKeys),
                 requireApproval = o.optBoolean("requireApproval", d.requireApproval),
                 tipsSeen = if (tips == null) emptySet() else (0 until tips.length()).map { tips.getString(it) }.toSet(),

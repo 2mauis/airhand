@@ -17,7 +17,7 @@ On a TV, the phone entry point also switches to the TV interface.
 - **My devices**: every device you connect to is saved (name, OS, control code, last connection, resume token), so next time it's **one tap**. If it's offline the row says "Offline · connects automatically when it's back" and the remote screen opens by itself when it comes online; you can cancel any time. Devices can be renamed, their code copied, or removed (with undo)
 - A card at the top leads back to a session that's still running
 
-The remote screen is full screen with just one **draggable round button** (it snaps to the left / right edge) that opens the menu: keyboard, shortcuts, sound, quality (same presets as the desktop, plus the video format), clipboard (send to the remote clipboard / type it in), displays (with several monitors), fit screen, gestures, disconnect. The top of the menu shows the device's name, video format, frame rate, latency and bitrate. Rotating the phone to landscape fills the screen.
+The remote screen is full screen with just one **draggable round button** (it snaps to the left / right edge) that opens the menu: keyboard, shortcuts, sound, A/V sync, quality (same presets as the desktop, plus the video format), clipboard (send to the remote clipboard / type it in), displays (with several monitors), fit screen, gestures, disconnect. The top of the menu shows the device's name, video format, frame rate, latency and bitrate. Rotating the phone to landscape fills the screen.
 
 Two **touch input modes** (two big buttons in the menu switch any time, Settings sets the default; the default "Automatic" uses the trackpad for computers and touch for phones). The gestures are explained the first time each mode is used:
 
@@ -41,6 +41,8 @@ When the remote phone runs Android 7 (no continuous multi-finger gestures), only
 - A connected mouse and keyboard map directly to the remote mouse and keyboard
 - Back first asks "Disconnect?", so it can't happen by accident. Network drops reconnect automatically; if the device goes offline it says so and reconnects when it's back; if the other side disconnected you or changed its code, it says why and doesn't retry
 - In the background the session stays, at 2 fps and without sound, and resumes immediately when you return
+- **A/V sync** is off by default. Enable it in the session menu or Settings; the choice is saved. While sound is playing, video follows the actual audio output clock, and audio waits if video stays behind. This is useful for watching videos and adds control latency. Turning sound off, backgrounding and reconnecting reset the clock measurements
+- Sound uses adaptive jitter buffering: more buffering during network jitter, less after a stable period, and small speed corrections for clock drift. Excessive backlog skips old audio; short notification sounds still play
 
 ## Phone: Share screen (be controlled)
 
@@ -60,12 +62,12 @@ Remote input maps to the phone like this: touch points and the left mouse button
 
 ## Phone: Settings
 
-Server address and certificate fingerprint (defaults are compiled in and can be changed here; a malformed fingerprint can't be saved), this device's name (shown to others, defaults to the system device name), ask before someone connects, change control code, default quality, default touch input, play sound by default, navigation keys for phones, clear saved devices, version and protocol version.
+Server address and certificate fingerprint (defaults are compiled in and can be changed here; a malformed fingerprint can't be saved), this device's name (shown to others, defaults to the system device name), ask before someone connects, change control code, default quality, default touch input, play sound by default, A/V sync, navigation keys for phones, clear saved devices, version and protocol version.
 
 ## TV
 
 - Enter the control code on the left with the remote's number keys or the on-screen keypad; recent devices are on the right (arrow keys to pick, OK to connect); Settings (server, fingerprint, device name) is at the top right
-- The picture is full screen with sound on. **OK / Menu** opens the side menu: sound, displays, quality (each press picks the next preset), connection info, disconnect; **left / right** switch the remote display; **Back** closes the menu, and asks before disconnecting
+- The picture is full screen with sound on. **OK / Menu** opens the side menu: sound, A/V sync, displays, quality (each press picks the next preset), connection info, disconnect; **left / right** switch the remote display; **Back** closes the menu, and asks before disconnecting
 
 ## Where the data is stored
 

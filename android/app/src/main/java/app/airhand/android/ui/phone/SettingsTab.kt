@@ -18,6 +18,7 @@ import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Navigation
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Smartphone
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material3.Icon
@@ -118,6 +119,9 @@ fun SettingsTab(modifier: Modifier, snackbar: SnackbarHostState) {
         Item(Icons.Outlined.Gesture, stringResource(R.string.touch_mode), touchModeName(s.touchMode)) { dialog = "mode" }
         Toggle(Icons.AutoMirrored.Outlined.VolumeUp, stringResource(R.string.play_audio), stringResource(R.string.play_audio_desc), s.audio) { v ->
             app.updateSettings { it.copy(audio = v) }
+        }
+        Toggle(Icons.Outlined.Sync, stringResource(R.string.av_sync), stringResource(R.string.av_sync_desc), s.avSync) { v ->
+            app.updateSettings { it.copy(avSync = v) }
         }
         Toggle(Icons.Outlined.Navigation, stringResource(R.string.nav_keys), stringResource(R.string.nav_keys_desc), s.navKeys) { v ->
             app.updateSettings { it.copy(navKeys = v) }

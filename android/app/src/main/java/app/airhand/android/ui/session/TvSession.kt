@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.HighQuality
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.Monitor
@@ -273,6 +274,7 @@ private fun TvMenu(
     onDisconnect: () -> Unit,
 ) {
     val audioOn by session.audioOn.collectAsState()
+    val avSyncOn by session.avSyncOn.collectAsState()
     val displays by session.displays.collectAsState()
     val current by session.currentDisplay.collectAsState()
     val q by session.quality.collectAsState()
@@ -296,6 +298,9 @@ private fun TvMenu(
             stringResource(if (audioOn) R.string.on else R.string.off),
             Modifier.focusRequester(first),
         ) { session.setAudio(!audioOn) }
+        TvMenuItem(Icons.Outlined.Sync, stringResource(R.string.av_sync), stringResource(if (avSyncOn) R.string.on else R.string.off)) {
+            session.setAvSync(!avSyncOn)
+        }
         if (displays.size > 1) {
             TvMenuItem(Icons.Outlined.Monitor, stringResource(R.string.menu_displays), stringResource(R.string.display_n, current + 1)) { onDisplay() }
         }
