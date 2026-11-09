@@ -27,7 +27,7 @@ On Windows Airhand is installed with its installer (into `C:\Program Files\Airha
 - Opening Airhand starts the service; **Quit** in the tray stops it (as before, the computer can't be controlled after quitting); when the service stops (or is uninstalled) the tray icons close too
 - **Start with Windows** (tray menu, on by default): the service starts at boot, so the computer can be controlled before anyone signs in, and the tray icon appears after signing in
 - The configuration file `config.toml` is in the install directory (created on installation, see [Configuration file](#configuration-file)) and maintained by the service; edit it as administrator
-- **Uninstalling** (Settings → Apps) stops and removes the service, the startup entry, `config.toml` and the program; nothing is left behind. Installing a new version over an old one keeps `config.toml`, and with it the control code and My devices, even if you choose to uninstall the old version first
+- **Uninstalling** (Settings → Apps) stops and removes the service, the startup entry, `config.toml` and the program; nothing is left behind (see [Uninstalling](#uninstalling)). Installing a new version over an old one keeps `config.toml`, and with it the control code and My devices, even if you choose to uninstall the old version first
 - A bare `airhand.exe` doesn't run without being installed: release builds ask you to run the installer. Debug builds (`npm run tauri dev`) run the host inside the tray process, like on macOS and Linux, with `config.toml` next to the program (`client/src-tauri/target/debug/`)
 
 ## Configuration file
@@ -51,7 +51,67 @@ Everything Airhand saves is in one `config.toml` (with comments). The menu in th
 - Restart Airhand after changing settings (Quit, then open it again). Airhand keeps your edits and comments when it saves the code or devices
 - **Deleted by accident** (the file or the whole directory): it's recreated with the default settings at startup, and within a few seconds while running. This computer's control code, the autostart setting (on macOS, the record of Open at login) and My devices carry over from before the deletion, so nothing is lost; other settings go back to their defaults
 - A control code is enough to control its computer, so treat it like a key. On macOS / Linux only your account can read and write the file (mode 600, directory 700). On Windows the file is in the install directory, readable by every account on the computer: this computer's secret is encrypted with DPAPI for the SYSTEM account, and the codes in My devices with the Windows account that saved them, so other accounts and other computers can't read them (each account on the same computer only sees its own devices)
-- Windows removes it when uninstalling; on macOS / Linux it stays after the program is removed (as is customary there), so delete the directory above if you don't need it anymore
+- Windows removes it when uninstalling; on macOS / Linux it stays after the program is removed (as is customary there), so remove it too, see [Uninstalling](#uninstalling)
+
+## Uninstalling
+
+After these steps nothing of Airhand is left on the computer. The configuration file holds this computer's control code and the codes of the computers in My devices (they work like keys), so do delete it if you stop using Airhand.
+
+### Windows
+
+Settings → Apps → Airhand → Uninstall. The uninstaller stops and removes the Airhand service and the startup entry, and deletes the install directory (including `config.toml`), the registry keys the installer wrote, the Windows Firewall rules added for `airhand.exe`, and the console's temporary directories. Nothing else to do by hand.
+
+(Choosing "uninstall the old version first" during an upgrade isn't an uninstall: `config.toml` is kept, see [Windows installation](#windows-installation).)
+
+### macOS
+
+macOS apps have no uninstaller, and moving the app to the Trash only removes the program itself. The items below have to go too, **in this order**: the login item has to be unregistered by Airhand itself, and the permission records can only be cleared while the app is still there.
+
+1. Click the Airhand icon in the menu bar, **turn off "Open at login"**, then choose **Quit** (older versions don't have this item and never registered a login item, so just quit).
+   If you delete the app without turning it off first, a dead Airhand entry stays in both "Open at Login" and "App Background Activity" in System Settings → General → Login Items ("Login Items & Extensions" on some versions of macOS).
+2. Open Terminal and clear Airhand's permission records (Screen & System Audio Recording, Accessibility and so on; only Airhand's):
+
+   ```bash
+   tccutil reset All app.airhand.client
+   ```
+
+   It should say `Successfully reset All approval status for app.airhand.client`. If it says `No such bundle identifier`, the app is already gone, see "Already deleted the app" below.
+3. Delete the program, the configuration file, and the caches macOS created for it (a few directories that WebKit and Metal create under Airhand's name in the system's temporary and cache directories, mostly empty):
+
+   ```bash
+   rm -rf /Applications/Airhand.app ~/Applications/Airhand.app
+   rm -rf ~/Library/Application\ Support/app.airhand.client
+   find "$(getconf DARWIN_USER_CACHE_DIR)" "$(getconf DARWIN_USER_TEMP_DIR)" -maxdepth 1 -name '*app.airhand.client' -exec rm -rf {} + 2>/dev/null
+   ```
+
+   Instead of the first line you can also drag Airhand from the Applications folder to the Trash (and empty it). `find` runs into other apps' protected directories; those errors are silenced and don't affect the result.
+4. (Optional) Delete the crash reports macOS kept (only there if Airhand has crashed):
+
+   ```bash
+   find ~/Library/Logs/DiagnosticReports ~/Library/Application\ Support/CrashReporter -maxdepth 1 -name 'airhand[-_]*' -delete 2>/dev/null
+   ```
+
+Check: if these commands print nothing, and neither System Settings → General → Login Items nor Privacy & Security → Screen & System Audio Recording / Accessibility lists Airhand, it's all gone.
+
+```bash
+ls -d /Applications/Airhand.app ~/Applications/Airhand.app ~/Library/Application\ Support/app.airhand.client 2>/dev/null
+find "$(getconf DARWIN_USER_CACHE_DIR)" "$(getconf DARWIN_USER_TEMP_DIR)" -maxdepth 1 -name '*app.airhand.client' 2>/dev/null
+```
+
+**Already deleted the app** (without steps 1 and 2 first): put Airhand.app back where it was (for example drag it from the downloaded `.dmg` into the Applications folder again), open it, and start again from step 1. macOS still remembers the login item, and turning it off in the menu removes both entries, under "Open at Login" and "App Background Activity". If you'd rather not install it again, remove them by hand: select Airhand under "Open at Login" in Login Items and click "−", and do the same in Privacy & Security → Screen & System Audio Recording / Accessibility.
+
+### Linux
+
+```bash
+sudo apt remove airhand     # the program (installed from the .deb)
+rm -rf ~/.config/airhand    # the configuration file: apt (even purge) never touches files in your home directory
+```
+
+There's no startup entry and no system permission to clean up on Linux. The tray icon's and the console's temporary directories (`$XDG_RUNTIME_DIR/airhand-run-*`, `/tmp/airhand-webview-*`) are deleted when Airhand quits; they're only left behind if the process was killed (they're cleaned up at the next start), and the system usually clears them when you log out or reboot. To remove them by hand: `rm -rf "$XDG_RUNTIME_DIR"/airhand-run-* /tmp/airhand-webview-*`.
+
+### Android
+
+Uninstall the app in the system: the settings, saved devices and this phone's control code are all in the app's private directory, which the system deletes (see [Android → Where the data is stored](android.md#where-the-data-is-stored)); the accessibility service used for remote control goes with the app.
 
 ## Controller
 

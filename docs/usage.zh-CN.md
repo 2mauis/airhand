@@ -27,7 +27,7 @@ Windows 上用安装程序安装（装到 `C:\Program Files\Airhand`，所有用
 - 打开 Airhand 时启动服务；托盘里**退出**时停止服务（和以前一样，退出后本机不能再被控制）；服务停止（或者被卸载）时托盘也随之退出
 - **开机自动启动**（托盘菜单，默认开启）：开机时启动服务，登录之前就能被控制；登录后出现托盘图标
 - 配置文件 `config.toml` 在安装目录里（安装时生成，见[配置文件](#配置文件)），由服务维护；要用管理员身份修改
-- **卸载**（设置 → 应用）会停止并删除服务、开机启动项、`config.toml` 和程序，不留下任何东西。在旧版本上安装新版本时保留 `config.toml`（也就保留了控制码和我的设备），选择“先卸载旧版本”也一样
+- **卸载**（设置 → 应用）会停止并删除服务、开机启动项、`config.toml` 和程序，不留下任何东西（见[卸载](#卸载)）。在旧版本上安装新版本时保留 `config.toml`（也就保留了控制码和我的设备），选择“先卸载旧版本”也一样
 - 没有安装的 `airhand.exe` 不能直接运行：发布版会提示运行安装程序。调试构建（`npm run tauri dev`）和 macOS、Linux 一样在托盘进程里运行被控端，`config.toml` 放在程序旁边（`client/src-tauri/target/debug/`）
 
 ## 配置文件
@@ -51,7 +51,67 @@ Airhand 要保存的东西都在一个 `config.toml` 里（里面有注释）。
 - 改了设置要重新启动 Airhand 才生效（退出，再打开）。Airhand 保存控制码和设备时会保留你改过的内容和注释
 - **不小心删掉了**（这个文件或者整个目录）：启动时、以及运行中几秒之内，按默认配置重新生成；本机的控制码、开机自动启动（macOS 是登录时自动启动的记录）和我的设备从删掉之前的内容接着用，不会丢，其余设置回到默认
 - 控制码能直接控制对应的电脑，相当于钥匙。macOS / Linux 上只有你的账户能读写这个文件（权限 600，目录 700）。Windows 上文件在安装目录里，本机的所有账户都能读：本机的密钥用 SYSTEM 账户的 DPAPI 加密，我的设备里的控制码用保存它的那个 Windows 账户加密，别的账户、别的电脑都解不开（同一台电脑上每个账户只看得到自己的设备）
-- Windows 卸载时删除；macOS / Linux 上删掉程序后它还在（系统的惯例），不需要了就删掉上面的目录
+- Windows 卸载时删除；macOS / Linux 上删掉程序后它还在（系统的惯例），要一起删掉，见[卸载](#卸载)
+
+## 卸载
+
+按下面的步骤做完，Airhand 在这台电脑上什么都不会留下。配置文件里有本机的控制码和“我的设备”里别的电脑的控制码（相当于钥匙），不再用 Airhand 的话请一定删掉。
+
+### Windows
+
+设置 → 应用 → Airhand → 卸载。卸载程序会停止并删除系统服务 Airhand、开机启动项，删除安装目录（包括 `config.toml`）、安装程序写的注册表项、Windows 防火墙里为 `airhand.exe` 添加的规则，以及控制台的临时目录。不用再手动做什么。
+
+（升级时选择“先卸载旧版本”不算卸载：会保留 `config.toml`，见 [Windows 安装版](#windows-安装版)。）
+
+### macOS
+
+macOS 的 App 没有卸载程序，拖进废纸篓只删掉了程序本身。下面几样也要清掉，而且**顺序不能乱**：登录项要由 Airhand 自己注销，权限记录要在 App 还在的时候才能清除。
+
+1. 点菜单栏里的 Airhand 图标，**关掉“登录时自动启动”**，然后选**退出**（旧版本的菜单里没有这一项，也就没有登记过登录项，直接退出）。
+   不先关掉就删掉 App 的话，“系统设置 → 通用 → 登录项”（有的系统版本叫“登录项与扩展”）里“登录时打开”和“后台 App 活动”两处都会留下一个失效的 Airhand。
+2. 打开“终端”，清除 Airhand 的权限记录（“屏幕与系统录音”“辅助功能”等，只影响 Airhand）：
+
+   ```bash
+   tccutil reset All app.airhand.client
+   ```
+
+   看到 `Successfully reset All approval status for app.airhand.client` 就好了。如果提示 `No such bundle identifier`，说明 App 已经删掉了，见下面的“已经直接删掉了 App”。
+3. 删除程序、配置文件，以及 macOS 为它生成的缓存（WebKit、Metal 在系统的临时目录和缓存目录里以 Airhand 的名字建的几个目录，大多是空的）：
+
+   ```bash
+   rm -rf /Applications/Airhand.app ~/Applications/Airhand.app
+   rm -rf ~/Library/Application\ Support/app.airhand.client
+   find "$(getconf DARWIN_USER_CACHE_DIR)" "$(getconf DARWIN_USER_TEMP_DIR)" -maxdepth 1 -name '*app.airhand.client' -exec rm -rf {} + 2>/dev/null
+   ```
+
+   第一行也可以换成在“应用程序”文件夹里把 Airhand 拖进废纸篓（再清空废纸篓）。`find` 会碰到别的 App 受保护的目录，那些报错已经忽略了，不影响结果。
+4. （可选）删除 macOS 记下的崩溃报告（只有 Airhand 崩溃过才有）：
+
+   ```bash
+   find ~/Library/Logs/DiagnosticReports ~/Library/Application\ Support/CrashReporter -maxdepth 1 -name 'airhand[-_]*' -delete 2>/dev/null
+   ```
+
+检查：下面的命令什么都不输出，并且“系统设置 → 通用 → 登录项”和“隐私与安全性 → 屏幕与系统录音 / 辅助功能”里都没有 Airhand，就是删干净了。
+
+```bash
+ls -d /Applications/Airhand.app ~/Applications/Airhand.app ~/Library/Application\ Support/app.airhand.client 2>/dev/null
+find "$(getconf DARWIN_USER_CACHE_DIR)" "$(getconf DARWIN_USER_TEMP_DIR)" -maxdepth 1 -name '*app.airhand.client' 2>/dev/null
+```
+
+**已经直接删掉了 App**（没有先做第 1、2 步）：把 Airhand.app 重新放回原来的位置（例如从下载的 `.dmg` 里再拖进“应用程序”文件夹），打开它，再从第 1 步做起。系统还记着原来的登录项，在菜单里关掉就会把“登录时打开”和“后台 App 活动”里的两处一起删掉。不想再装一次的话也可以手动删：“登录项”里在“登录时打开”中选中 Airhand 点“−”，“隐私与安全性 → 屏幕与系统录音 / 辅助功能”里选中 Airhand 点“−”。
+
+### Linux
+
+```bash
+sudo apt remove airhand     # 删除程序（.deb 安装的）
+rm -rf ~/.config/airhand    # 配置文件：apt（包括 purge）不会删用户目录里的东西
+```
+
+Linux 上没有开机启动项和系统权限要清理。托盘图标、控制台的临时目录（`$XDG_RUNTIME_DIR/airhand-run-*`、`/tmp/airhand-webview-*`）在 Airhand 退出时就删掉了；只有进程被强制结束过才会留下（下次启动时会清理），通常注销 / 重启时系统也会清空它们，也可以手动删掉：`rm -rf "$XDG_RUNTIME_DIR"/airhand-run-* /tmp/airhand-webview-*`。
+
+### Android
+
+在系统里卸载应用即可：设置、保存的设备、本机的控制码都在应用的私有目录里，系统会全部删除（见 [Android → 数据保存在哪里](android.zh-CN.md#数据保存在哪里)）；“远程操作”用的无障碍服务也随应用一起移除。
 
 ## 控制端
 

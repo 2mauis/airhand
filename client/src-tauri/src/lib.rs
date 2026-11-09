@@ -183,7 +183,7 @@ fn open_console(app: &AppHandle) {
         let builder =
             WebviewWindowBuilder::new(&app, CONSOLE, WebviewUrl::App("index.html".into()));
         // WebView2 / WebKitGTK 需要一个数据目录（放在临时目录里，用完删除，见 ephemeral）；
-        // macOS 的 WKWebView 没有这个概念，隐私模式下本来就不往磁盘写东西
+        // macOS 的 WKWebView 没有这个概念，隐私模式下不保存网页数据（WebKit 自己在系统临时目录里建的目录见 ephemeral）
         #[cfg(not(target_os = "macos"))]
         let builder = {
             let dir = ephemeral::new_dir();
