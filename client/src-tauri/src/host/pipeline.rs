@@ -4,6 +4,11 @@
 //! * 永远只编码**最新**的一帧，旧帧直接丢弃，不排队；
 //! * 在途（已发送未确认）帧数量受限，网络变慢时编码器等待而不是把数据堆进缓冲区；
 //! * 自适应码率根据阻塞情况与 RTT 膨胀程度下调/恢复码率。
+//!
+//! 画面停下来之后补画质：画面大面积变化（切换窗口、滚动）时，码率控制只能给这一帧分到大约一帧的码率，
+//! 文字是糊的；采集只在画面变化时才有新帧，不补的话控制端就一直停在这一帧上。把最后一帧再编几次，
+//! 编码器只需要补残差，几帧之内就接近原画（实测 VideoToolbox H.264、4 Mbps、2880×1800 缩到 1080p 的文字：
+//! 42 dB → 58 dB，补的几帧一共约 40 KB）。编码器偶尔丢掉的帧（返回空）也靠这一步补发。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +23,13 @@ use tracing::{info, warn};
 
 use super::capture::{self, Frame};
 use super::encoder::Encoder;
+
+/// 画面停下来之后，同一帧最多再编这么多次
+const REFINE_FRAMES: u8 = 8;
+/// 画面静止这么久之后才开始补：画面还在连续变化（打字、播放）时不和新画面抢编码器
+const REFINE_AFTER: Duration = Duration::from_millis(200);
+/// 补的这一帧不到这么大，说明已经没什么可补的了
+const REFINE_DONE_BYTES: usize = 512;
 
 pub struct Pipeline {
     ctrl: Arc<Ctrl>,
@@ -117,6 +129,9 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
     let mut next_due = Instant::now();
     let mut abr = Abr::new(settings.bitrate_kbps);
     let mut reported_error: Option<String> = None;
+    // 补画质：还要补几次、最早什么时候补
+    let mut refine_left = 0u8;
+    let mut refine_due = Instant::now();
     info!(screen, ?settings, "encoding pipeline started");
 
     let send = |msg: &HostMsg, cap: usize| -> bool {
@@ -154,7 +169,14 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
             info!(?settings, "quality settings updated");
         }
 
-        let (fs, cs) = slot.wait_change(frame_seq, cursor_seq, Duration::from_millis(40));
+        let wait = if refine_left > 0 {
+            refine_due
+                .saturating_duration_since(Instant::now())
+                .clamp(Duration::from_millis(1), Duration::from_millis(40))
+        } else {
+            Duration::from_millis(40)
+        };
+        let (fs, cs) = slot.wait_change(frame_seq, cursor_seq, wait);
 
         // 光标变化：只发送可见性 +（如有变化）形状
         if cs > cursor_seq {
@@ -193,8 +215,9 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
                 }
                 reported_error = Some(err);
             }
-            // 画面静止但控制端需要关键帧（例如解码器重置）：重新编码上一帧
-            if !(force && last_frame.is_some()) {
+            // 画面静止但控制端需要关键帧（例如解码器重置），或者该补画质了：重新编码上一帧
+            let refine = refine_left > 0 && Instant::now() >= refine_due;
+            if !((force || refine) && last_frame.is_some()) {
                 if settings.adaptive {
                     let (srtt, min_rtt) = ctrl.flow.rtt();
                     abr.tick(srtt, min_rtt);
@@ -223,14 +246,14 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
                 return;
             }
         }
-        // 取等待期间到达的最新一帧
-        let frame = match slot.try_newer(frame_seq) {
+        // 取等待期间到达的最新一帧；没有的话重新编码上一帧（关键帧、补画质）
+        let (frame, fresh) = match slot.try_newer(frame_seq) {
             Some((s, f)) => {
                 frame_seq = s;
-                f
+                (f, true)
             }
             None => match &last_frame {
-                Some(f) => f.clone(),
+                Some(f) => (f.clone(), false),
                 None => continue,
             },
         };
@@ -272,6 +295,13 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
             e.set_bitrate(abr.current);
         }
 
+        // 新画面、关键帧之后从头开始补；补的帧本身只减次数
+        if fresh || force {
+            refine_left = REFINE_FRAMES;
+            refine_due = started + REFINE_AFTER;
+        } else {
+            refine_left = refine_left.saturating_sub(1);
+        }
         match e.encode(&frame, force) {
             Ok(Some(ef)) => {
                 if ctrl.stop.load(Ordering::Acquire) {
@@ -280,13 +310,18 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
                 let seq = ctrl.flow.sent();
                 let info = e.info();
                 let len = ef.data.len();
+                if !fresh && !force && len < REFINE_DONE_BYTES {
+                    refine_left = 0;
+                }
                 let msg = HostMsg::Video(VideoFrame {
                     seq,
                     key: ef.key,
                     codec: info.codec,
                     width: info.width as u16,
                     height: info.height as u16,
-                    capture_us: super::clock::us(frame.captured),
+                    // 重新编码的上一帧就是现在的画面（画面一直没变），采集时间记为现在：
+                    // 控制端按采集时间做音画同步，用旧的时间会以为这一帧严重滞后，让声音跟着多等
+                    capture_us: super::clock::us(if fresh { frame.captured } else { started }),
                     data: ef.data,
                 });
                 if !send(&msg, len) {

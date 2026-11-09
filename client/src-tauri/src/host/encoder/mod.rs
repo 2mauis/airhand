@@ -4,7 +4,7 @@
 //!   支持 H.264 / H.265 / AV1；macOS VideoToolbox，支持 H.264 / H.265。几乎不占用 CPU；
 //! * **软件编码**（兜底）：OpenH264 屏幕内容模式。
 //!
-//! 共同的预处理：BGRA →（SIMD 缩放）→（SIMD 色彩转换）YUV 4:2:0。
+//! 共同的预处理：BGRA →（SIMD 缩放，分条多线程）→（SIMD 色彩转换）YUV 4:2:0。
 //! 被控端只在画面变化时才编码，静止画面完全不占带宽。
 
 #[cfg(windows)]
@@ -27,6 +27,75 @@ use super::capture::Frame;
 /// 硬件编码器普遍支持的最大分辨率（同时也是 OpenH264 Level 5.2 的上限）
 const MAX_LONG: u32 = 3840;
 const MAX_SHORT: u32 = 2160;
+
+/// 缩放时每条至少这么多行：太小的画面分条不划算
+const MIN_STRIPE_ROWS: u32 = 128;
+
+/// 缩放分成几条同时做（编码线程自己做其中一条）：一半的核，最多 4 条。
+///
+/// 缩放在每一帧的关键路径上（采集 → 缩放 → 色彩转换 → 编码 → 发送），省下的时间直接就是每帧的延迟。
+/// 实测 Apple M1、30 fps、2880×1800 → 1728×1080：单线程约 18.5 ms，分 4 条约 9 ms；
+/// 代价是 CPU 总时间多出约 80%（多出来的核频率低一些，有的落在能效核上）。只在画面变化、需要缩放时才有
+fn resize_threads() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(1, |n| n.get() / 2)
+            .clamp(1, 4)
+    })
+}
+
+/// 把 `src` 缩放进 `dst`（紧密排列的 `w`×`h` BGRA）：按输出的行分成几条，每条用自己的缩放器同时缩放。
+///
+/// 每条只裁出对应的源区域，卷积仍然会用到区域外的像素，所以结果与整幅缩放逐像素相同
+///（见测试 `striped_resize_matches_whole`）。
+fn resize_striped(
+    src: &fir::images::ImageRef,
+    (src_w, src_h): (u32, u32),
+    dst: &mut [u8],
+    (w, h): (u32, u32),
+    resizers: &mut [fir::Resizer],
+) -> Result<()> {
+    let n = (resizers.len() as u32).min(h / MIN_STRIPE_ROWS).max(1);
+    let rows = h.div_ceil(n);
+    let scale = src_h as f64 / h as f64;
+    // 缩小用 Catmull-Rom 卷积：文字边缘比双线性清晰得多。Retina 屏（例如 2880×1800）缩到 1080p
+    // 是 0.6 这样的非整数倍，macOS 的细字体用双线性缩完明显发虚（单线程时 Catmull-Rom 比双线性慢约 60%）
+    let job = |r: &mut fir::Resizer, y0: u32, band: &mut [u8]| -> Result<()> {
+        let rows = (band.len() / (w as usize * 4)) as u32;
+        let mut img = fir::images::Image::from_slice_u8(w, rows, band, fir::PixelType::U8x4)
+            .map_err(|e| anyhow!("invalid target image: {e}"))?;
+        let opts = fir::ResizeOptions::new()
+            .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom))
+            .use_alpha(false)
+            .crop(0.0, y0 as f64 * scale, src_w as f64, rows as f64 * scale);
+        r.resize(src, &mut img, &opts).context("scaling failed")
+    };
+    let job = &job;
+    let mut bands = dst
+        .chunks_mut((rows * w * 4) as usize)
+        .zip(resizers.iter_mut())
+        .enumerate();
+    let Some((_, (first, first_resizer))) = bands.next() else {
+        return Ok(());
+    };
+    std::thread::scope(|s| {
+        let others: Vec<_> = bands
+            .map(|(i, (band, r))| {
+                s.spawn(move || {
+                    super::capture::raise_priority();
+                    job(r, i as u32 * rows, band)
+                })
+            })
+            .collect();
+        let mine = job(first_resizer, 0, first);
+        for t in others {
+            t.join()
+                .map_err(|_| anyhow!("a scaling thread panicked"))??;
+        }
+        mine
+    })
+}
 
 pub struct EncodedFrame {
     pub data: Vec<u8>,
@@ -116,7 +185,8 @@ fn hardware_encoder(
 /// 缩放 + 编码。持有可复用的缩放缓冲区。
 pub struct Encoder {
     inner: Box<dyn VideoEncoder>,
-    resizer: fir::Resizer,
+    /// 每条一个（见 [`resize_striped`]），缓冲区逐帧复用
+    resizers: Vec<fir::Resizer>,
     scaled: Vec<u8>,
     src_w: u32,
     src_h: u32,
@@ -173,7 +243,7 @@ impl Encoder {
         info!(encoder = %i.name, hw = i.hardware, codec = ?i.codec, w, h, kbps, "encoder created");
         Ok(Self {
             inner,
-            resizer: fir::Resizer::new(),
+            resizers: (0..resize_threads()).map(|_| fir::Resizer::new()).collect(),
             scaled: Vec::new(),
             src_w,
             src_h,
@@ -225,16 +295,13 @@ impl Encoder {
             )
             .map_err(|e| anyhow!("invalid source image: {e}"))?;
             self.scaled.resize((w * h * 4) as usize, 0);
-            let mut dst =
-                fir::images::Image::from_slice_u8(w, h, &mut self.scaled, fir::PixelType::U8x4)
-                    .map_err(|e| anyhow!("invalid target image: {e}"))?;
-            // 缩小时使用双线性卷积（对文字边缘比最近邻清晰得多，且 SIMD 下 4K→1080p 只需数毫秒）
-            let opts = fir::ResizeOptions::new()
-                .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear))
-                .use_alpha(false);
-            self.resizer
-                .resize(&src, &mut dst, &opts)
-                .context("scaling failed")?;
+            resize_striped(
+                &src,
+                (frame.width, frame.height),
+                &mut self.scaled,
+                (w, h),
+                &mut self.resizers,
+            )?;
             &self.scaled
         };
         self.inner.encode(bgra, force_key)
@@ -325,6 +392,30 @@ mod tests {
         let _ = enc.encode(&frame, true).unwrap();
         assert!(got_key, "{codec:?} 没有产生关键帧");
         Some(enc.info().name.clone())
+    }
+
+    /// 分条缩放与整幅缩放逐像素相同（条与条之间没有接缝）
+    #[test]
+    fn striped_resize_matches_whole() {
+        let src = synthetic(2880, 1800);
+        let img = fir::images::ImageRef::new(2880, 1800, &src.data, fir::PixelType::U8x4).unwrap();
+        for (w, h) in [
+            (1728u32, 1080u32),
+            (1590, 994),
+            (1554, 972),
+            (576, 360),
+            (320, 200),
+        ] {
+            let mut whole = vec![0u8; (w * h * 4) as usize];
+            let mut one = [fir::Resizer::new()];
+            resize_striped(&img, (2880, 1800), &mut whole, (w, h), &mut one).unwrap();
+            for n in [2, 3, 4] {
+                let mut striped = vec![1u8; whole.len()];
+                let mut rs: Vec<_> = (0..n).map(|_| fir::Resizer::new()).collect();
+                resize_striped(&img, (2880, 1800), &mut striped, (w, h), &mut rs).unwrap();
+                assert!(striped == whole, "{w}x{h} 分 {n} 条与整幅缩放不同");
+            }
+        }
     }
 
     #[test]
