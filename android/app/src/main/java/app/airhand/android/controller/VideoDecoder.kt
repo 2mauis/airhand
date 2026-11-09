@@ -42,12 +42,15 @@ class VideoPacket(
  *
  * * 低延迟模式送入解码器后确认；音画同步模式在有界等待队列中确认，避免主动等待被误判为网络拥塞；
  * * 格式 / 分辨率变了、解码出错、Surface 换了：重建解码器，从下一个关键帧开始（主动向被控端要关键帧）；
- * * 没有 Surface（应用在后台）时收到的帧直接确认、丢掉。
+ * * 没有 Surface（应用在后台）时收到的帧直接确认、丢掉；
+ * * 画面尺寸超出本机解码器的能力（例如竖屏手机的 1080×2400 之于只到 1080p 的电视）：照样试着解码，
+ *   同时通过 `onTooLarge` 让会话请对方缩小画面。
  */
 class VideoDecoder(
     private val sync: AvSync,
     private val requestKeyframe: () -> Unit,
     private val onError: (String) -> Unit = {},
+    private val onTooLarge: (Codec, Int, Int) -> Unit = { _, _, _ -> },
 ) {
     private val thread = HandlerThread("airhand-decode").apply { start() }
     private val handler = Handler(thread.looper)
@@ -126,6 +129,10 @@ class VideoDecoder(
                 needKey = true
                 askKeyframe()
                 return
+            }
+            if (!fits(p.codec, p.width, p.height)) {
+                Log.w(TAG, "${p.codec.label} ${p.width}x${p.height} is beyond what ${decoderInfo(p.codec)?.name} supports")
+                onTooLarge(p.codec, p.width, p.height)
             }
             if (!configure(p)) {
                 p.ack()
@@ -226,9 +233,12 @@ class VideoDecoder(
             setInteger("vendor.rtc-ext-dec-low-latency.enable", 1)
             setInteger("vendor.low-latency.enable", 1)
         }
+        val name = decoderInfo(p.codec)?.name
         for (f in listOf(lowLatency, format)) {
             val mc = try {
-                MediaCodec.createDecoderByType(p.codec.mime)
+                // 与判断尺寸用的是同一个解码器
+                name?.let { runCatching { MediaCodec.createByCodecName(it) }.getOrNull() }
+                    ?: MediaCodec.createDecoderByType(p.codec.mime)
             } catch (e: Exception) {
                 Log.w(TAG, "no ${p.codec.mime} decoder: $e")
                 onError("no ${p.codec.label} decoder")
@@ -324,9 +334,42 @@ class VideoDecoder(
             }
         }
 
+        private val infos: List<MediaCodecInfo> by lazy {
+            runCatching { MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.toList() }.getOrDefault(emptyList())
+        }
+
+        /** 解码各种格式用的解码器：硬件优先，跳过只能用于加密 / 隧道播放的 */
+        private val decoders: Map<Codec, Pair<MediaCodecInfo, String>?> by lazy {
+            Codec.entries.associateWith { c ->
+                val all = infos.mapNotNull { i ->
+                    if (i.isEncoder) return@mapNotNull null
+                    val type = i.supportedTypes.firstOrNull { it.equals(c.mime, ignoreCase = true) } ?: return@mapNotNull null
+                    val regular = runCatching {
+                        val caps = i.getCapabilitiesForType(type)
+                        !caps.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_SecurePlayback) &&
+                            !caps.isFeatureRequired(MediaCodecInfo.CodecCapabilities.FEATURE_TunneledPlayback)
+                    }.getOrDefault(false)
+                    if (regular) i to type else null
+                }
+                all.firstOrNull { isHardware(it.first) } ?: all.firstOrNull()
+            }
+        }
+
+        fun decoderInfo(c: Codec): MediaCodecInfo? = decoders[c]?.first
+
+        /** 本机解码器支不支持这个尺寸（不知道时算支持）。有的解码器要求 16 对齐，对齐之后也试一次 */
+        fun fits(c: Codec, w: Int, h: Int): Boolean {
+            val (info, type) = decoders[c] ?: return true
+            val caps = runCatching { info.getCapabilitiesForType(type).videoCapabilities }.getOrNull() ?: return true
+            fun ok(a: Int, b: Int) = runCatching { caps.isSizeSupported(a, b) }.getOrDefault(false)
+            return ok(w, h) || ok((w + 15) / 16 * 16, (h + 15) / 16 * 16)
+        }
+
+        /** 对方屏幕 `w`×`h`：本机解码器放得下的短边上限（放得下 `maxShort` 时原样返回，0 = 不限） */
+        fun fitMaxShort(c: Codec, w: Int, h: Int, maxShort: Int): Int = VideoFit.maxShort(w, h, maxShort) { a, b -> fits(c, a, b) }
+
         /** 本机能硬件解码的格式（H.264 只要有解码器就算） */
         val decodable: List<Codec> by lazy {
-            val infos = runCatching { MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.toList() }.getOrDefault(emptyList())
             Codec.entries.filter { c ->
                 infos.any { i ->
                     !i.isEncoder && i.supportedTypes.any { it.equals(c.mime, ignoreCase = true) } &&

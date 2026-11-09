@@ -123,7 +123,19 @@ class RemoteSession(
     private var woken = false
 
     private val sync = AvSync()
-    private val decoder = VideoDecoder(sync, requestKeyframe = { command(JSONObject().put("op", "keyframe")) })
+    private val decoder = VideoDecoder(
+        sync,
+        requestKeyframe = { command(JSONObject().put("op", "keyframe")) },
+        onTooLarge = { c, w, h -> onTooLarge(c, w, h) },
+    )
+
+    /** 收到过本机解码器放不下的画面：按画面尺寸算出的短边上限（只对那种格式有效；对方换了屏幕 / 转了屏就作废） */
+    @Volatile
+    private var frameLimit: Pair<Codec, Int>? = null
+
+    /** 最近发给对方的画质设置 */
+    @Volatile
+    private var sentSettings: Quality? = null
     @Volatile private var audio: AudioPlayer? = null
     private var audioToken = 0L
     private val sender = InputSender { events ->
@@ -170,11 +182,13 @@ class RemoteSession(
                     break
                 }
                 val h = client.handle()
+                val settings = currentSettings()
+                sentSettings = settings
                 val cmd = JSONObject()
                     .put("op", "connect")
                     .put("code", code)
                     .put("resume", resume ?: JSONObject.NULL)
-                    .put("settings", currentSettings().toJson())
+                    .put("settings", settings.toJson())
                 val r = runCatching { JSONObject(Native.ctlCall(h, cmd.toString())) }
                     .getOrElse { JSONObject().put("err", JSONObject().put("kind", "failed").put("detail", it.toString())) }
                 if (closed) {
@@ -365,7 +379,7 @@ class RemoteSession(
                 if (h.hostname.isNotBlank() && saved?.alias.isNullOrBlank()) hostName.value = h.hostname
                 // 用户选的格式；自动时选双方都支持的压缩率最高的格式（对方能编码、本机能硬件解码）
                 val best = pickCodec(codecs)
-                if (quality.value.codec != best) setQuality(quality.value.copy(codec = best))
+                if (quality.value.codec != best) setQuality(quality.value.copy(codec = best)) else refreshSettings()
             }
             "awaitingApproval" -> _phase.value = Phase.Approving
             "encoder" -> encoder.value = EncoderInfo(
@@ -378,6 +392,9 @@ class RemoteSession(
             "displays" -> {
                 displays.value = DisplayInfo.parseList(e.optJSONArray("displays"))
                 currentDisplay.value = e.optInt("current")
+                // 转了屏 / 换了屏幕：按新的尺寸重新算解码器放不放得下
+                frameLimit = null
+                refreshSettings()
             }
             "stats" -> stats.value = Stats(
                 e.optDouble("fps").toFloat(),
@@ -413,8 +430,43 @@ class RemoteSession(
     }
 
     private fun currentSettings(): Quality {
-        val q = quality.value
+        val q = quality.value.let { it.copy(maxShort = decodableMaxShort(it)) }
         return if (background) q.copy(fps = BACKGROUND_FPS) else q
+    }
+
+    /**
+     * 本机解码器放得下的短边上限。电视的硬件解码器常常只到 1080p，或者不认竖着的尺寸，
+     * 竖屏手机原样的 1080×2400 发过来就一直黑屏：按对方屏幕的尺寸（和收到过的放不下的画面）缩小一些。
+     * 界面上的画质选择不变。
+     */
+    private fun decodableMaxShort(q: Quality): Int {
+        var s = q.maxShort
+        displays.value.firstOrNull { it.index == currentDisplay.value }?.let {
+            s = VideoDecoder.fitMaxShort(q.codec, it.width, it.height, s)
+        }
+        frameLimit?.let { (c, limit) -> if (c == q.codec) s = VideoFit.stricter(s, limit) }
+        return s
+    }
+
+    /** 画面太大、本机解码器放不下（对方报的屏幕尺寸可能是逻辑尺寸，比实际画面小）：请对方缩小 */
+    private fun onTooLarge(c: Codec, w: Int, h: Int) {
+        val limit = VideoDecoder.fitMaxShort(c, w, h, 0)
+        if (limit == 0) return
+        val prev = frameLimit?.takeIf { it.first == c }?.second ?: 0
+        frameLimit = c to VideoFit.stricter(prev, limit)
+        Log.i(TAG, "${w}x$h doesn't fit the ${c.label} decoder, asking for a short side of at most ${frameLimit?.second}")
+        refreshSettings()
+    }
+
+    /** 实际要发的设置变了（对方屏幕变了、解码器放不下）就发给对方 */
+    private fun refreshSettings() {
+        if (currentSettings() != sentSettings) sendSettings()
+    }
+
+    private fun sendSettings() {
+        val s = currentSettings()
+        sentSettings = s
+        command(JSONObject().put("op", "settings").put("settings", s.toJson()))
     }
 
     // ───────────────────────────── 命令 ─────────────────────────────
@@ -438,7 +490,7 @@ class RemoteSession(
 
     fun setQuality(q: Quality) {
         quality.value = q
-        command(JSONObject().put("op", "settings").put("settings", currentSettings().toJson()))
+        sendSettings()
     }
 
     /** 双方都支持的编码格式（对方能编码、本机能硬件解码），压缩率从高到低；还没连上时为空 */
@@ -537,7 +589,7 @@ class RemoteSession(
     }
 
     private fun applyBackground() {
-        command(JSONObject().put("op", "settings").put("settings", currentSettings().toJson()))
+        sendSettings()
         if (background) stopAudio() else if (audioOn.value) startAudio()
     }
 
