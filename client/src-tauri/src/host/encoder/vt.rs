@@ -131,6 +131,8 @@ pub struct VtEncoder {
     kbps: u32,
     epoch: Instant,
     last_pts: i64,
+    /// 紧密排列的 UV 平面（见 [`Self::pixel_buffer`]）
+    uv_scratch: Vec<u8>,
 }
 
 impl VtEncoder {
@@ -210,6 +212,7 @@ impl VtEncoder {
             kbps: 0,
             epoch: Instant::now(),
             last_pts: -1,
+            uv_scratch: Vec::new(),
         };
         let yes: &CFType = CFBoolean::new(true);
         let no: &CFType = CFBoolean::new(false);
@@ -266,7 +269,11 @@ impl VtEncoder {
     }
 
     /// 从编码器的缓冲池取一个 NV12 缓冲，把 BGRA 转换进去。
-    fn pixel_buffer(&self, bgra: &[u8]) -> Result<CFRetained<CVPixelBuffer>> {
+    ///
+    /// 宽度没有对齐时（例如 1662、1590）CoreVideo 会在每行末尾补字节，而 yuvutils 0.8 的 NV12 只接受紧密排列的
+    /// UV 平面（Y 平面没有这个限制）：UV 先转换进紧密排列的缓冲区，再逐行复制进去。
+    /// 不这样的话每帧都转换失败，连续失败三次后会话改用软件编码。
+    fn pixel_buffer(&mut self, bgra: &[u8]) -> Result<CFRetained<CVPixelBuffer>> {
         let (w, h) = (self.info.width, self.info.height);
         let pool = unsafe { self.session.pixel_buffer_pool() }
             .ok_or_else(|| anyhow!("the encoder has no pixel buffer pool"))?;
@@ -281,6 +288,7 @@ impl VtEncoder {
         if unsafe { CVPixelBufferLockBaseAddress(&pb, flags) } != 0 {
             bail!("can't lock the pixel buffer");
         }
+        let scratch = &mut self.uv_scratch;
         let r = (|| {
             let y_stride = CVPixelBufferGetBytesPerRowOfPlane(&pb, 0);
             let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(&pb, 1);
@@ -291,17 +299,30 @@ impl VtEncoder {
             if y_ptr.is_null() || uv_ptr.is_null() || y_rows < h as usize {
                 bail!("unexpected pixel buffer layout");
             }
+            // UV 平面每行的有效字节数和行数（4:2:0，U、V 交错）
+            let (uv_row, uv_h) = ((w as usize).div_ceil(2) * 2, (h as usize).div_ceil(2));
+            if uv_stride < uv_row || uv_rows < uv_h {
+                bail!("unexpected pixel buffer layout");
+            }
             let (y, uv) = unsafe {
                 (
                     std::slice::from_raw_parts_mut(y_ptr, y_stride * y_rows),
                     std::slice::from_raw_parts_mut(uv_ptr, uv_stride * uv_rows),
                 )
             };
+            let packed = uv_stride == uv_row && uv_rows == uv_h;
+            if !packed {
+                scratch.resize(uv_row * uv_h, 0);
+            }
             let mut img = YuvBiPlanarImageMut {
                 y_plane: yuvutils_rs::BufferStoreMut::Borrowed(y),
                 y_stride: y_stride as u32,
-                uv_plane: yuvutils_rs::BufferStoreMut::Borrowed(uv),
-                uv_stride: uv_stride as u32,
+                uv_plane: yuvutils_rs::BufferStoreMut::Borrowed(if packed {
+                    &mut *uv
+                } else {
+                    scratch.as_mut_slice()
+                }),
+                uv_stride: if packed { uv_stride } else { uv_row } as u32,
                 width: w,
                 height: h,
             };
@@ -313,7 +334,13 @@ impl VtEncoder {
                 YuvStandardMatrix::Bt709,
                 YuvConversionMode::Balanced,
             )
-            .map_err(|e| anyhow!("color conversion failed: {e:?}"))
+            .map_err(|e| anyhow!("color conversion failed: {e:?}"))?;
+            if !packed {
+                for (dst, src) in uv.chunks_mut(uv_stride).zip(scratch.chunks(uv_row)) {
+                    dst[..uv_row].copy_from_slice(src);
+                }
+            }
+            Ok(())
         })();
         unsafe { CVPixelBufferUnlockBaseAddress(&pb, flags) };
         r.map(|()| pb)
@@ -495,6 +522,54 @@ mod tests {
             vec![0, 0, 0, 1, 0x65, 0xaa]
         );
         assert!(length_prefixed_to_annexb(&[0, 0, 0, 9, 0x65], 4).is_err());
+    }
+
+    /// 宽度没有对齐（CoreVideo 在行末补字节）时颜色转换也要成功，而且每一行都对
+    #[test]
+    fn converts_unaligned_widths() {
+        if !has_hardware(Codec::H264) {
+            println!("没有硬件编码器，跳过");
+            return;
+        }
+        // 纯红色：BT.709 有限范围 Y=63、U=102、V=240
+        for (w, h) in [(1590u32, 994u32), (1662, 1080), (1728, 1080), (722, 406)] {
+            let mut enc = VtEncoder::new(Codec::H264, w, h, 30, 4000).unwrap();
+            let red = [0u8, 0, 255, 255].repeat((w * h) as usize);
+            let pb = enc.pixel_buffer(&red).unwrap();
+            let ro = CVPixelBufferLockFlags::ReadOnly;
+            assert_eq!(unsafe { CVPixelBufferLockBaseAddress(&pb, ro) }, 0);
+            let plane = |i: usize, rows: usize, row: usize| {
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(&pb, i);
+                let p = CVPixelBufferGetBaseAddressOfPlane(&pb, i) as *const u8;
+                let all = unsafe { std::slice::from_raw_parts(p, stride * rows) };
+                (
+                    stride,
+                    all.chunks(stride)
+                        .map(|r| r[..row].to_vec())
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let (y_stride, y) = plane(0, h as usize, w as usize);
+            let (uv_stride, uv) = plane(1, h as usize / 2, w as usize);
+            unsafe { CVPixelBufferUnlockBaseAddress(&pb, ro) };
+            println!("{w}x{h}: Y 每行 {y_stride} 字节，UV 每行 {uv_stride} 字节");
+            assert!(
+                y.iter().flatten().all(|&v| v.abs_diff(63) <= 1),
+                "{w}x{h} Y"
+            );
+            for row in &uv {
+                for p in row.as_chunks::<2>().0 {
+                    assert!(
+                        p[0].abs_diff(102) <= 1 && p[1].abs_diff(240) <= 1,
+                        "{w}x{h} UV {p:?}"
+                    );
+                }
+            }
+            assert!(
+                enc.encode(&red, true).unwrap().is_some(),
+                "{w}x{h} 没有编出画面"
+            );
+        }
     }
 
     #[test]
