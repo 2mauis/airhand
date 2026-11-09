@@ -80,6 +80,16 @@ object Messages {
         else -> null
     }
 
+    /**
+     * 只看画面（电视）时要显示的提示：本来就不操作，对方没给操作权限（无障碍服务 / 辅助功能）不用提示；
+     * 同时缺屏幕录制权限的只说看不到画面。返回 null 表示不显示
+     */
+    fun forViewer(n: Notice): Notice? = when {
+        n.kind != "missingPermissions" -> n
+        !n.screen -> null
+        else -> n.copy(input = false)
+    }
+
     fun notice(ctx: Context, n: Notice, os: OsKind): String {
         val res = noticeRes(n, os) ?: return n.kind
         return ctx.getString(res, n.detail ?: "")

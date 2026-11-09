@@ -154,6 +154,18 @@ class MessagesTest {
         assertEquals(R.string.notice_android_no_input, Messages.noticeRes(Notice("missingPermissions", input = true), OsKind.ANDROID))
     }
 
+    /** 电视只看不操作：对方没给操作权限不用提示；缺屏幕录制权限时只说看不到画面 */
+    @Test
+    fun viewerSkipsInputPermissionNotices() {
+        assertNull(Messages.forViewer(Notice("missingPermissions", screen = false, input = true)))
+        assertNull(Messages.forViewer(Notice("missingPermissions", screen = false, input = false)))
+        val both = Messages.forViewer(Notice("missingPermissions", screen = true, input = true))
+        assertEquals(Notice("missingPermissions", screen = true, input = false), both)
+        assertEquals(R.string.notice_mac_no_screen, Messages.noticeRes(both!!, OsKind.MAC))
+        val failed = Notice("captureFailed", detail = "D")
+        assertEquals(failed, Messages.forViewer(failed))
+    }
+
     /** Kotlin 这边的 SystemAction / OsKind 和 Rust 的枚举一一对应（JSON 里是变体名），每个系统操作都有文案 */
     @Test
     fun systemActionsAndPlatformsMatchRust() {

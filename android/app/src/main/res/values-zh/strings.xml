@@ -320,4 +320,10 @@
     <string name="tv_session_hint">按 确认键 打开菜单 · 返回键 断开</string>
     <string name="tv_sound">声音</string>
     <string name="tv_info">显示连接信息</string>
+    <string name="tv_device_delete_hint">删除设备：按设备右边的删除按钮，或者在设备上长按确认键 / 按菜单键</string>
+    <string name="codec_auto_value">自动（%1$s）</string>
+    <string name="tv_scale">画面缩放</string>
+    <string name="tv_scale_fit">完整显示</string>
+    <string name="tv_scale_fill">铺满（裁掉边缘）</string>
+    <string name="tv_scale_stretch">拉伸全屏</string>
 </resources>

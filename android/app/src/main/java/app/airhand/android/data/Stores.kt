@@ -48,6 +48,15 @@ enum class TouchMode(val id: String) {
     }
 }
 
+/** 电视上画面怎样放进屏幕：完整显示（比例不同时有黑边）/ 铺满（保持比例，裁掉超出的部分）/ 拉伸（填满，不保持比例） */
+enum class ScaleMode(val id: String) {
+    FIT("fit"), FILL("fill"), STRETCH("stretch");
+
+    companion object {
+        fun of(id: String?) = entries.firstOrNull { it.id == id } ?: FIT
+    }
+}
+
 data class Settings(
     /** 中转服务器 host:port */
     val server: String = BuildConfig.DEFAULT_SERVER,
@@ -62,6 +71,10 @@ data class Settings(
     val audio: Boolean = true,
     /** 看视频时让画面与声音对齐，关闭时优先操作延迟。 */
     val avSync: Boolean = false,
+    /** 视频编码格式：空字符串表示自动（双方都支持的压缩率最高的格式），否则是 `Codec.wire` */
+    val codec: String = "",
+    /** 电视上画面的缩放方式 */
+    val tvScale: ScaleMode = ScaleMode.FIT,
     /** 控制手机时显示返回 / 主页 / 最近任务按钮 */
     val navKeys: Boolean = true,
     /** 别人连接本机时先请我同意 */
@@ -77,6 +90,8 @@ data class Settings(
         .put("touchMode", touchMode.id)
         .put("audio", audio)
         .put("avSync", avSync)
+        .put("codec", codec)
+        .put("tvScale", tvScale.id)
         .put("navKeys", navKeys)
         .put("requireApproval", requireApproval)
         .put("tipsSeen", JSONArray(tipsSeen.toList()))
@@ -93,6 +108,8 @@ data class Settings(
                 touchMode = TouchMode.of(o.optStringOrNull("touchMode")),
                 audio = o.optBoolean("audio", d.audio),
                 avSync = o.optBoolean("avSync", d.avSync),
+                codec = o.optString("codec", d.codec),
+                tvScale = ScaleMode.of(o.optStringOrNull("tvScale")),
                 navKeys = o.optBoolean("navKeys", d.navKeys),
                 requireApproval = o.optBoolean("requireApproval", d.requireApproval),
                 tipsSeen = if (tips == null) emptySet() else (0 until tips.length()).map { tips.getString(it) }.toSet(),

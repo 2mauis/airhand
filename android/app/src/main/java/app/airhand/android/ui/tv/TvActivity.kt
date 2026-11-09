@@ -29,13 +29,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Backspace
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -79,11 +82,13 @@ import app.airhand.android.ui.session.SessionActivity
 import app.airhand.android.ui.theme.AirhandTheme
 import app.airhand.android.ui.theme.Brand
 import app.airhand.android.ui.theme.Mono
+import kotlinx.coroutines.delay
 
 /**
  * 电视上的主界面（从电视桌面打开）：只能看别的设备的画面。
  *
- * 左边输入控制码（屏幕上的数字键盘，遥控器的数字键也可以直接输），右边是最近连接过的设备。
+ * 左边输入控制码（屏幕上的数字键盘，遥控器的数字键也可以直接输），右边是最近连接过的设备
+ * （右边的垃圾桶 / 长按确认键 / 菜单键删除）。
  * 全部可以用方向键 + 确认键操作；右上角是设置（服务器、本机名称）。
  */
 class TvActivity : ComponentActivity() {
@@ -113,6 +118,10 @@ private fun TvHome(onSettings: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     val firstKey = remember { FocusRequester() }
     var opened by remember { mutableStateOf<RemoteSession?>(null) }
+    var deleting by remember { mutableStateOf<SavedDevice?>(null) }
+    // 每台设备卡片的焦点：删掉一台之后把焦点放到旁边那一台上（不然焦点丢了，遥控器按不动）
+    val cardFocus = remember { HashMap<String, FocusRequester>() }
+    var refocus by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) { runCatching { firstKey.requestFocus() } }
     LaunchedEffect(session, phase) {
@@ -151,6 +160,24 @@ private fun TvHome(onSettings: () -> Unit) {
     }
 
     BackHandler(enabled = session != null && (busy || waitingCode != null)) { app.endSession() }
+
+    fun delete(d: SavedDevice) {
+        val i = devices.indexOfFirst { it.code == d.code }
+        val rest = devices.filter { it.code != d.code }
+        // 正在连接 / 等它上线：先停下（不然连上时又会被记进来）
+        if (session?.code == d.code) app.endSession()
+        app.devices.delete(d.code)
+        cardFocus.remove(d.code)
+        refocus = rest.getOrNull(i.coerceIn(0, (rest.size - 1).coerceAtLeast(0)))?.code ?: ""
+    }
+
+    LaunchedEffect(refocus) {
+        val target = refocus ?: return@LaunchedEffect
+        // 等对话框关上、列表重新排好
+        delay(150)
+        runCatching { (cardFocus[target] ?: firstKey).requestFocus() }
+        refocus = null
+    }
 
     Row(
         Modifier
@@ -248,30 +275,100 @@ private fun TvHome(onSettings: () -> Unit) {
             if (devices.isEmpty()) {
                 Text(stringResource(R.string.tv_recent_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            LazyColumn(Modifier.weight(1f, fill = false), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(devices, key = { it.code }) { d ->
-                    TvDeviceCard(d, waiting = waitingCode == d.code, connecting = busy && session?.code == d.code) {
-                        if (waitingCode == d.code) app.endSession() else connect(d.code)
+                    val focus = cardFocus.getOrPut(d.code) { FocusRequester() }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TvDeviceCard(
+                            d,
+                            waiting = waitingCode == d.code,
+                            connecting = busy && session?.code == d.code,
+                            modifier = Modifier.weight(1f).focusRequester(focus),
+                            onDelete = { deleting = d },
+                        ) {
+                            if (waitingCode == d.code) app.endSession() else connect(d.code)
+                        }
+                        Spacer(Modifier.width(14.dp))
+                        TvKey(icon = Icons.Outlined.DeleteOutline) { deleting = d }
                     }
                 }
             }
+            if (devices.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text(stringResource(R.string.tv_device_delete_hint), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+
+    deleting?.let { d ->
+        val focus = remember { FocusRequester() }
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text(stringResource(R.string.device_delete_title)) },
+            text = { Text(stringResource(R.string.device_delete_text, d.title().ifBlank { Code.format(d.code) })) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleting = null
+                        delete(d)
+                    },
+                    modifier = Modifier.focusRequester(focus),
+                ) { Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text(stringResource(R.string.cancel)) } },
+        )
+        LaunchedEffect(Unit) {
+            delay(100)
+            runCatching { focus.requestFocus() }
         }
     }
 }
 
+/**
+ * 一台保存的设备。确认键：连接；长按确认键 / 菜单键：删除（松开之后才弹出确认，
+ * 免得这次的松开落到对话框的按钮上）
+ */
 @Composable
-private fun TvDeviceCard(d: SavedDevice, waiting: Boolean, connecting: Boolean, onClick: () -> Unit) {
+private fun TvDeviceCard(
+    d: SavedDevice,
+    waiting: Boolean,
+    connecting: Boolean,
+    modifier: Modifier = Modifier,
+    onDelete: () -> Unit,
+    onClick: () -> Unit,
+) {
     val ctx = LocalContext.current
     var focused by remember { mutableStateOf(false) }
+    val longPress = remember { booleanArrayOf(false) }
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .scale(if (focused) 1.03f else 1f)
             .clip(RoundedCornerShape(18.dp))
             .background(if (focused) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainer)
             .border(2.dp, if (focused) Color.White else Color.Transparent, RoundedCornerShape(18.dp))
             .onFocusChanged { focused = it.isFocused }
-            .clickOnCenter(onClick)
+            .onPreviewKeyEvent { e ->
+                val k = e.key.nativeKeyCode
+                when {
+                    k == AndroidKeyEvent.KEYCODE_MENU -> {
+                        if (e.type == KeyEventType.KeyUp) onDelete()
+                        true
+                    }
+                    k == AndroidKeyEvent.KEYCODE_DPAD_CENTER || k == AndroidKeyEvent.KEYCODE_ENTER || k == AndroidKeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                        when (e.type) {
+                            // 按住不放时系统会重复发按下事件（大约半秒之后）：算长按
+                            KeyEventType.KeyDown -> longPress[0] = e.nativeKeyEvent.repeatCount > 0
+                            KeyEventType.KeyUp -> {
+                                if (longPress[0]) onDelete() else onClick()
+                                longPress[0] = false
+                            }
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
             .focusable()
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,

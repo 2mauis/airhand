@@ -29,6 +29,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import app.airhand.android.controller.CursorState
 import app.airhand.android.controller.Input
+import app.airhand.android.data.ScaleMode
 import kotlin.math.max
 import kotlin.math.min
 
@@ -140,13 +141,30 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
         fit()
     }
 
-    /** 画面恢复为完整显示（取消放大） */
+    /**
+     * 画面怎样放进视图（电视用）：完整显示 / 铺满（裁掉超出的部分）/ 拉伸。
+     * 只有完整显示时才能双指放大（手机一直是完整显示）
+     */
+    var scaleMode = ScaleMode.FIT
+        set(v) {
+            if (field == v) return
+            field = v
+            fit()
+        }
+
+    /** 画面恢复为没有放大时的样子（按 [scaleMode]） */
     fun fit() {
         if (videoW == 0 || videoH == 0 || width == 0 || height == 0) return
-        val s = min(width.toFloat() / videoW, height.toFloat() / videoH)
-        val w = videoW * s
-        val h = videoH * s
-        content.set((width - w) / 2, (height - h) / 2, (width + w) / 2, (height + h) / 2)
+        if (scaleMode == ScaleMode.STRETCH) {
+            content.set(0f, 0f, width.toFloat(), height.toFloat())
+        } else {
+            val sx = width.toFloat() / videoW
+            val sy = height.toFloat() / videoH
+            val s = if (scaleMode == ScaleMode.FILL) max(sx, sy) else min(sx, sy)
+            val w = videoW * s
+            val h = videoH * s
+            content.set((width - w) / 2, (height - h) / 2, (width + w) / 2, (height + h) / 2)
+        }
         rel = 1f
         apply()
     }
@@ -161,7 +179,7 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        if (!zoomed || oldw == 0 || oldh == 0 || content.width() <= 0f) {
+        if (!zoomed || scaleMode != ScaleMode.FIT || oldw == 0 || oldh == 0 || content.width() <= 0f) {
             fit()
             return
         }
@@ -178,7 +196,7 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
 
     private fun zoomBy(factor: Float, fx: Float, fy: Float) {
         val base = fitScale()
-        if (base <= 0f) return
+        if (base <= 0f || scaleMode != ScaleMode.FIT) return
         val cur = content.width() / videoW
         val next = (cur * factor).coerceIn(base, base * MAX_ZOOM)
         rel = next / base

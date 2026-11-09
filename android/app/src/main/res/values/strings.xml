@@ -323,4 +323,10 @@
     <string name="tv_session_hint">Press OK for the menu · Back to disconnect</string>
     <string name="tv_sound">Sound</string>
     <string name="tv_info">Connection info</string>
+    <string name="tv_device_delete_hint">To remove a device, use the delete button next to it, or hold OK / press Menu on it</string>
+    <string name="codec_auto_value">Auto (%1$s)</string>
+    <string name="tv_scale">Picture size</string>
+    <string name="tv_scale_fit">Fit</string>
+    <string name="tv_scale_fill">Fill (crop edges)</string>
+    <string name="tv_scale_stretch">Stretch</string>
 </resources>

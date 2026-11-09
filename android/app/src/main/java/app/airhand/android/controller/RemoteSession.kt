@@ -363,8 +363,8 @@ class RemoteSession(
                 displays.value = h.displays
                 currentDisplay.value = h.current
                 if (h.hostname.isNotBlank() && saved?.alias.isNullOrBlank()) hostName.value = h.hostname
-                // 选双方都支持的压缩率最高的格式（对方能编码、本机能硬件解码）
-                val best = Codec.PRIORITY.firstOrNull { it in codecs && it in VideoDecoder.decodable } ?: Codec.H264
+                // 用户选的格式；自动时选双方都支持的压缩率最高的格式（对方能编码、本机能硬件解码）
+                val best = pickCodec(codecs)
                 if (quality.value.codec != best) setQuality(quality.value.copy(codec = best))
             }
             "awaitingApproval" -> _phase.value = Phase.Approving
@@ -439,6 +439,26 @@ class RemoteSession(
     fun setQuality(q: Quality) {
         quality.value = q
         command(JSONObject().put("op", "settings").put("settings", currentSettings().toJson()))
+    }
+
+    /** 双方都支持的编码格式（对方能编码、本机能硬件解码），压缩率从高到低；还没连上时为空 */
+    fun usableCodecs(): List<Codec> = usableCodecs(hello.value?.codecs ?: emptyList())
+
+    private fun usableCodecs(host: List<Codec>): List<Codec> = Codec.PRIORITY.filter { it in host && it in VideoDecoder.decodable }
+
+    /** 要用的格式：用户在设置里选的（双方都支持时），否则双方都支持的压缩率最高的 */
+    private fun pickCodec(host: List<Codec>): Codec {
+        val usable = usableCodecs(host)
+        val preferred = Codec.fromWire(app.settings.value.codec)
+        return preferred?.takeIf { it in usable } ?: usable.firstOrNull() ?: Codec.H264
+    }
+
+    /** 选编码格式（null = 自动）：记进设置，以后的会话（包括重连）也用它 */
+    fun setCodec(c: Codec?) {
+        app.updateSettings { it.copy(codec = c?.wire ?: "") }
+        val host = hello.value?.codecs ?: return
+        val next = pickCodec(host)
+        if (quality.value.codec != next) setQuality(quality.value.copy(codec = next))
     }
 
     fun selectDisplay(index: Int) {

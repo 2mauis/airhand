@@ -21,8 +21,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AspectRatio
+import androidx.compose.material.icons.outlined.VideoSettings
 import androidx.compose.material.icons.outlined.HighQuality
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.Info
@@ -60,11 +64,14 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import app.airhand.android.AirhandApp
 import app.airhand.android.R
 import app.airhand.android.controller.RemoteSession
 import app.airhand.android.core.Code
+import app.airhand.android.core.Codec
 import app.airhand.android.core.OsKind
 import app.airhand.android.core.Preset
+import app.airhand.android.data.ScaleMode
 import app.airhand.android.ui.Messages
 import app.airhand.android.ui.phone.presetName
 import app.airhand.android.ui.theme.Brand
@@ -74,7 +81,7 @@ import kotlin.math.roundToInt
 /**
  * 电视上的远程画面：只看，不操作。遥控器：
  *
- * * 确认键 / 菜单键：打开右侧菜单（声音、显示器、画质、信息、断开）
+ * * 确认键 / 菜单键：打开右侧菜单（声音、音画同步、显示器、画质、编码格式、画面缩放、信息、断开）
  * * 左 / 右：切换对方的显示器（有多个时）
  * * 返回：关菜单；没开菜单时确认断开
  */
@@ -89,6 +96,7 @@ fun TvSession(session: RemoteSession, view: RemoteView, onExit: () -> Unit) {
     val notices by session.notices.collectAsState()
     val hello by session.hello.collectAsState()
     val os = OsKind.of(hello?.os)
+    val settings by AirhandApp.instance.settings.flow.collectAsState()
 
     var menu by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf(false) }
@@ -98,6 +106,7 @@ fun TvSession(session: RemoteSession, view: RemoteView, onExit: () -> Unit) {
     val root = remember { FocusRequester() }
 
     LaunchedEffect(video) { video?.let { view.setVideoSize(it.first, it.second) } }
+    LaunchedEffect(settings.tvScale) { view.scaleMode = settings.tvScale }
     LaunchedEffect(phase, video) {
         if (phase == RemoteSession.Phase.Live && video != null) {
             hint = true
@@ -159,9 +168,9 @@ fun TvSession(session: RemoteSession, view: RemoteView, onExit: () -> Unit) {
 
         SessionStatus(session, big = true, onExit = onExit)
 
-        // 被控端的提示
+        // 被控端的提示（电视只看不操作：不能操作的提示不显示）
         Column(Modifier.align(Alignment.TopCenter).padding(top = 24.dp)) {
-            notices.values.forEach { n ->
+            notices.values.mapNotNull { Messages.forViewer(it) }.forEach { n ->
                 Text(
                     Messages.notice(ctx, n, os),
                     color = Color.White,
@@ -278,6 +287,9 @@ private fun TvMenu(
     val displays by session.displays.collectAsState()
     val current by session.currentDisplay.collectAsState()
     val q by session.quality.collectAsState()
+    val hello by session.hello.collectAsState()
+    val app = AirhandApp.instance
+    val settings by app.settings.flow.collectAsState()
     val first = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         delay(50)
@@ -288,10 +300,12 @@ private fun TvMenu(
             .fillMaxHeight()
             .width(380.dp)
             .background(Color(0xF0101420))
-            .padding(horizontal = 24.dp, vertical = 32.dp),
+            // 项目多，屏幕矮的电视上放不下：焦点移到哪一项就滚到哪一项
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 28.dp),
     ) {
         Text(name.ifBlank { Code.format(session.code) }, color = Color.White, style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(20.dp))
         TvMenuItem(
             if (audioOn) Icons.AutoMirrored.Outlined.VolumeUp else Icons.AutoMirrored.Outlined.VolumeOff,
             stringResource(R.string.tv_sound),
@@ -309,10 +323,34 @@ private fun TvMenu(
             val next = Preset.entries[(Preset.entries.indexOf(preset) + 1) % Preset.entries.size]
             session.setQuality(next.quality(q.codec))
         }
+        // 编码格式：自动 → 双方都支持的各种格式，按一下换一个；选择会记下来
+        if (hello != null) {
+            val usable = session.usableCodecs().reversed()
+            val chosen = Codec.fromWire(settings.codec)?.takeIf { it in usable }
+            val choices = listOf<Codec?>(null) + usable
+            TvMenuItem(
+                Icons.Outlined.VideoSettings,
+                stringResource(R.string.codec),
+                chosen?.label ?: stringResource(R.string.codec_auto_value, q.codec.label),
+            ) { session.setCodec(choices[(choices.indexOf(chosen) + 1) % choices.size]) }
+        }
+        TvMenuItem(Icons.Outlined.AspectRatio, stringResource(R.string.tv_scale), scaleName(settings.tvScale)) {
+            val next = ScaleMode.entries[(settings.tvScale.ordinal + 1) % ScaleMode.entries.size]
+            app.updateSettings { it.copy(tvScale = next) }
+        }
         TvMenuItem(Icons.Outlined.Info, stringResource(R.string.tv_info), stringResource(if (info) R.string.on else R.string.off)) { onInfo() }
         TvMenuItem(Icons.Outlined.LinkOff, stringResource(R.string.disconnect), null, danger = true) { onDisconnect() }
     }
 }
+
+@Composable
+fun scaleName(m: ScaleMode): String = stringResource(
+    when (m) {
+        ScaleMode.FIT -> R.string.tv_scale_fit
+        ScaleMode.FILL -> R.string.tv_scale_fill
+        ScaleMode.STRETCH -> R.string.tv_scale_stretch
+    },
+)
 
 @Composable
 fun TvMenuItem(
