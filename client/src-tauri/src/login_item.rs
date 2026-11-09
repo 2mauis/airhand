@@ -69,6 +69,18 @@ pub fn set(on: bool, interactive: bool) -> Result<State, String> {
     Ok(after)
 }
 
+/// 卸载时：登记过就注销，不管 App 现在在不在"应用程序"文件夹里（可能是在那里登记之后才挪走的）
+pub fn unregister() -> Result<(), String> {
+    if bundle().is_none() {
+        return Ok(());
+    }
+    let svc = unsafe { SMAppService::mainAppService() };
+    if step(false, unsafe { svc.status() }) == Step::Unregister {
+        unsafe { svc.unregisterAndReturnError() }.map_err(|e| failed("unregister", &e))?;
+    }
+    Ok(())
+}
+
 fn failed(what: &str, e: &objc2_foundation::NSError) -> String {
     // 说明文字是系统语言写的，只进日志
     format!(

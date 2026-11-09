@@ -27,10 +27,13 @@ mod single_instance;
 pub mod status;
 mod sysinfo;
 mod tray;
+#[cfg(target_os = "macos")]
+mod uninstall;
 #[cfg(windows)]
 mod winsvc;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -50,6 +53,9 @@ use i18n::Lang;
 use status::{HostStatus, Mode, StatusHub};
 
 const CONSOLE: &str = "main";
+
+/// 正在退出（或卸载）：关掉控制台时不再切回被控端（见 [`on_console_destroyed`]）
+static EXITING: AtomicBool = AtomicBool::new(false);
 
 pub struct AppState {
     hub: StatusHub,
@@ -241,8 +247,11 @@ fn set_lang(app: &AppHandle, lang: Lang) {
 }
 
 fn on_console_destroyed(app: &AppHandle) {
-    // 关闭控制台 = 回到默认的被控端模式
-    switch_services(app, Mode::Host);
+    // 关闭控制台 = 回到默认的被控端模式。退出、卸载时关掉的不算：不要再启动被控端
+    //（卸载时它连上服务器会把控制码写回配置文件）
+    if !EXITING.load(Ordering::Acquire) {
+        switch_services(app, Mode::Host);
+    }
     #[cfg(target_os = "macos")]
     show_in_dock(app, false);
     let dirs: Vec<PathBuf> =
@@ -308,6 +317,12 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
             });
             // 勾选项被点击时系统会自动翻转勾选状态：先按原来的状态重建菜单，切换完了再刷新
             app.state::<AppState>().hub.send_modify(|_| {});
+        }
+        #[cfg(target_os = "macos")]
+        "uninstall" => {
+            // 对话框是模态的：等这次菜单事件处理完，再在主线程上弹出来
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || uninstall_app(&handle));
         }
         #[cfg(target_os = "macos")]
         "perm_screen" => {
@@ -684,6 +699,7 @@ pub fn run() {
             code: None, api, ..
         } => api.prevent_exit(),
         RunEvent::Exit => {
+            EXITING.store(true, Ordering::Release);
             let state = app.state::<AppState>();
             {
                 let mut sv = state.services.lock().unwrap();
@@ -794,6 +810,44 @@ fn login_item_startup(hub: StatusHub) {
         }
         hub.send_modify(|st| st.login_item = state);
     });
+}
+
+/// macOS：菜单里的"卸载 Airhand…"。确认之后停掉被控端和控制端、配置文件不再写入，再按顺序清理（见 [`uninstall`]），
+/// 最后告诉用户结果并退出
+#[cfg(target_os = "macos")]
+fn uninstall_app(app: &AppHandle) {
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return;
+    };
+    if !uninstall::confirm(mtm) {
+        return;
+    }
+    info!("uninstalling");
+    EXITING.store(true, Ordering::Release);
+    let state = app.state::<AppState>();
+    {
+        // 正在控制本机的连接断开，控制台的会话也断开
+        let mut sv = state.services.lock().unwrap();
+        sv.host = None;
+        sv.controller = None;
+    }
+    if let Some(w) = app.get_webview_window(CONSOLE) {
+        let _ = w.destroy();
+    }
+    // 还没完全停下的被控端不能再把配置文件写回去，删掉也不再重新生成
+    config::freeze();
+    let plan = uninstall::Plan {
+        bundle: login_item::bundle(),
+        bundle_id: config::BUNDLE_ID.into(),
+        exe_name: std::env::current_exe()
+            .ok()
+            .and_then(|p| Some(p.file_name()?.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "airhand".into()),
+        config_dir: config::path().and_then(|p| Some(p.parent()?.to_path_buf())),
+    };
+    let problems = uninstall::run(&plan);
+    uninstall::done(mtm, &problems);
+    app.exit(0);
 }
 
 /// macOS：把登录时自动启动的状态记进 config.toml（只是记录，以系统设置为准）

@@ -161,6 +161,15 @@ fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
     }
     menu.append(&language_menu(app)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
+    // macOS 的 App 没有卸载程序：在这里一次清理干净（见 crate::uninstall）。直接运行可执行文件（开发时）不提供
+    #[cfg(target_os = "macos")]
+    if crate::login_item::bundle().is_some() {
+        menu.append(&item(
+            app,
+            "uninstall",
+            tr!("卸载 Airhand…", "Uninstall Airhand…"),
+        )?)?;
+    }
     menu.append(&item(app, "quit", tr!("退出", "Quit"))?)?;
     Ok(menu)
 }

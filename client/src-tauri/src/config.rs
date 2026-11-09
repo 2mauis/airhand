@@ -73,7 +73,10 @@ pub const FILE_NAME: &str = "config.toml";
 
 /// 与 tauri.conf.json 的 `identifier` 相同：macOS 上配置目录以它命名（Apple 的建议）
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const BUNDLE_ID: &str = "app.airhand.client";
+pub(crate) const BUNDLE_ID: &str = "app.airhand.client";
+
+/// 卸载中（见 [`freeze`]）：不再写配置文件，删掉了也不再重新生成
+static FROZEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 运行中多久检查一次配置文件还在不在
 const KEEP_CHECK: Duration = if cfg!(test) {
@@ -421,6 +424,9 @@ fn edit(f: impl FnOnce(&mut DocumentMut) -> Result<()>) -> Result<()> {
 
 fn edit_at(path: &Path, f: impl FnOnce(&mut DocumentMut) -> Result<()>) -> Result<()> {
     let mut last = last();
+    if FROZEN.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(());
+    }
     let mut doc = match std::fs::read_to_string(path) {
         // 用户写坏了的文件不覆盖：这次就不保存了
         Ok(text) => text.parse::<DocumentMut>().map_err(|e| {
@@ -508,6 +514,9 @@ pub fn keep_file() {
                 if STOP_KEEPING.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
+                if FROZEN.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
                 match std::fs::metadata(&path) {
                     Ok(m) => {
                         // 文件变了（包括手动修改）：记下新的内容，删掉之后接着用的是最新的
@@ -536,6 +545,14 @@ pub fn keep_file() {
     if let Err(e) = spawned {
         warn!("can't watch the configuration file: {e}");
     }
+}
+
+/// 卸载（macOS 菜单里的"卸载 Airhand…"）：从现在起不再写配置文件，配置文件被删掉也不再重新生成。
+/// 还在运行的东西（例如正在停下来的被控端保存控制码）也写不回去。返回时，正在写的那一次已经写完
+#[cfg(target_os = "macos")]
+pub fn freeze() {
+    let _wait = last();
+    FROZEN.store(true, std::sync::atomic::Ordering::Release);
 }
 
 /// 保存服务器分配的控制码；`None` 表示放弃了原来的控制码（下次启动时重新分配）

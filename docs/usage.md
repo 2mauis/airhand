@@ -10,7 +10,7 @@ Double-click to run (on Windows install it first, see [Windows installation](#wi
 - The **control code** and "Copy control code"
 - Who is controlling this computer right now, and **Disconnect all controllers**
 - **Change control code**: the old code stops working immediately and connected controllers are disconnected
-- Open console and **Start with Windows** (Windows) / Switch to controller (macOS, Linux) and **Open at login** (macOS) / Language / Quit
+- Open console and **Start with Windows** (Windows) / Switch to controller (macOS, Linux) and **Open at login** (macOS) / Language / **Uninstall Airhand…** (macOS, see [Uninstalling](#uninstalling)) / Quit
 
 After a network drop the host reconnects automatically with exponential backoff and **gets its old control code back**, even after a server restart. The code is **fixed**: it's saved in `config.toml`, and the server keeps it for this computer however long it stays offline (codes unused for 180 days are released), so it stays the same across restarts and upgrades until you change it.
 
@@ -65,7 +65,9 @@ Settings → Apps → Airhand → Uninstall. The uninstaller stops and removes t
 
 ### macOS
 
-macOS apps have no uninstaller, and moving the app to the Trash only removes the program itself. The items below have to go too, **in this order**: the login item has to be unregistered by Airhand itself, and the permission records can only be cleared while the app is still there.
+Click the Airhand icon in the menu bar and choose **Uninstall Airhand…**. After you confirm, it goes through steps 1–4 below in order, moves Airhand to the Trash and quits; empty the Trash to delete it for good. If a step didn't work out, the final message lists it, and you can finish it by hand as described below.
+
+If Airhand won't open, or you'd rather do it yourself, uninstall it by hand. macOS apps have no uninstaller, and moving the app to the Trash only removes the program itself. The items below have to go too, **in this order**: the login item has to be unregistered by Airhand itself, and the permission records can only be cleared while the app is still there.
 
 1. Click the Airhand icon in the menu bar, **turn off "Open at login"**, then choose **Quit** (older versions don't have this item and never registered a login item, so just quit).
    If you delete the app without turning it off first, a dead Airhand entry stays in both "Open at Login" and "App Background Activity" in System Settings → General → Login Items ("Login Items & Extensions" on some versions of macOS).
