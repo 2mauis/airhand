@@ -19,6 +19,10 @@ class GesturesTest {
             log += "move %.2f %.2f".format(nx, ny)
         }
 
+        override fun delta(nx: Float, ny: Float) {
+            log += "delta %.3f %.3f".format(nx, ny)
+        }
+
         override fun button(button: String, down: Boolean) {
             log += "$button ${if (down) "down" else "up"}"
         }
@@ -96,6 +100,42 @@ class GesturesTest {
         assertTrue(g.cursorX > 0.55f)
         assertEquals(0.5f, g.cursorY, 0.001f)
         assertTrue("no clicks: $log", buttons().isEmpty())
+    }
+
+    @Test
+    fun hiddenRemoteCursorMakesTheTrackpadRelative() {
+        g.mode = Gestures.Mode.TRACKPAD
+        g.setCursor(0.25f, 0.5f)
+        g.relative = true
+        // 点一下：不先把光标挪到本机指针的位置（游戏里视角会跳）
+        g.down(p(800f, 400f), 0)
+        g.up(p(800f, 400f), 80)
+        assertEquals(listOf("Left down", "Left up"), log)
+        log.clear()
+        // 滑动：发移动量（画面的几分之几），本机画的指针不动
+        g.down(p(100f, 100f), 1000)
+        g.move(listOf(p(150f, 100f)), 1100)
+        g.move(listOf(p(200f, 120f)), 1200)
+        g.up(p(200f, 120f), 1250)
+        assertTrue("$log", log.isNotEmpty() && log.all { it.startsWith("delta ") })
+        assertTrue("$log", log.any { it.startsWith("delta 0.") && !it.startsWith("delta 0.000") })
+        assertEquals(0.25f, g.cursorX, 0.001f)
+        assertEquals(0.5f, g.cursorY, 0.001f)
+    }
+
+    @Test
+    fun touchDragBecomesRelativeWhenTheGameHidesTheCursor() {
+        g.mode = Gestures.Mode.TOUCH
+        g.down(p(500f, 250f), 0)
+        g.move(listOf(p(540f, 250f)), 50)
+        // 拖动开始时还是绝对坐标：移到按下的位置、按下左键
+        assertEquals(listOf("move 0.50 0.50", "move 0.50 0.50", "Left down", "move 0.54 0.50"), log)
+        log.clear()
+        // 游戏开始转视角，光标隐藏了：之后发手指移动了多少
+        g.relative = true
+        g.move(listOf(p(640f, 300f)), 100)
+        g.up(p(640f, 300f), 150)
+        assertEquals(listOf("delta 0.100 0.100", "Left up"), log)
     }
 
     @Test

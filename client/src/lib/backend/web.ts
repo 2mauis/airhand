@@ -1,14 +1,16 @@
 // 网页版：浏览器打开 airhand-web 的端口，控制端服务跑在那台机器上（web/src/console.rs）。
 //
 // 命令、事件和画面都走同一条 WebSocket（协议见 console.rs）：
-// * 命令 `{"id", "cmd", ...参数}`；画面确认、输入事件这类高频消息不带 id，不等回复；
-// * 画面是二进制：前 4 字节是会话的 ch（connect 时由这里选），后面与桌面版的数据包相同；
+// * 命令 `{"id", "cmd", ...参数}`；对会话的操作就是 Command（与桌面版相同）。
+//   画面确认、输入事件这类高频消息不带 id，不等回复；
+// * 媒体包是二进制：前 4 字节是会话的 ch（connect 时由这里选），后面与桌面版相同（见 media.ts）；
 // * 每收到一帧画面就回 ack，被控端的在途帧控制因此把浏览器这段网络也算进去；
 // * 剪贴板在浏览器里同步（navigator.clipboard），规则与桌面版相同：只同步连接之后的变化，并抑制回声；
 // * 显示的延迟 = 控制端服务到被控端的往返 + 浏览器到控制端服务的往返。
 import type {
   AppInfo,
   Backend,
+  Command,
   Problem,
   ResumeToken,
   ServerState,
@@ -17,6 +19,7 @@ import type {
   SessionSink,
 } from "../api";
 import { getLang } from "../i18n";
+import { HEADER_LEN, videoSeq } from "../media";
 
 type Incoming =
   | { type: "reply"; id: number; ok?: unknown; err?: Problem }
@@ -43,8 +46,8 @@ const MAX_CLIPBOARD = 1 << 20;
 const RECONNECT_MAX_MS = 5000;
 const PING_MS = 2000;
 const CLIPBOARD_POLL_MS = 1000;
-/** 二进制消息：ch(4) + 数据包头(24) */
-const MIN_BINARY = 4 + 24;
+/** 二进制消息：ch(4) + 媒体包的头 */
+const MIN_BINARY = 4 + HEADER_LEN;
 
 class WebConsole implements Backend {
   readonly kind = "web" as const;
@@ -221,9 +224,9 @@ class WebConsole implements Backend {
     const dv = new DataView(buf);
     const chan = this.chans.get(dv.getUint32(0, true));
     if (!chan) return;
-    // 画面（kind=1）：收到就确认，seq 在数据包的 [4..8]
-    if (dv.getUint8(4) === 1) {
-      const seq = dv.getUint32(8, true);
+    // 画面：收到就确认
+    const seq = videoSeq(new DataView(buf, 4));
+    if (seq !== null) {
       if (chan.sid !== null) void this.notify("ack", { sid: chan.sid, seq }).catch(() => {});
       else chan.unacked = seq;
     }
@@ -361,7 +364,23 @@ class WebConsole implements Backend {
     }
   }
 
-  async clipboardSync(sid: number, enabled: boolean) {
+  /** 对会话的操作。剪贴板同步在浏览器里做；输入、确认这类高频消息不等回复 */
+  command(c: Command): Promise<void> {
+    switch (c.cmd) {
+      case "clipboardSync":
+        return this.clipboardSync(c.sid, c.enabled);
+      case "input":
+      case "ack":
+        return this.notify(c.cmd, c);
+      case "disconnect":
+        for (const [ch, chan] of this.chans) if (chan.sid === c.sid) this.chans.delete(ch);
+        return this.notify(c.cmd, c);
+      default:
+        return this.call<void>(c.cmd, c);
+    }
+  }
+
+  private async clipboardSync(sid: number, enabled: boolean) {
     const chan = [...this.chans.values()].find((c) => c.sid === sid);
     if (!chan) return;
     chan.clipboard = enabled;
@@ -375,22 +394,10 @@ class WebConsole implements Backend {
     }
   }
 
-  audio = (sid: number, enabled: boolean) => this.call<void>("audio", { sid, enabled });
-
   async localClipboardText() {
     const text = await this.readClipboard(true);
     if (text === null) throw { kind: "clipboardBlocked" } satisfies Problem;
     return text;
-  }
-
-  input = (sid: number, events: unknown[]) => this.notify("input", { sid, events });
-  settings = (sid: number, settings: object) => this.call<void>("settings", { sid, settings });
-  keyframe = (sid: number) => this.call<void>("keyframe", { sid });
-  selectDisplay = (sid: number, index: number) => this.call<void>("display", { sid, index });
-
-  disconnect(sid: number) {
-    for (const [ch, c] of this.chans) if (c.sid === sid) this.chans.delete(ch);
-    return this.notify("disconnect", { sid });
   }
 
   // 网页版没有被控端模式、托盘和窗口

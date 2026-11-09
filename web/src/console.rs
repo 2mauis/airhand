@@ -3,7 +3,8 @@
 //!
 //! # 协议
 //!
-//! 浏览器 → 服务：文本（JSON），`{"id": 1, "cmd": "connect", ...参数}`，命令见 [`Call`]。
+//! 浏览器 → 服务：文本（JSON），`{"id": 1, "cmd": "connect", ...参数}`，命令见 [`Call`]：网页版自己的几个，
+//! 加上对会话的操作 [`Command`]（和桌面版、Android 一样）。
 //! 带 `id` 的会收到回复；不带的（画面确认、输入事件这类高频消息）不回复。
 //!
 //! 服务 → 浏览器：
@@ -12,7 +13,7 @@
 //!   * `{"type": "server", "state": ServerState}`：与中转服务器的连接状态，有变化就发
 //!   * `{"type": "event", "ch": 3, "event": SessionEvent}`：会话事件
 //!   * `{"type": "hostOnline", "code": 123456}`：在等的被控端上线了（见 `airhand_link::controller::HostOnline`）
-//! * 二进制：`ch u32 LE | 数据包`，数据包与桌面版相同（见 `airhand_link::controller::HEADER_LEN`）
+//! * 二进制：`ch u32 LE | 媒体包`，媒体包与桌面版相同（见 `airhand_proto::media`）
 //!
 //! `ch` 是浏览器在 `connect` 时自己选的编号（相当于桌面版的 Tauri Channel）：会话的第一批数据
 //! 可能比 `connect` 的回复先到，浏览器靠它认出是哪个会话的。
@@ -25,11 +26,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use airhand_link::controller::{
-    ControllerService, Frontend, HostOnline, SessionEvent, SessionInfo, SessionUi, UiClosed,
+    Command, ControllerService, Frontend, HostOnline, SessionEvent, SessionUi, UiClosed,
 };
 use airhand_link::net::Report;
 use airhand_link::{Problem, ServerState};
-use airhand_proto::session::{InputEvent, QualitySettings};
+use airhand_proto::session::QualitySettings;
 use airhand_proto::signal::ResumeToken;
 use anyhow::{anyhow, bail};
 use axum::body::Bytes;
@@ -73,40 +74,11 @@ enum Call {
         settings: QualitySettings,
         ch: u32,
     },
-    Input {
-        sid: u32,
-        events: Vec<InputEvent>,
-    },
-    Settings {
-        sid: u32,
-        settings: QualitySettings,
-    },
-    Keyframe {
-        sid: u32,
-    },
-    Display {
-        sid: u32,
-        index: u8,
-    },
-    Audio {
-        sid: u32,
-        enabled: bool,
-    },
-    /// 浏览器复制的文本
-    Clipboard {
-        sid: u32,
-        text: String,
-    },
-    /// 浏览器收到了第 `seq` 帧
-    Ack {
-        sid: u32,
-        seq: u32,
-    },
-    Disconnect {
-        sid: u32,
-    },
     /// 测量浏览器到这里的往返时间
     Ping,
+    /// 对会话的操作（输入、画质、确认画面……）
+    #[serde(untagged)]
+    Session(Command),
 }
 
 #[derive(Debug, Deserialize)]
@@ -419,51 +391,30 @@ impl Console {
                 }
                 let (svc, out) = (self.svc.clone(), self.out.clone());
                 self.tasks.spawn(async move {
-                    let r = connect(&svc, &out, &code, resume, settings, ch).await;
+                    let ui = Arc::new(WebUi {
+                        ch,
+                        out: out.clone(),
+                    });
+                    let r = svc
+                        .connect(&code, resume, settings, ui, Frontend::Browser)
+                        .await;
                     out.reply(req.id, r.and_then(to_value));
                 });
                 // 顺便回收已经结束的
                 while self.tasks.try_join_next().is_some() {}
                 return;
             }
-            Call::Input { sid, events } => unit(svc.input(sid, events)),
-            Call::Settings { sid, settings } => unit(svc.settings(sid, settings)),
-            Call::Keyframe { sid } => unit(svc.keyframe(sid)),
-            Call::Display { sid, index } => unit(svc.select_display(sid, index)),
-            Call::Audio { sid, enabled } => unit(svc.set_audio(sid, enabled)),
-            Call::Clipboard { sid, text } => unit(svc.send_clipboard(sid, text)),
-            Call::Ack { sid, seq } => unit(svc.ack(sid, seq)),
-            Call::Disconnect { sid } => {
-                svc.disconnect(sid);
-                Ok(Value::Null)
-            }
             Call::Ping => Ok(Value::Null),
+            Call::Session(c) => unit(svc.command(c)),
         };
         self.out.reply(req.id, result);
     }
 }
 
-async fn connect(
-    svc: &ControllerService,
-    out: &Outbox,
-    code: &str,
-    resume: Option<ResumeToken>,
-    settings: QualitySettings,
-    ch: u32,
-) -> Result<SessionInfo, Problem> {
-    let code = airhand_proto::parse_code(code).ok_or(Problem::InvalidCode)?;
-    let ui = Arc::new(WebUi {
-        ch,
-        out: out.clone(),
-    });
-    svc.connect(code, resume, settings, ui, Frontend::Browser)
-        .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use airhand_proto::session::Codec;
+    use airhand_proto::session::{Codec, InputEvent};
     use axum::http::HeaderValue;
     use serde_json::json;
 
@@ -518,21 +469,18 @@ mod tests {
         // 不带 id：不回复
         let r: Request = serde_json::from_value(json!({
             "cmd": "input", "sid": 1,
-            "events": [{ "MouseMove": { "x": 0.5, "y": 0.25 } }, { "Key": { "code": "KeyA", "down": true } }, "ReleaseAll"]
+            "events": [{ "MouseMove": { "x": 0.5, "y": 0.25 } }, { "MouseDelta": { "dx": -2, "dy": 3 } }, "ReleaseAll"]
         }))
         .unwrap();
         assert_eq!(r.id, None);
-        let Call::Input { sid: 1, events } = r.call else {
+        let Call::Session(Command::Input { sid: 1, events }) = r.call else {
             panic!("{:?}", r.call)
         };
         assert_eq!(
             events,
             vec![
                 InputEvent::MouseMove { x: 0.5, y: 0.25 },
-                InputEvent::Key {
-                    code: "KeyA".into(),
-                    down: true
-                },
+                InputEvent::MouseDelta { dx: -2, dy: 3 },
                 InputEvent::ReleaseAll
             ]
         );
@@ -540,8 +488,26 @@ mod tests {
         let r: Request = serde_json::from_str(r#"{"id":1,"cmd":"appInfo"}"#).unwrap();
         assert!(matches!(r.call, Call::AppInfo));
         let r: Request = serde_json::from_str(r#"{"cmd":"ack","sid":2,"seq":99}"#).unwrap();
-        assert!(matches!(r.call, Call::Ack { sid: 2, seq: 99 }));
+        assert!(matches!(
+            r.call,
+            Call::Session(Command::Ack { sid: 2, seq: 99 })
+        ));
+        let r: Request = serde_json::from_str(r#"{"id":4,"cmd":"ping"}"#).unwrap();
+        assert!(matches!(r.call, Call::Ping));
         assert!(serde_json::from_str::<Request>(r#"{"id":1,"cmd":"nope"}"#).is_err());
+
+        // 和桌面版、Android 共用的命令样例（crates/airhand-link/tests/protocol.json）
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../crates/airhand-link/tests/protocol.json"
+        ))
+        .unwrap();
+        for c in fixture["commands"].as_array().unwrap() {
+            let mut with_id = c.clone();
+            with_id["id"] = json!(9);
+            let r: Request = serde_json::from_value(with_id).unwrap_or_else(|e| panic!("{c}: {e}"));
+            assert_eq!(r.id, Some(9));
+            assert!(matches!(r.call, Call::Session(_)), "{c}");
+        }
     }
 
     /// 前端（client/src/lib/backend/web.ts）依赖这个 JSON 形状

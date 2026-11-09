@@ -8,8 +8,9 @@
 
 use std::time::{Duration, Instant};
 
-use airhand_link::transport::{HostReceiver, open_session};
+use airhand_link::transport::{FromHost, HostReceiver, open_session};
 use airhand_proto::framing::{read_msg, write_msg};
+use airhand_proto::media::{AudioHeader, HEADER_LEN, VideoHeader};
 use airhand_proto::session::{
     ByeReason, Codec, ControllerHello, ControllerMsg, HostMsg, InputEvent, Notice, QualitySettings,
 };
@@ -254,6 +255,52 @@ async fn e2e_roundtrip() {
             Ok(m) => m.expect("读取会话消息"),
             Err(_) => continue, // 画面静止时不会有帧
         };
+        let msg = match msg {
+            FromHost::Video(p) => {
+                let v = VideoHeader::decode(&p).expect("画面包的头");
+                let data = &p[HEADER_LEN..];
+                let age = age_ms(v.capture_us);
+                assert!(age >= 0.0, "画面时间戳在未来: {age} ms");
+                rep.video_age_ms = rep.video_age_ms.max(age);
+                rep.frames += 1;
+                rep.keyframes += v.key as u32;
+                rep.bytes += data.len();
+                if rep.frames == 1 {
+                    assert!(v.key, "第一帧必须是关键帧");
+                }
+                if v.codec == Codec::H264 && matches!(decoder.decode(data), Ok(Some(_))) {
+                    rep.decoded += 1;
+                }
+                write_msg(&mut send, &ControllerMsg::Ack { seq: v.seq })
+                    .await
+                    .unwrap();
+                continue;
+            }
+            FromHost::Audio(p) => {
+                let a = AudioHeader::decode(&p).expect("声音包的头");
+                let age = age_ms(a.capture_us);
+                assert!(age >= 0.0, "声音时间戳在未来: {age} ms");
+                rep.audio_age_ms = rep.audio_age_ms.max(age);
+                if audio_off.is_some_and(|t| t.elapsed() > Duration::from_millis(300)) {
+                    rep.audio_late += 1;
+                }
+                rep.audio += 1;
+                rep.audio_starts += a.start as u32;
+                let n = audio_dec
+                    .decode_float(&p[HEADER_LEN..], &mut pcm, false)
+                    .expect("Opus 解码");
+                // 跳过开头几包（播放刚启动、编码器收敛）
+                if rep.audio > 10 {
+                    audio_energy += pcm[..n * 2]
+                        .iter()
+                        .map(|s| (*s as f64).powi(2))
+                        .sum::<f64>();
+                    audio_samples += n * 2;
+                }
+                continue;
+            }
+            FromHost::Control(m) => m,
+        };
         match msg {
             HostMsg::Hello(h) => {
                 rep.hello = true;
@@ -274,23 +321,6 @@ async fn e2e_roundtrip() {
                     e.name, e.codec, e.width, e.height, e.hardware
                 );
                 rep.encoders.push((e.codec, e.name, e.hardware));
-            }
-            HostMsg::Video(v) => {
-                let age = age_ms(v.capture_us);
-                assert!(age >= 0.0, "画面时间戳在未来: {age} ms");
-                rep.video_age_ms = rep.video_age_ms.max(age);
-                rep.frames += 1;
-                rep.keyframes += v.key as u32;
-                rep.bytes += v.data.len();
-                if rep.frames == 1 {
-                    assert!(v.key, "第一帧必须是关键帧");
-                }
-                if v.codec == Codec::H264 && matches!(decoder.decode(&v.data), Ok(Some(_))) {
-                    rep.decoded += 1;
-                }
-                write_msg(&mut send, &ControllerMsg::Ack { seq: v.seq })
-                    .await
-                    .unwrap();
             }
             HostMsg::Pong { .. } => rep.pongs += 1,
             HostMsg::Cursor(_) => rep.cursor += 1,
@@ -313,27 +343,6 @@ async fn e2e_roundtrip() {
                     _ => {}
                 }
             }
-            HostMsg::Audio(a) => {
-                let age = age_ms(a.capture_us);
-                assert!(age >= 0.0, "声音时间戳在未来: {age} ms");
-                rep.audio_age_ms = rep.audio_age_ms.max(age);
-                if audio_off.is_some_and(|t| t.elapsed() > Duration::from_millis(300)) {
-                    rep.audio_late += 1;
-                }
-                rep.audio += 1;
-                rep.audio_starts += a.start as u32;
-                let n = audio_dec
-                    .decode_float(&a.data, &mut pcm, false)
-                    .expect("Opus 解码");
-                // 跳过开头几包（播放刚启动、编码器收敛）
-                if rep.audio > 10 {
-                    audio_energy += pcm[..n * 2]
-                        .iter()
-                        .map(|s| (*s as f64).powi(2))
-                        .sum::<f64>();
-                    audio_samples += n * 2;
-                }
-            }
         }
     }
     let tone_ok = tone.is_some();
@@ -350,7 +359,7 @@ async fn e2e_roundtrip() {
     let bye = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             match recv.recv().await {
-                Ok(HostMsg::Bye(reason)) => break Some(reason),
+                Ok(FromHost::Control(HostMsg::Bye(reason))) => break Some(reason),
                 Ok(_) => continue,
                 _ => break None,
             }

@@ -15,11 +15,17 @@ flowchart LR
 
 被控端各平台的具体实现见[下面的表](#被控端在各平台上的实现)。
 
-每条 QUIC 连接上的第一条双向流是**控制流**（信令）。每建立一个远控会话，双方各再开三条双向流（会话控制、视频、音频），服务器按会话 ID 和流类别配对，之后**只转发字节、不解析画面**。这是协议 v8 的格式，服务器与所有客户端必须一起升级。三条流各自有序，跨流没有顺序保证；音画用采集时间同步。每条消息是 `u32` 长度前缀加 postcard 编码的内容。控制端重连时带上连上时得到的重连凭证；被控端不在线时服务器记下它，被控端重新上线时发 `HostOnline` 通知（见 `crates/airhand-proto/src/signal.rs` 的“重连凭证”）。
+每条 QUIC 连接上的第一条双向流是**信令流**。每建立一个远控会话，双方各再开三条双向流（会话控制、视频、音频），服务器按会话 ID 和流类别配对，之后**只转发字节、不解析会话内容**。这是协议 v9 的格式，服务器与所有客户端必须一起升级。三条流各自有序，跨流没有顺序保证；音画用采集时间同步。每条消息都是 `u32` 长度前缀加内容：信令和会话控制流上是 postcard 编码的消息；视频、音频流上是**媒体包**（24 字节定长头 + 码流 / Opus 包，见 `crates/airhand-proto/src/media.rs`），控制端只看一眼头，**原样**交给界面（WebView、浏览器、Android），不重新编码、不拷贝。控制端重连时带上连上时得到的重连凭证；被控端不在线时服务器记下它，被控端重新上线时发 `HostOnline` 通知（见 `crates/airhand-proto/src/signal.rs` 的“重连凭证”）。
+
+界面和控制端服务之间（Tauri 命令、网页版的 WebSocket、Android 的 JNI）用同一套 JSON：对会话的操作都是 `airhand_link::controller::Command`，会话事件都是 `SessionEvent`。`crates/airhand-link/tests/protocol.json` 是 Rust 测试生成的协议样例（媒体包、输入事件、命令），TypeScript 和 Kotlin 的测试读同一个文件，三边的实现对不上测试就会失败。
+
+被控端与服务器的连接（注册、取回控制码、断开所有控制端、更换控制码）和会话三条流的收发在 `airhand_link::host`，桌面版和 Android 共用；采集、编码、注入输入、请本机用户同意由各平台自己做。
+
+**鼠标**平时用绝对坐标（本机指针在画面的哪里，被控端光标就在哪里）。被控端的光标隐藏时（例如游戏里按住右键转视角、第一人称游戏）改发相对移动：游戏这时自己把光标拉回原位、只看移动了多少，绝对坐标会和它打架（视角乱跳、拖到画面边上就转不动）。被控端用真实鼠标的方式注入相对移动（Windows `SendInput`、macOS 带移动量的 `CGEvent`、X11 XTEST 相对移动）。控制台这时锁定本机指针（Pointer Lock，原始移动量），按 Esc 解除；也可以手动锁定（Ctrl+Alt+Shift+M 或工具栏）。Android 控制端的触控板滑动、触屏拖动发相对移动，外接鼠标被抓住（pointer capture）；菜单里也有“锁定鼠标”。macOS 被控端检测不到光标隐藏，玩游戏时手动锁定。
 
 会话控制流上控制端先报上本次运行的随机标识，被控端回 `Hello`（平台、能不能接收多点触摸、支持哪些系统操作），之后开始发画面。被控端也可以先回“等待同意”，请坐在它面前的人允许之后再发 `Hello`（Android 默认这样，见 `crates/airhand-proto/src/session.rs` 的模块说明）。
 
-网页控制台把右边的控制端拆成两半：QUIC 连接和会话管理在 `airhand-web`（容器）里，解码、渲染、输入采集仍在浏览器里，两者之间是一条 WebSocket。画面原样转发给浏览器（每个数据包前面加 4 字节的会话编号），浏览器收到后回确认。
+网页控制台把右边的控制端拆成两半：QUIC 连接和会话管理在 `airhand-web`（容器）里，解码、渲染、输入采集仍在浏览器里，两者之间是一条 WebSocket。媒体包原样转发给浏览器（前面加 4 字节的会话编号），浏览器收到画面后回确认。
 
 桌面控制台也由 WebView 收到画面后回确认，ACK 覆盖 Rust → WebView 的 IPC。输入队列最多 128 条 / 2 MiB，连续鼠标移动和可替代状态会合并；排队超过 2 秒或溢出时结束会话，不在网络恢复后回放过时操作。浏览器 WebSocket 输出另有条数和 32 MiB 字节预算。
 
@@ -29,14 +35,14 @@ flowchart LR
 
 | 目录 | 内容 |
 |---|---|
-| `crates/airhand-proto` | 协议：信令、会话消息、帧格式 |
-| `crates/airhand-link` | 客户端到中转服务器的链路：QUIC 连接、证书固定、断线重连，与界面无关的控制端会话，`Problem`。桌面客户端和网页控制台共用 |
+| `crates/airhand-proto` | 协议：信令、会话控制消息、媒体包、帧格式 |
+| `crates/airhand-link` | 客户端到中转服务器的链路：QUIC 连接、证书固定、断线重连，会话的三条流，与界面无关的控制端会话和界面命令（`Command`），被控端的服务器连接，`Problem`。桌面客户端、网页控制台和 Android 共用；`tests/protocol.json` 是三边共用的协议样例 |
 | `server/` | 中转服务器（quinn + rustls）及其 `Dockerfile` |
 | `web/` | 网页控制台服务（axum：静态网页 + WebSocket，HTTP / HTTPS 同一端口）及其 `Dockerfile`、`docker-compose.yml`。和 `client/src-tauri/` 一样是独立的 Cargo 工作区 |
 | `client/src-tauri/` | 桌面客户端 Rust 部分：被控端 `host/`、托盘、控制台窗口和命令 |
-| `android/native/` | Android 的 Rust 核心（JNI）：控制端用 `airhand-link`；被控端的网络部分（注册 / 取回控制码、会话、在途帧控制和自适应码率，与桌面版相同）。和 `client/src-tauri/`、`web/` 一样是独立的 Cargo 工作区 |
+| `android/native/` | Android 的 Rust 核心（JNI）：控制端用 `airhand-link`；被控端的网络部分（服务器连接和会话的三条流用 `airhand_link::host`，在途帧控制和自适应码率与桌面版相同）。和 `client/src-tauri/`、`web/` 一样是独立的 Cargo 工作区 |
 | `android/app/` | Android 应用（Kotlin + Jetpack Compose）：手机和电视界面、MediaCodec 解码 / 编码、屏幕录制、无障碍服务（远程操作） |
-| `client/src/` | `lib/session.ts` 管理会话，`connection-attempt.ts` 隔离连接代际，`video.ts` 管理解码 / 画面队列，`input.ts` 管理输入；控制台界面（React 19 + TypeScript，不依赖 UI 库），桌面版和网页版共用，区别只在 `client/src/lib/backend/`；文案在 `client/src/locales/` |
+| `client/src/` | `lib/session.ts` 管理会话，`connection-attempt.ts` 隔离连接代际，`media.ts` 解析媒体包，`video.ts` 管理解码 / 画面队列，`input.ts` 管理输入（含相对移动和指针锁定）；控制台界面（React 19 + TypeScript，不依赖 UI 库），桌面版和网页版共用，区别只在 `client/src/lib/backend/`；文案在 `client/src/locales/` |
 | `assets/icon.svg` | 应用图标源文件 |
 
 ### 被控端在各平台上的实现
@@ -48,7 +54,8 @@ Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服
 | 屏幕采集 | DXGI Desktop Duplication | ScreenCaptureKit | MIT-SHM 共享内存 + DAMAGE 变化通知，RandR 多显示器 | MediaProjection（虚拟显示器直接输出到编码器） |
 | 光标形状 | DXGI | NSCursor | XFIXES | — |
 | 视频编码 | Media Foundation 硬件编码，OpenH264 兜底 | VideoToolbox 硬件编码（H.264 / HEVC），OpenH264 兜底 | OpenH264 | MediaCodec（优先硬件编码器） |
-| 输入注入 | SendInput（扫描码） | CGEvent（虚拟键码） | XTEST（evdev 物理键码） | 无障碍服务（手势、系统操作、文字输入） |
+| 输入注入 | SendInput（扫描码；相对移动同真实鼠标） | CGEvent（虚拟键码；相对移动带移动量） | XTEST（evdev 物理键码；相对移动） | 无障碍服务（手势、系统操作、文字输入） |
+| 光标隐藏（改用相对移动） | DXGI | 检测不到（手动锁定） | XFIXES（全透明光标） | — |
 | 声音采集 | WASAPI 环回 | ScreenCaptureKit（系统混音） | PulseAudio / PipeWire 的输出监视器 | AudioPlaybackCapture（Android 10+） |
 | 剪贴板 | 剪贴板序号检测变化 | NSPasteboard 变化计数 | XFIXES 选择所有者变化通知 | 只能写入（控制端 → 手机） |
 | 控制台界面 | WebView2 | WKWebView | WebKitGTK（WebCodecs 由 GStreamer 解码） | Jetpack Compose（MediaCodec 解码） |

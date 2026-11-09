@@ -97,18 +97,6 @@ pub fn new_hub() -> StatusHub {
     Arc::new(watch::Sender::new(AppStatus::default()))
 }
 
-/// 把被控端与服务器的连接状态写进 `hub`（给 [`airhand_link::net::Reconnect`] 用）
-pub fn host_reporter(hub: &StatusHub) -> Report {
-    let hub = hub.clone();
-    Arc::new(move |s| {
-        hub.send_if_modified(|st| {
-            let changed = st.host.server != s;
-            st.host.server = s;
-            changed
-        });
-    })
-}
-
 /// 把控制端与服务器的连接状态写进 `hub`
 pub fn controller_reporter(hub: &StatusHub) -> Report {
     let hub = hub.clone();

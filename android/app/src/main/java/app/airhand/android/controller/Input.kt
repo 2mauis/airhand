@@ -7,10 +7,17 @@ import app.airhand.android.core.SystemAction
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** 输入事件（与 Rust 的 `airhand_proto::session::InputEvent` 的 JSON 形状相同） */
+/** 输入事件（与 Rust 的 `airhand_proto::session::InputEvent` 的 JSON 形状相同，样例见 ProtocolTest） */
 object Input {
+    /** 移到这个位置（0..1，相对画面） */
     fun move(x: Float, y: Float): JSONObject =
         JSONObject().put("MouseMove", JSONObject().put("x", x.coerceIn(0f, 1f).toDouble()).put("y", y.coerceIn(0f, 1f).toDouble()))
+
+    /**
+     * 相对移动（被控端的光标隐藏了，例如游戏里转视角）：鼠标的原始计数，约等于被控端的像素。
+     * 被控端按真实鼠标的移动注入，游戏自己把光标拉回原位、只看移动了多少
+     */
+    fun delta(dx: Int, dy: Int): JSONObject = JSONObject().put("MouseDelta", JSONObject().put("dx", dx).put("dy", dy))
 
     fun button(button: String, down: Boolean): JSONObject =
         JSONObject().put("MouseButton", JSONObject().put("button", button).put("down", down))
@@ -47,13 +54,30 @@ object Input {
     const val BACK = "Back"
     const val FORWARD = "Forward"
 
+    /**
+     * 把一个事件加到待发的一批里：紧挨着的绝对移动只留最后一个，相对移动加起来（不越过点击、按键）。
+     * 和 Rust 的 `InputEvent::coalesce` 一样
+     */
+    fun append(pending: MutableList<Any>, e: Any) {
+        val last = pending.lastOrNull()
+        if (e is JSONObject && e.has("MouseMove") && last is JSONObject && last.has("MouseMove")) {
+            pending[pending.size - 1] = e
+        } else if (e is JSONObject && e.has("MouseDelta") && last is JSONObject && last.has("MouseDelta")) {
+            val a = last.getJSONObject("MouseDelta")
+            val b = e.getJSONObject("MouseDelta")
+            pending[pending.size - 1] = delta(a.getInt("dx") + b.getInt("dx"), a.getInt("dy") + b.getInt("dy"))
+        } else {
+            pending.add(e)
+        }
+    }
+
     /** 按下再松开一组键（组合键：先按下修饰键，再按下主键，倒序松开） */
     fun chord(codes: List<String>): List<JSONObject> =
         codes.map { key(it, true) } + codes.reversed().map { key(it, false) }
 }
 
 /**
- * 把输入事件合并后发出去：连续的鼠标移动只保留最后一个，最多每 8 ms 发一批。
+ * 把输入事件合并后发出去：连续的绝对移动只保留最后一个、相对移动加起来，最多每 8 ms 发一批。
  * 发送在单独的线程上，触摸处理不会被 JNI 调用拖慢。
  */
 class InputSender(private val deliver: (JSONArray) -> Unit) {
@@ -67,14 +91,7 @@ class InputSender(private val deliver: (JSONArray) -> Unit) {
     fun send(events: List<Any>, now: Boolean = true) {
         if (events.isEmpty()) return
         synchronized(lock) {
-            for (e in events) {
-                val last = pending.lastOrNull()
-                if (e is JSONObject && e.has("MouseMove") && last is JSONObject && last.has("MouseMove")) {
-                    pending[pending.size - 1] = e
-                } else {
-                    pending.add(e)
-                }
-            }
+            for (e in events) Input.append(pending, e)
             if (now) {
                 handler.removeCallbacks(flushTask)
                 handler.post(flushTask)

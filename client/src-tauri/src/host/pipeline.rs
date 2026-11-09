@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use airhand_link::flow::{Abr, Flow};
-use airhand_proto::framing;
-use airhand_proto::session::{CursorState, HostMsg, Notice, QualitySettings, VideoFrame};
+use airhand_link::host::Control;
+use airhand_proto::media::{self, VideoHeader};
+use airhand_proto::session::{CursorState, HostMsg, Notice, QualitySettings};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -45,11 +46,12 @@ struct Ctrl {
 }
 
 impl Pipeline {
+    /// `video`：画面流的发送队列；`control`：控制流（光标、编码器、采集失败的提示）
     pub fn start(
         display: u8,
         settings: QualitySettings,
-        out: mpsc::Sender<Bytes>,
-        control: mpsc::Sender<Bytes>,
+        video: mpsc::Sender<Bytes>,
+        control: Control,
         flow: Arc<Flow>,
     ) -> Self {
         let ctrl = Arc::new(Ctrl {
@@ -62,7 +64,7 @@ impl Pipeline {
         let c = ctrl.clone();
         let thread = std::thread::Builder::new()
             .name("airhand-encoder".into())
-            .spawn(move || run(c, display, out, control))
+            .spawn(move || run(c, display, video, control))
             .expect("spawn encoder");
         Self {
             ctrl,
@@ -115,7 +117,7 @@ fn send_cancellable(out: &mpsc::Sender<Bytes>, stop: &AtomicBool, mut bytes: Byt
     }
 }
 
-fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sender<Bytes>) {
+fn run(ctrl: Arc<Ctrl>, screen: u8, video: mpsc::Sender<Bytes>, control: Control) {
     capture::raise_priority();
     let mut settings = *ctrl.settings.lock().unwrap();
     let mut ver = ctrl.settings_ver.load(Ordering::Acquire);
@@ -134,20 +136,8 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
     let mut refine_due = Instant::now();
     info!(screen, ?settings, "encoding pipeline started");
 
-    let send = |msg: &HostMsg, cap: usize| -> bool {
-        let out = if matches!(msg, HostMsg::Video(_)) {
-            &out
-        } else {
-            &control
-        };
-        match framing::encode_with_capacity(msg, cap) {
-            Ok(buf) => send_cancellable(out, &ctrl.stop, Bytes::from(buf)),
-            Err(e) => {
-                warn!("can't encode message: {e}");
-                true
-            }
-        }
-    };
+    // 队列满了（网络跟不上）就等着，直到管线被停下
+    let send = |msg: &HostMsg| send_cancellable(control.queue(), &ctrl.stop, Control::encode(msg));
 
     while !ctrl.stop.load(Ordering::Acquire) {
         let v = ctrl.settings_ver.load(Ordering::Acquire);
@@ -188,14 +178,10 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
                 None
             };
             shape_seq = c.shape_seq;
-            let cap = shape.as_ref().map_or(16, |s| s.rgba.len() + 16);
-            if !send(
-                &HostMsg::Cursor(CursorState {
-                    visible: c.visible,
-                    shape,
-                }),
-                cap,
-            ) {
+            if !send(&HostMsg::Cursor(CursorState {
+                visible: c.visible,
+                shape,
+            })) {
                 break;
             }
         }
@@ -205,12 +191,9 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
             if let Some(err) = slot.error()
                 && reported_error.as_ref() != Some(&err)
             {
-                if !send(
-                    &HostMsg::Notice(Notice::CaptureFailed {
-                        detail: err.clone(),
-                    }),
-                    256,
-                ) {
+                if !send(&HostMsg::Notice(Notice::CaptureFailed {
+                    detail: err.clone(),
+                })) {
                     break;
                 }
                 reported_error = Some(err);
@@ -226,7 +209,7 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
             }
         } else if reported_error.take().is_some() {
             // 报告过采集失败，现在又有新画面了：让控制端撤下提示
-            if !send(&HostMsg::Notice(Notice::CaptureRecovered), 16) {
+            if !send(&HostMsg::Notice(Notice::CaptureRecovered)) {
                 break;
             }
         }
@@ -274,7 +257,7 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
                 hw_failures < 3,
             ) {
                 Ok(e) => {
-                    if !send(&HostMsg::Encoder(e.info().clone()), 128) {
+                    if !send(&HostMsg::Encoder(e.info().clone())) {
                         break;
                     }
                     enc = Some(e);
@@ -313,7 +296,7 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
                 if !fresh && !force && len < REFINE_DONE_BYTES {
                     refine_left = 0;
                 }
-                let msg = HostMsg::Video(VideoFrame {
+                let header = VideoHeader {
                     seq,
                     key: ef.key,
                     codec: info.codec,
@@ -322,9 +305,9 @@ fn run(ctrl: Arc<Ctrl>, screen: u8, out: mpsc::Sender<Bytes>, control: mpsc::Sen
                     // 重新编码的上一帧就是现在的画面（画面一直没变），采集时间记为现在：
                     // 控制端按采集时间做音画同步，用旧的时间会以为这一帧严重滞后，让声音跟着多等
                     capture_us: super::clock::us(if fresh { frame.captured } else { started }),
-                    data: ef.data,
-                });
-                if !send(&msg, len) {
+                };
+                let packet = Bytes::from(media::frame(&header.encode(), &[&ef.data]));
+                if !send_cancellable(&video, &ctrl.stop, packet) {
                     ctrl.flow.discard(seq);
                     break;
                 }

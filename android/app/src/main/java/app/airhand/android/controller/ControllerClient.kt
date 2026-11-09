@@ -109,22 +109,14 @@ class ControllerClient(private val settings: SettingsStore) {
             val text = Native.ctlPollEvent(h, 500) ?: continue
             val e = runCatching { JSONObject(text) }.getOrNull() ?: continue
             when (e.optString("type")) {
-                "server" -> if (handle == h) _server.value = ServerState.parse(e.getJSONObject("server"))
+                "server" -> if (handle == h) _server.value = ServerState.parse(e.getJSONObject("state"))
                 "hostOnline" -> _hostOnline.tryEmit(e.optInt("code").toString())
             }
         }
     }
 
-    /** 当前的句柄，没有连接（例如设置不对）时为 0 */
+    /** 当前的句柄，没有连接（例如设置不对）时为 0。会话的命令见 [Commands] */
     fun handle(): Long = handle
-
-    /** 执行命令（connect 会阻塞，不能在主线程调用） */
-    fun call(cmd: JSONObject): JSONObject {
-        val h = handle
-        if (h == 0L) return JSONObject().put("err", JSONObject().put("kind", "notConnected"))
-        return runCatching { JSONObject(Native.ctlCall(h, cmd.toString())) }
-            .getOrElse { JSONObject().put("err", JSONObject().put("kind", "failed").put("detail", it.toString())) }
-    }
 
     companion object {
         private const val TAG = "airhand"

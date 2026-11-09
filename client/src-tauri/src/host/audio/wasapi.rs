@@ -12,7 +12,7 @@ use windows::core::GUID;
 
 use std::time::{Duration, Instant};
 
-use airhand_proto::session::AUDIO_SAMPLE_RATE;
+use airhand_proto::media::AUDIO_SAMPLE_RATE;
 
 /// 共享模式缓冲 200 ms：采集线程偶尔被耽搁也不会丢数据
 const BUFFER_HNS: i64 = 2_000_000;

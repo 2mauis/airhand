@@ -33,11 +33,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
-/** 远端光标：形状由被控端发来，位置由本机决定（触控板模式下本机画出来） */
+/**
+ * 远端光标：形状由被控端发来，位置由本机决定（触控板模式下本机画出来）。
+ * 隐藏了（游戏里转视角等）时鼠标改发相对移动（见 [Input.delta]）
+ */
 data class CursorState(val visible: Boolean = true, val bitmap: Bitmap? = null, val hotX: Int = 0, val hotY: Int = 0)
 
 /**
@@ -92,6 +93,9 @@ class RemoteSession(
     val audioOn = MutableStateFlow(app.settings.value.audio)
     val avSyncOn = MutableStateFlow(app.settings.value.avSync)
 
+    /** 锁定鼠标：鼠标一直只发移动了多少、不发位置（被控端隐藏光标时会自动这样，这是手动打开的） */
+    val mouseLock = MutableStateFlow(false)
+
     /** 本机播放声音出错 */
     val audioError = MutableStateFlow<String?>(null)
     val quality = MutableStateFlow(Preset.of(app.settings.value.preset).quality(VideoDecoder.decodable.firstOrNull { it in Codec.PRIORITY } ?: Codec.H264))
@@ -125,7 +129,7 @@ class RemoteSession(
     private val sync = AvSync()
     private val decoder = VideoDecoder(
         sync,
-        requestKeyframe = { command(JSONObject().put("op", "keyframe")) },
+        requestKeyframe = { command { Commands.keyframe(it) } },
         onTooLarge = { c, w, h -> onTooLarge(c, w, h) },
     )
 
@@ -139,7 +143,7 @@ class RemoteSession(
     @Volatile private var audio: AudioPlayer? = null
     private var audioToken = 0L
     private val sender = InputSender { events ->
-        if (!viewOnly) command(JSONObject().put("op", "input").put("events", events))
+        if (!viewOnly) command { Commands.input(it, events) }
     }
 
     fun start() {
@@ -184,15 +188,11 @@ class RemoteSession(
                 val h = client.handle()
                 val settings = currentSettings()
                 sentSettings = settings
-                val cmd = JSONObject()
-                    .put("op", "connect")
-                    .put("code", code)
-                    .put("resume", resume ?: JSONObject.NULL)
-                    .put("settings", settings.toJson())
+                val cmd = Commands.connect(code, resume, settings)
                 val r = runCatching { JSONObject(Native.ctlCall(h, cmd.toString())) }
                     .getOrElse { JSONObject().put("err", JSONObject().put("kind", "failed").put("detail", it.toString())) }
                 if (closed) {
-                    r.optJSONObject("ok")?.let { Native.ctlCall(h, JSONObject().put("op", "close").put("sid", it.getInt("sid")).toString()) }
+                    r.optJSONObject("ok")?.let { Native.ctlCall(h, Commands.disconnect(it.getInt("sid")).toString()) }
                     break
                 }
                 val ok = r.optJSONObject("ok")
@@ -271,7 +271,7 @@ class RemoteSession(
     private fun onConnected(h: Long, ok: JSONObject) {
         handle = h
         sid = ok.getInt("sid")
-        resume = ok.optStringOrNull("resume")
+        resume = Resume.fromJson(ok.optJSONArray("resume")) ?: resume
         grantName = ok.optString("hostName")
         grantOs = ok.optString("hostOs")
         if (grantName.isNotBlank() && saved?.alias.isNullOrBlank()) hostName.value = grantName
@@ -306,7 +306,7 @@ class RemoteSession(
             if (b[0] == '{'.code.toByte()) {
                 val e = runCatching { JSONObject(String(b, Charsets.UTF_8)) }.getOrNull() ?: continue
                 if (e.optString("type") == "closed") {
-                    Native.ctlCall(h, JSONObject().put("op", "close").put("sid", sid).toString())
+                    Native.ctlCall(h, Commands.disconnect(sid).toString())
                     return Problem.parse(e.optJSONObject("reason")) to e.optBoolean("retry", true)
                 }
                 handleEvent(e)
@@ -317,43 +317,40 @@ class RemoteSession(
         return null
     }
 
+    /** 媒体包（格式见 [Media]） */
     private fun handlePacket(h: Long, sid: Int, b: ByteArray) {
-        if (b.size < HEADER) return
-        val bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
-        when (b[0].toInt()) {
-            1 -> {
-                val seq = bb.getInt(4)
-                val w = bb.getShort(8).toInt() and 0xffff
-                val ht = bb.getShort(10).toInt() and 0xffff
-                if (videoSize.value != w to ht) videoSize.value = w to ht
+        when (Media.kind(b)) {
+            Media.VIDEO -> {
+                val v = Media.video(b)
+                if (videoSize.value != v.width to v.height) videoSize.value = v.width to v.height
                 decoder.submit(
                     VideoPacket(
-                        seq = seq,
-                        key = b[1].toInt() == 1,
-                        codec = Codec.fromId(bb.getShort(2).toInt()),
-                        width = w,
-                        height = ht,
-                        ptsUs = bb.getLong(16),
+                        seq = v.seq,
+                        key = v.key,
+                        codec = v.codec,
+                        width = v.width,
+                        height = v.height,
+                        ptsUs = v.captureUs,
                         data = b,
-                        offset = HEADER,
-                        length = b.size - HEADER,
-                        ack = { Native.ctlAck(h, sid, seq) },
+                        offset = Media.HEADER,
+                        length = b.size - Media.HEADER,
+                        ack = { Native.ctlAck(h, sid, v.seq) },
                     ),
                 )
             }
-            2 -> {
-                val visible = b[1].toInt() == 1
-                val hasShape = bb.getShort(2).toInt() != 0
-                if (!hasShape) {
-                    cursor.value = cursor.value.copy(visible = visible)
+            Media.CURSOR -> {
+                val c = Media.cursor(b)
+                val s = c.shape
+                cursor.value = if (s == null) {
+                    cursor.value.copy(visible = c.visible)
                 } else {
-                    val w = bb.getShort(8).toInt() and 0xffff
-                    val ht = bb.getShort(10).toInt() and 0xffff
-                    val bmp = cursorBitmap(b, w, ht)
-                    cursor.value = CursorState(visible, bmp, bb.getShort(12).toInt() and 0xffff, bb.getShort(14).toInt() and 0xffff)
+                    CursorState(c.visible, cursorBitmap(b, s.width, s.height), s.hotX, s.hotY)
                 }
             }
-            3 -> audio?.submit(AudioPacket(b[1].toInt() == 1, bb.getLong(16), b, HEADER, b.size - HEADER))
+            Media.AUDIO -> {
+                val a = Media.audio(b)
+                audio?.submit(AudioPacket(a.start, a.captureUs, b, Media.HEADER, b.size - Media.HEADER))
+            }
         }
     }
 
@@ -466,19 +463,19 @@ class RemoteSession(
     private fun sendSettings() {
         val s = currentSettings()
         sentSettings = s
-        command(JSONObject().put("op", "settings").put("settings", s.toJson()))
+        command { Commands.settings(it, s) }
     }
 
     // ───────────────────────────── 命令 ─────────────────────────────
 
-    /** 给当前会话发命令（`sid` 自动填上）。没连上时丢掉 */
-    private fun command(cmd: JSONObject) {
+    /** 给当前会话发命令（[Commands]，`make` 拿到会话的 sid）。没连上时丢掉 */
+    private fun command(make: (sid: Int) -> JSONObject) {
         val h = handle
         val s = sid
         if (h == 0L || s < 0 || closed) return
-        cmd.put("sid", s)
+        val cmd = make(s)
         val r = Native.ctlCall(h, cmd.toString())
-        if (r.contains("\"err\"")) Log.w(TAG, "${cmd.optString("op")} failed: $r")
+        if (r.contains("\"err\"")) Log.w(TAG, "${cmd.optString("cmd")} failed: $r")
     }
 
     fun setSurface(surface: Surface?) = decoder.setSurface(surface)
@@ -514,7 +511,7 @@ class RemoteSession(
     }
 
     fun selectDisplay(index: Int) {
-        command(JSONObject().put("op", "display").put("index", index))
+        command { Commands.display(it, index) }
     }
 
     fun setAudio(on: Boolean) {
@@ -550,12 +547,12 @@ class RemoteSession(
                 }
             }
         }
-        command(JSONObject().put("op", "audio").put("enabled", true))
+        command { Commands.audio(it, true) }
     }
 
     @Synchronized
     private fun stopAudio() {
-        command(JSONObject().put("op", "audio").put("enabled", false))
+        command { Commands.audio(it, false) }
         audio?.release()
         audio = null
         audioToken = sync.reset()
@@ -570,7 +567,7 @@ class RemoteSession(
     }
 
     fun sendClipboard(text: String) {
-        if (text.isNotEmpty()) command(JSONObject().put("op", "clipboard").put("text", text))
+        if (text.isNotEmpty()) command { Commands.clipboard(it, text) }
     }
 
     /** 以键盘输入的方式把文本打到对方当前的输入框里 */
@@ -601,7 +598,7 @@ class RemoteSession(
         sender.release()
         if (h != 0L && s >= 0) {
             thread(name = "airhand-close") {
-                Native.ctlCall(h, JSONObject().put("op", "close").put("sid", s).toString())
+                Native.ctlCall(h, Commands.disconnect(s).toString())
             }
         }
         stopAudio()
@@ -612,17 +609,16 @@ class RemoteSession(
 
     companion object {
         private const val TAG = "airhand"
-        private const val HEADER = 24
         private const val FIRST_SERVER_WAIT_MS = 12_000L
         private const val RETRY_MS = 800L
         private const val OFFLINE_RECHECK_MS = 60_000L
         private const val BACKGROUND_FPS = 2
 
-        /** 光标形状：RGBA（非预乘）→ Bitmap */
+        /** 光标形状：头后面的 RGBA（非预乘）→ Bitmap */
         fun cursorBitmap(b: ByteArray, w: Int, h: Int): Bitmap? {
-            if (w == 0 || h == 0 || b.size < HEADER + w * h * 4) return null
+            if (w == 0 || h == 0 || b.size < Media.HEADER + w * h * 4) return null
             val px = IntArray(w * h)
-            var o = HEADER
+            var o = Media.HEADER
             for (i in px.indices) {
                 px[i] = Color.argb(b[o + 3].toInt() and 0xff, b[o].toInt() and 0xff, b[o + 1].toInt() and 0xff, b[o + 2].toInt() and 0xff)
                 o += 4

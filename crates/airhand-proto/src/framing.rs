@@ -1,4 +1,7 @@
-//! 长度前缀帧：`u32 LE 长度 | postcard 负载`。
+//! 长度前缀帧：`u32 LE 长度 | 负载`。
+//!
+//! 控制流和信令的负载是 postcard 编码的消息（[`write_msg`] / [`read_msg`]）；
+//! 画面流和声音流的负载是媒体包（见 [`crate::media`]），原样读出来交给界面（[`read_packet`]）。
 
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -38,20 +41,17 @@ where
     Ok(())
 }
 
-/// 读取一条消息。对端在消息边界处正常关闭时返回 `Ok(None)`。
-///
-/// `buf` 由调用方复用，避免每条消息都分配内存。
-pub async fn read_msg<R, T>(
+/// 解码一条消息的负载（不带长度前缀）
+pub fn decode<T: DeserializeOwned>(payload: &[u8]) -> Result<T, FrameError> {
+    Ok(postcard::from_bytes(payload)?)
+}
+
+/// 读长度前缀。对端在帧边界处正常关闭时返回 `Ok(None)`，关在半截里是错误
+async fn read_len<R: AsyncRead + Unpin>(
     r: &mut R,
     max: usize,
-    buf: &mut Vec<u8>,
-) -> Result<Option<T>, FrameError>
-where
-    R: AsyncRead + Unpin,
-    T: DeserializeOwned,
-{
+) -> Result<Option<usize>, FrameError> {
     let mut len = [0u8; 4];
-    // 区分"在边界处干净关闭"与"半截消息"
     let mut got = 0;
     while got < 4 {
         let n = r.read(&mut len[got..]).await?;
@@ -67,10 +67,42 @@ where
     if len > max {
         return Err(FrameError::TooLarge(len));
     }
+    Ok(Some(len))
+}
+
+/// 读取一条消息。对端在消息边界处正常关闭时返回 `Ok(None)`。
+///
+/// `buf` 由调用方复用，避免每条消息都分配内存。
+pub async fn read_msg<R, T>(
+    r: &mut R,
+    max: usize,
+    buf: &mut Vec<u8>,
+) -> Result<Option<T>, FrameError>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    let Some(len) = read_len(r, max).await? else {
+        return Ok(None);
+    };
     buf.clear();
     buf.resize(len, 0);
     r.read_exact(buf).await?;
-    Ok(Some(postcard::from_bytes(buf)?))
+    Ok(Some(decode(buf)?))
+}
+
+/// 读取一帧的原始负载（媒体包），读进一块新内存：之后原样交给界面，不再拷贝。
+/// 对端在帧边界处正常关闭时返回 `Ok(None)`
+pub async fn read_packet<R>(r: &mut R, max: usize) -> Result<Option<Vec<u8>>, FrameError>
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(len) = read_len(r, max).await? else {
+        return Ok(None);
+    };
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await?;
+    Ok(Some(buf))
 }
 
 #[cfg(test)]
@@ -82,15 +114,6 @@ mod tests {
     #[tokio::test]
     async fn roundtrip() {
         let msgs = vec![
-            HostMsg::Video(VideoFrame {
-                seq: 7,
-                key: true,
-                codec: Codec::H264,
-                width: 1920,
-                height: 1080,
-                capture_us: 42,
-                data: vec![0, 0, 0, 1, 0x67, 1, 2, 3],
-            }),
             HostMsg::Pong { t: 99 },
             HostMsg::Notice(Notice::CaptureFailed {
                 detail: "AcquireNextFrame: 0x887A0026".into(),
@@ -104,11 +127,9 @@ mod tests {
             }),
             HostMsg::Notice(Notice::AudioRecovered),
             HostMsg::Bye(ByeReason::CodeChanged),
-            HostMsg::Audio(AudioFrame {
-                seq: 3,
-                start: true,
-                capture_us: 1 << 40,
-                data: vec![0xfc, 0xff, 0xfe],
+            HostMsg::Cursor(CursorState {
+                visible: false,
+                shape: None,
             }),
         ];
         let mut wire = Vec::new();
@@ -117,8 +138,6 @@ mod tests {
         }
         let mut r = &wire[..];
         let mut buf = Vec::new();
-        let a: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
-        assert!(matches!(a, HostMsg::Video(ref v) if v.seq == 7 && v.data.len() == 8));
         let b: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
         assert!(matches!(b, HostMsg::Pong { t: 99 }));
         let n: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
@@ -141,12 +160,44 @@ mod tests {
         assert!(matches!(a, HostMsg::Notice(Notice::AudioRecovered)));
         let bye: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
         assert!(matches!(bye, HostMsg::Bye(ByeReason::CodeChanged)));
-        let a: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
-        assert!(
-            matches!(a, HostMsg::Audio(ref f) if f.seq == 3 && f.start && f.capture_us == 1 << 40 && f.data == [0xfc, 0xff, 0xfe])
-        );
+        let c: HostMsg = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap().unwrap();
+        assert!(matches!(
+            c,
+            HostMsg::Cursor(CursorState {
+                visible: false,
+                shape: None
+            })
+        ));
         let c: Option<HostMsg> = read_msg(&mut r, 1 << 20, &mut buf).await.unwrap();
         assert!(c.is_none());
+    }
+
+    #[tokio::test]
+    async fn packets_are_read_raw() {
+        use crate::media::{AudioHeader, HEADER_LEN, frame};
+        let h = AudioHeader {
+            seq: 1,
+            start: false,
+            capture_us: 5,
+        };
+        let mut wire = frame(&h.encode(), &[&[1, 2]]);
+        wire.extend_from_slice(&frame(&h.encode(), &[]));
+        let mut r = &wire[..];
+        let a = read_packet(&mut r, 1024).await.unwrap().unwrap();
+        assert_eq!(a.len(), HEADER_LEN + 2);
+        assert_eq!(AudioHeader::decode(&a), Some(h));
+        assert_eq!(
+            read_packet(&mut r, 1024).await.unwrap().unwrap().len(),
+            HEADER_LEN
+        );
+        assert!(read_packet(&mut r, 1024).await.unwrap().is_none());
+        // 关在半截里
+        let mut r = &wire[..6];
+        assert!(read_packet(&mut r, 1024).await.is_err());
+        assert!(matches!(
+            read_packet(&mut &wire[..], 10).await,
+            Err(FrameError::TooLarge(26))
+        ));
     }
 
     #[tokio::test]
@@ -310,6 +361,7 @@ mod tests {
                 InputEvent::System {
                     action: SystemAction::Recents,
                 },
+                InputEvent::MouseDelta { dx: -3, dy: 70_000 },
             ]),
         ];
         let mut wire = Vec::new();
@@ -336,7 +388,8 @@ mod tests {
                 },
                 InputEvent::System {
                     action: SystemAction::Recents
-                }
+                },
+                InputEvent::MouseDelta { dx: -3, dy: 70_000 },
             ]
         );
     }

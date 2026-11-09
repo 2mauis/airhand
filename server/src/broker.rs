@@ -986,8 +986,10 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_video_lane_does_not_block_control_or_audio() {
-        use airhand_link::transport::{HostReceiver, open_session};
-        use airhand_proto::session::{AudioFrame, ByeReason, HostMsg};
+        use airhand_link::transport::{FromHost, HostReceiver, open_session};
+        use airhand_proto::framing::read_packet;
+        use airhand_proto::media::{self, AudioHeader};
+        use airhand_proto::session::{ByeReason, HostMsg};
         let (_broker, cfg) = start().await;
         let (mut host, id) = register(&cfg, None).await;
         let mut ctrl = connect_signal(&cfg, Role::Controller).await.unwrap();
@@ -1022,33 +1024,31 @@ mod tests {
         let mut buf = Vec::new();
         let msg: HostMsg = timeout(
             Duration::from_secs(2),
-            read_msg(&mut ctrl_control, airhand_proto::MAX_SESSION_MSG, &mut buf),
+            read_msg(&mut ctrl_control, airhand_proto::MAX_CONTROL_MSG, &mut buf),
         )
         .await
         .unwrap()
         .unwrap()
         .unwrap();
         assert!(matches!(msg, HostMsg::Pong { t: 77 }));
-        write_msg(
-            &mut host_audio,
-            &HostMsg::Audio(AudioFrame {
-                seq: 1,
-                start: true,
-                capture_us: 0,
-                data: vec![1],
-            }),
-        )
-        .await
-        .unwrap();
-        let msg: HostMsg = timeout(
+        let audio = AudioHeader {
+            seq: 1,
+            start: true,
+            capture_us: 0,
+        };
+        host_audio
+            .write_all(&media::frame(&audio.encode(), &[&[1]]))
+            .await
+            .unwrap();
+        let packet = timeout(
             Duration::from_secs(2),
-            read_msg(&mut ctrl_audio, airhand_proto::MAX_SESSION_MSG, &mut buf),
+            read_packet(&mut ctrl_audio, media::MAX_AUDIO_PACKET),
         )
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-        assert!(matches!(msg, HostMsg::Audio(_)));
+        assert_eq!(AudioHeader::decode(&packet), Some(audio));
         stalled.abort();
         let _ = stalled.await;
         // Also verify receiver cancellation does not damage framing, and clean
@@ -1082,7 +1082,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap(),
-            HostMsg::Bye(ByeReason::Kicked)
+            FromHost::Control(HostMsg::Bye(ByeReason::Kicked))
         ));
     }
 
@@ -1178,9 +1178,10 @@ mod tests {
                 let _ = online_tx.send(code);
             }),
         );
+        let code = id.code.to_string();
         let connect = |resume| {
             svc.connect(
-                id.code,
+                &code,
                 resume,
                 QualitySettings::default(),
                 Arc::new(NoUi),

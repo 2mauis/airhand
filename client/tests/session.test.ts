@@ -5,6 +5,7 @@ import vm from "node:vm";
 import { stripTypeScriptTypes } from "node:module";
 import { ConnectionAttempt } from "../src/lib/connection-attempt.ts";
 import { fitSize, stricter, viewMaxShort } from "../src/lib/fit.ts";
+import * as media from "../src/lib/media.ts";
 
 // Load the actual session class with browser/backend dependencies replaced by
 // small fakes. This tests delivery ordering without a WebView or network.
@@ -17,11 +18,10 @@ function sessionHarness() {
   const calls: any[] = [];
   const timers: (() => void)[] = [];
   const sandbox: any = { console, performance, clearTimeout, setTimeout, queueMicrotask, ConnectionAttempt,
-    fitSize, stricter, viewMaxShort,
+    fitSize, stricter, viewMaxShort, media,
     api: {
       connect: (_c: any, _r: any, _s: any, output: any) => { sink = output; return new Promise(r => { resolve = r; }); },
-      disconnect: async (sid: number) => { calls.push(["disconnect", sid]); },
-      settings: async (sid: number, s: any) => { calls.push(["settings", sid, s]); },
+      command: async (c: any) => { calls.push(c.cmd === "settings" ? [c.cmd, c.sid, c.settings] : [c.cmd, c.sid]); },
     },
     // 延时发送用的定时器：由测试手动触发
     window: { setTimeout: (fn: () => void) => { timers.push(fn); return timers.length; } },

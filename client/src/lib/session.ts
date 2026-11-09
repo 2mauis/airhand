@@ -1,7 +1,9 @@
 // 远程会话：WebCodecs 硬件解码 + Canvas 渲染 + 输入采集 + 光标同步 + 自动重连。
 //
 // 性能要点：
-// * 视频帧以二进制传入（桌面版是 Tauri Channel，网页版是 WebSocket，零 JSON），直接切片交给 VideoDecoder；
+// * 画面是被控端打好的媒体包，原样传到这里（桌面版是 Tauri Channel，网页版是 WebSocket，零 JSON），
+//   读一下头就把码流切片交给 VideoDecoder（见 media.ts）；
+// * 被控端的光标隐藏时（游戏里转视角等）鼠标改发相对移动并锁定本机指针（见 input.ts）；
 // * 解码器 optimizeForLatency，帧解码后立即绘制到 desynchronized Canvas，不排队等 vsync；
 // * 鼠标移动按 8ms 合并，按键/点击立即发送；
 // * 不可见的会话自动降到 5fps，节省带宽与对端 CPU；
@@ -12,6 +14,7 @@ import {
   api,
   toProblem,
   type Codec,
+  type Command,
   type DisplayInfo,
   type InputEvent,
   type Problem,
@@ -21,6 +24,7 @@ import {
   type Platform,
   type SystemAction,
 } from "./api";
+import * as media from "./media";
 import { AudioPlayer } from "./audio";
 import { ConnectionAttempt } from "./connection-attempt";
 import { RemoteInput } from "./input";
@@ -67,8 +71,6 @@ const NO_SERVER_RETRY_MS = 5_000;
 const GIVE_UP = new Set<Problem["kind"]>(["codeNotFound", "rateLimited", "invalidCode", "notController"]);
 /** 与服务器（网页版还有控制端服务）的连接断了：等重新连上再试，不计入重试次数 */
 const NO_SERVER = new Set<Problem["kind"]>(["notConnected", "serverLost", "serverUnreachable", "consoleLost"]);
-/** 二进制包头长度，见 crates/airhand-link/src/controller/session.rs */
-const HEADER_LEN = 24;
 
 let nextId = 1;
 
@@ -193,8 +195,13 @@ export class RemoteSession {
       },
     });
     this.input = new RemoteInput(this.canvas, () => this.sid !== null && !this.disposed, (events) => {
-      if (this.sid !== null) void api.input(this.sid, events).catch(() => {});
+      if (this.sid !== null) this.command({ cmd: "input", sid: this.sid, events });
     });
+    // 鼠标切换了绝对 / 相对、锁定了 / 解除了：本机指针显示与否、工具栏的状态跟着变
+    this.input.onModeChange = () => {
+      this.applyCursor();
+      this.emit();
+    };
     this.audio.onClock = (hostUs, localMs, appliedMs) => {
       this.sync.onAudioClock(hostUs, localMs, appliedMs);
       const extra = this.sync.update(performance.now());
@@ -253,7 +260,7 @@ export class RemoteSession {
       this.attempt.finish(gen);
     }
     if (!this.attempt.accepts(gen) || this.disposed) {
-      void api.disconnect(info.sid).catch(() => {});
+      this.command({ cmd: "disconnect", sid: info.sid });
       return;
     }
     this.resume = info.resume;
@@ -368,7 +375,7 @@ export class RemoteSession {
     this.input.dispose();
     this.video.reset();
     clearTimeout(this.viewLimitTimer);
-    if (this.sid !== null) void api.disconnect(this.sid).catch(() => {});
+    if (this.sid !== null) this.command({ cmd: "disconnect", sid: this.sid });
     this.sid = null;
     this.state = "closed";
     this.audio.disable();
@@ -460,16 +467,23 @@ export class RemoteSession {
     this.emit();
   }
 
-  /** 一个数据包（可能是更大的缓冲区中的一段：网页版前面还有 4 字节的 ch） */
+  /** 一个媒体包（可能是更大的缓冲区中的一段：网页版前面还有 4 字节的 ch） */
   private onBinary(pkt: Uint8Array) {
-    if (pkt.byteLength < HEADER_LEN) return;
     const dv = new DataView(pkt.buffer, pkt.byteOffset, pkt.byteLength);
-    const kind = dv.getUint8(0);
-    // 采集时间（被控端时钟，微秒）；在 2^53 以内，转成 number 不丢精度
-    const hostUs = Number(dv.getBigUint64(16, true));
-    if (kind === 1) this.video.push(dv, pkt, hostUs);
-    else if (kind === 2) this.onCursor(dv, pkt);
-    else if (kind === 3) this.audio.push(dv.getUint8(1) === 1, hostUs, pkt.subarray(HEADER_LEN));
+    const data = pkt.subarray(media.HEADER_LEN);
+    switch (media.kind(dv)) {
+      case media.VIDEO:
+        this.video.push(media.videoHeader(dv), data);
+        break;
+      case media.CURSOR:
+        this.onCursor(media.cursorHeader(dv), data);
+        break;
+      case media.AUDIO: {
+        const a = media.audioHeader(dv);
+        this.audio.push(a.start, a.captureUs, data);
+        break;
+      }
+    }
   }
 
   // ───────────────────────── 解码 ─────────────────────────
@@ -478,7 +492,12 @@ export class RemoteSession {
     const now = performance.now();
     if (this.sid === null || now - this.lastKeyReq < 500) return;
     this.lastKeyReq = now;
-    void api.keyframe(this.sid).catch(() => {});
+    this.command({ cmd: "keyframe", sid: this.sid });
+  }
+
+  /** 对会话的操作（失败了也没关系：会话断了会另外收到 closed） */
+  private command(c: Command) {
+    void api.command(c).catch(() => {});
   }
 
   /** 音画同步当前是否生效（开关打开且正在播放声音） */
@@ -511,29 +530,29 @@ export class RemoteSession {
 
   // ───────────────────────── 光标 ─────────────────────────
 
-  private onCursor(dv: DataView, pkt: Uint8Array) {
-    this.cursorVisible = dv.getUint8(1) === 1;
-    if (dv.getUint16(2, true) === 1) {
-      const w = dv.getUint16(8, true);
-      const h = dv.getUint16(10, true);
-      if (w > 0 && h > 0 && pkt.byteLength >= HEADER_LEN + w * h * 4) {
-        this.cursorRaw = {
-          w,
-          h,
-          hx: dv.getUint16(12, true),
-          hy: dv.getUint16(14, true),
-          rgba: new Uint8ClampedArray(pkt.buffer, pkt.byteOffset + HEADER_LEN, w * h * 4),
-        };
-        this.cursorScale = 0;
-      }
+  private onCursor(c: media.CursorHeader, rgba: Uint8Array) {
+    this.cursorVisible = c.visible;
+    const s = c.shape;
+    if (s && s.width > 0 && s.height > 0 && rgba.byteLength >= s.width * s.height * 4) {
+      this.cursorRaw = {
+        w: s.width,
+        h: s.height,
+        hx: s.hotX,
+        hy: s.hotY,
+        rgba: new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, s.width * s.height * 4),
+      };
+      this.cursorScale = 0;
     }
+    // 被控端的光标隐藏了：鼠标改发相对移动（会回调 onModeChange 刷新指针）
+    this.input.setRemoteCursorHidden(!c.visible);
     this.applyCursor();
   }
 
   /** 按当前显示比例缩放远端光标，生成 CSS cursor */
   private applyCursor() {
-    if (!this.cursorVisible) {
-      this.setCursor("none");
+    if (!this.cursorVisible || this.input.relative) {
+      // 发相对移动时本机指针的位置没有意义，不显示；用户按 Esc 解除了锁定就显示一个普通的指针
+      this.setCursor(this.input.relative ? "none" : "default");
       return;
     }
     const c = this.cursorRaw;
@@ -697,7 +716,7 @@ export class RemoteSession {
     else this.audio.disable();
     this.applySyncState();
     // 关闭时也通知被控端停止采集，不占带宽
-    if (this.sid !== null) void api.audio(this.sid, want).catch(() => {});
+    if (this.sid !== null) this.command({ cmd: "audio", sid: this.sid, enabled: want });
     // 被控端不再采集，之前"无法采集声音"的状态也就作废了（再打开时它会重新报告）
     if (!want) this.clearAudioError();
   }
@@ -743,18 +762,18 @@ export class RemoteSession {
 
   private pushSettings() {
     if (this.sid === null) return;
-    void api.settings(this.sid, this.effectiveSettings()).catch(() => {});
+    this.command({ cmd: "settings", sid: this.sid, settings: this.effectiveSettings() });
   }
 
   selectDisplay(index: number) {
     if (this.sid === null || index === this.currentDisplay) return;
     this.releaseAll();
-    void api.selectDisplay(this.sid, index).catch(() => {});
+    this.command({ cmd: "display", sid: this.sid, index });
   }
 
   setClipboardSync(v: boolean) {
     this.clipboardSync = v;
-    if (this.sid !== null) void api.clipboardSync(this.sid, v).catch(() => {});
+    if (this.sid !== null) this.command({ cmd: "clipboardSync", sid: this.sid, enabled: v });
     this.emit();
   }
 
@@ -783,6 +802,15 @@ export class RemoteSession {
     // 统一换行，分块发送避免单条消息过大
     const t = text.replace(/\r\n/g, "\n").replace(/\n/g, "\r");
     for (let i = 0; i < t.length; i += 512) this.enqueue([{ Text: { text: t.slice(i, i + 512) } }], true);
+  }
+
+  /** 用户手动锁定了鼠标（发相对移动） */
+  get mouseLocked(): boolean { return this.input.manualLock; }
+
+  /** 手动锁定 / 解锁鼠标（工具栏；快捷键 Ctrl+Alt+Shift+M 由 input.ts 处理）。要在点击里调用 */
+  toggleMouseLock() {
+    this.input.toggleLock();
+    this.focus();
   }
 
   focus() { this.input.focus(); }

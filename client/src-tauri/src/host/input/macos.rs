@@ -95,6 +95,7 @@ impl MacInjector {
                     let p = self.global_point(display, *x, *y);
                     self.mouse_move(p);
                 }
+                InputEvent::MouseDelta { dx, dy } => self.mouse_delta(*dx, *dy),
                 InputEvent::MouseButton { button, down } => {
                     if *down {
                         self.buttons.insert(*button);
@@ -221,6 +222,23 @@ impl MacInjector {
     fn mouse_move(&mut self, p: CGPoint) {
         let prev = self.cursor();
         self.pos = Some(p);
+        // 相对移动量（游戏等程序用它）
+        let (dx, dy) = ((p.x - prev.x).round() as i64, (p.y - prev.y).round() as i64);
+        self.post_move(p, dx, dy);
+    }
+
+    /// 相对移动（被控端光标隐藏时，见 `airhand_proto::session` 的模块说明）：从光标现在真正所在的位置移过去，
+    /// 事件里的移动量就是控制端给的。游戏读的是移动量，光标被游戏固定住时也照样有
+    fn mouse_delta(&mut self, dx: i32, dy: i32) {
+        // 之后的移动、点击都从光标真正所在的位置算（系统会把光标限制在屏幕里，游戏也会把它拉回去）
+        self.pos = None;
+        let cur = self.cursor();
+        let p = CGPoint::new(cur.x + dx as f64, cur.y + dy as f64);
+        self.post_move(p, dx as i64, dy as i64);
+    }
+
+    /// 发一个移动事件（按住键时是拖动），带上移动量
+    fn post_move(&mut self, p: CGPoint, dx: i64, dy: i64) {
         // 按住某个键移动 = 拖动（按住多个键时以左键为准）
         let (ty, button) = if self.buttons.contains(&MouseButton::Left) {
             (CGEventType::LeftMouseDragged, CGMouseButton::Left)
@@ -236,17 +254,8 @@ impl MacInjector {
         let Some(ev) = CGEvent::new_mouse_event(src.as_deref(), ty, p, button) else {
             return;
         };
-        // 相对移动量（游戏等程序用它）
-        CGEvent::set_integer_value_field(
-            Some(&ev),
-            CGEventField::MouseEventDeltaX,
-            (p.x - prev.x).round() as i64,
-        );
-        CGEvent::set_integer_value_field(
-            Some(&ev),
-            CGEventField::MouseEventDeltaY,
-            (p.y - prev.y).round() as i64,
-        );
+        CGEvent::set_integer_value_field(Some(&ev), CGEventField::MouseEventDeltaX, dx);
+        CGEvent::set_integer_value_field(Some(&ev), CGEventField::MouseEventDeltaY, dy);
         self.post(&ev, flags);
     }
 

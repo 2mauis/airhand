@@ -23,6 +23,15 @@ function base({ size = 18, ...rest }: P, children: React.ReactNode) {
 }
 
 export const IconPlus = (p: P) => base(p, <path d="M12 5v14M5 12h14" />);
+/** 鼠标（锁定鼠标） */
+export const IconMouse = (p: P) =>
+  base(
+    p,
+    <>
+      <rect x="6" y="3" width="12" height="18" rx="6" />
+      <path d="M12 7v4" />
+    </>,
+  );
 export const IconGrid = (p: P) =>
   base(
     p,

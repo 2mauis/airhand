@@ -1,8 +1,11 @@
 // 与 Rust 端的命令 / 数据结构一一对应。
 //
 // 控制台有两种运行方式，界面完全相同，只是和控制端服务（crates/airhand-link）之间的通道不同（见 Backend）：
-// * 桌面版：Tauri 窗口，命令走 invoke，画面走 Channel（backend/tauri.ts）；
+// * 桌面版：Tauri 窗口，命令走 invoke，媒体包走 Channel（backend/tauri.ts）；
 // * 网页版：浏览器打开 airhand-web（web/）的端口，都走一条 WebSocket（backend/web.ts）。
+//
+// 对会话的操作是 Command（与 Rust 的 airhand_link::controller::Command 相同，Android 也一样），
+// 画面 / 光标 / 声音是媒体包（见 media.ts）。样例见 crates/airhand-link/tests/protocol.json。
 import { isTauri } from "@tauri-apps/api/core";
 import { tauriBackend } from "./backend/tauri";
 import { webBackend } from "./backend/web";
@@ -188,7 +191,10 @@ export type MouseButton = "Left" | "Right" | "Middle" | "Back" | "Forward";
 
 /** 与 airhand_proto::session::InputEvent 对应（serde 外部标记） */
 export type InputEvent =
+  /** 移到这个位置（0..1，相对当前显示器的画面） */
   | { MouseMove: { x: number; y: number } }
+  /** 相对移动（被控端光标隐藏时，例如游戏里转视角）：鼠标的原始计数，约等于被控端的像素 */
+  | { MouseDelta: { dx: number; dy: number } }
   | { MouseButton: { button: MouseButton; down: boolean } }
   | { Wheel: { dx: number; dy: number } }
   | { Key: { code: string; down: boolean } }
@@ -196,9 +202,27 @@ export type InputEvent =
   | { System: { action: SystemAction } }
   | "ReleaseAll";
 
+/** 对会话的操作，与 airhand_link::controller::Command 对应（JSON 以 cmd 区分） */
+export type Command =
+  | { cmd: "input"; sid: number; events: InputEvent[] }
+  | { cmd: "settings"; sid: number; settings: QualitySettings }
+  /** 请被控端马上编一个关键帧 */
+  | { cmd: "keyframe"; sid: number }
+  /** 切换到被控端的另一个显示器 */
+  | { cmd: "display"; sid: number; index: number }
+  /** 开启 / 关闭被控端的声音 */
+  | { cmd: "audio"; sid: number; enabled: boolean }
+  /** 把这里复制的文本发给被控端（网页版：浏览器自己读剪贴板） */
+  | { cmd: "clipboard"; sid: number; text: string }
+  /** 打开 / 关闭剪贴板同步 */
+  | { cmd: "clipboardSync"; sid: number; enabled: boolean }
+  /** 收到了第 seq 帧画面（累积确认；由 Backend 自己发） */
+  | { cmd: "ack"; sid: number; seq: number }
+  | { cmd: "disconnect"; sid: number };
+
 /** 会话的输出 */
 export interface SessionSink {
-  /** 画面 / 光标 / 声音数据包：24 字节头 + 数据（格式见 crates/airhand-link/src/controller/session.rs） */
+  /** 媒体包：画面 / 光标 / 声音（24 字节头 + 数据，见 media.ts） */
   packet(data: Uint8Array): void;
   event(ev: SessionEvent): void;
 }
@@ -221,15 +245,10 @@ export interface Backend {
   ): Promise<SessionInfo>;
   /** 在等的被控端（connect 返回过 hostOffline）重新上线了，参数是控制码（数字）。返回取消订阅的函数 */
   onHostOnline(cb: (code: number) => void): () => void;
-  clipboardSync(sid: number, enabled: boolean): Promise<void>;
-  audio(sid: number, enabled: boolean): Promise<void>;
+  /** 对会话的操作（画面的确认由 Backend 在收到画面时自己发） */
+  command(c: Command): Promise<void>;
   /** 读取本机剪贴板文本（用于"作为按键输入"） */
   localClipboardText(): Promise<string>;
-  input(sid: number, events: InputEvent[]): Promise<void>;
-  settings(sid: number, settings: QualitySettings): Promise<void>;
-  keyframe(sid: number): Promise<void>;
-  selectDisplay(sid: number, index: number): Promise<void>;
-  disconnect(sid: number): Promise<void>;
   /** 切换到被控端（只有桌面版） */
   switchToHost(): Promise<void>;
   /** 切换界面语言（桌面版同时作用于托盘菜单） */

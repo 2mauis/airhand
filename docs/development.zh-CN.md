@@ -111,6 +111,10 @@ cd ~/airhand && bash client/scripts/linux-test.sh
 
 客户端和服务器连接时比较 `PROTOCOL_VERSION`（`crates/airhand-proto/src/lib.rs`）。不一致时服务器回复 `Incompatible`，客户端提示用户该更新 Airhand 还是服务器，之后每分钟重试一次。任何不兼容的协议改动都要把版本号加 1。握手本身（`ClientMsg::Hello`、`ServerMsg::Welcome` / `Incompatible`、ALPN）**永远不能改**，否则不同版本之间连“版本不一致”都无法告诉对方；`version_handshake_wire_is_stable` 测试守着这一点。
 
+### 一份协议，三份实现
+
+Rust、控制台（TypeScript）和 Android（Kotlin）用同一套格式：媒体包（`crates/airhand-proto/src/media.rs`）、输入事件、界面命令（`airhand_link::controller::Command`）。`crates/airhand-link/tests/protocol.json` 是 Rust 测试生成的样例；`npm test`（`tests/protocol.test.ts`）和 `./gradlew testDebugUnitTest`（`ProtocolTest`）用同一个文件检查各自的解析和拼装。改了格式之后用 `AIRHAND_UPDATE_FIXTURES=1 cargo test -p airhand-link --test protocol` 重新生成，再让另外两边的测试通过。
+
 ### 消息是类型，不是文字
 
 凡是经过网络、或者从 Rust 端传给界面、可能显示给用户的内容，都是枚举（`ConnectError`、`Notice`、`ByeReason`、`Problem` 等），由界面按用户的语言变成文字：

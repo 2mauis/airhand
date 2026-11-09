@@ -97,6 +97,11 @@ impl X11Injector {
                     let (px, py) = to_root(d, *x, *y);
                     c.fake(xproto::MOTION_NOTIFY_EVENT, 0, px, py)?;
                 }
+                // 相对移动：XTEST 的移动事件 detail = 1 表示相对（同 XTestFakeRelativeMotionEvent）
+                InputEvent::MouseDelta { dx, dy } => {
+                    let clamp = |v: i32| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                    c.fake(xproto::MOTION_NOTIFY_EVENT, 1, clamp(*dx), clamp(*dy))?;
+                }
                 InputEvent::MouseButton { button, down } => {
                     if *down {
                         self.buttons.insert(*button);

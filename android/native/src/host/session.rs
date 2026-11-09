@@ -1,4 +1,5 @@
-//! 被控端的单个远控会话（对应桌面版的 `client/src-tauri/src/host/session.rs`）。
+//! 被控端的单个远控会话（对应桌面版的 `client/src-tauri/src/host/session.rs`，三条流的收发用
+//! [`airhand_link::host::HostSession`]，两边一样）。
 //!
 //! 手机默认要先请坐在它面前的人同意（见 `airhand_proto::session` 的模块说明）：
 //!
@@ -13,24 +14,18 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use airhand_link::tasks::OwnedTask;
-use airhand_link::transport::{SessionStreams, open_session, write_lane};
-use airhand_proto::framing::{self, read_msg};
+use airhand_link::host::{HostSession, PEER_TIMEOUT};
 use airhand_proto::session::{
     ByeReason, ControllerMsg, HostHello, HostMsg, Notice, Platform, QualitySettings,
 };
-use airhand_proto::{MAX_SESSION_MSG, Role};
-use anyhow::{Result, anyhow};
-use bytes::Bytes;
+use anyhow::Result;
 use quinn::Connection;
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{broadcast, oneshot, watch};
 use tracing::{info, warn};
 
 use super::{Shared, audio, video};
 
-/// 控制端每秒都会发 Ping，这么久没有任何消息说明对方已失联
-const PEER_TIMEOUT: Duration = Duration::from_secs(30);
 /// 等控制端报上自己的标识（它是会话流上的第一条消息，通常马上就到）
 const HELLO_WAIT: Duration = Duration::from_secs(2);
 /// 本机用户这么久没有回应连接请求就当作拒绝
@@ -60,8 +55,8 @@ async fn until(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-/// The parent JoinSet may cancel us at any await (network loss/new code/stop).
-/// Cleanup must therefore be owned, not just statements after the main loop.
+/// 上层随时可能在某个 await 处取消会话（断网、更换控制码、停止共享）：
+/// 清理工作放在 Drop 里，而不是主循环后面的语句里
 struct SessionGuard {
     shared: Arc<Shared>,
     id: u64,
@@ -86,48 +81,9 @@ pub async fn run(
         shared: shared.clone(),
         id: session_id,
     };
-    let SessionStreams {
-        control: (send, mut recv),
-        video: (video_send, _video_recv),
-        audio: (audio_send, _audio_recv),
-    } = open_session(&conn, session_id, Role::Host).await?;
-
-    // Independent bounded queues and streams, shared with the desktop transport.
-    let (ctl_tx, ctl_rx) = mpsc::channel::<Bytes>(32);
-    let (audio_tx, audio_rx) = mpsc::channel::<Bytes>(audio::QUEUE);
-    let (video_tx, video_rx) = mpsc::channel::<Bytes>(video::QUEUE);
-    let mut video_tx = Some(video_tx);
+    let mut io = HostSession::open(&conn, session_id, video::QUEUE, audio::QUEUE).await?;
+    let ctl = io.ctl.clone();
     let mut bcast = shared.broadcast.subscribe();
-    let ctl = |m: &HostMsg| -> Result<()> {
-        ctl_tx
-            .try_send(Bytes::from(framing::encode(m)?))
-            .map_err(|_| anyhow!("the session is closed"))
-    };
-
-    let mut writer = OwnedTask(tokio::spawn(async move {
-        tokio::try_join!(
-            write_lane(send, ctl_rx),
-            write_lane(video_send, video_rx),
-            write_lane(audio_send, audio_rx)
-        )
-    }));
-
-    // 读任务：read_msg 不是取消安全的，单独放在一个任务里
-    let (in_tx, mut in_rx) = mpsc::channel::<ControllerMsg>(64);
-    let mut reader = OwnedTask(tokio::spawn(async move {
-        let mut buf = Vec::with_capacity(1024);
-        loop {
-            match read_msg::<_, ControllerMsg>(&mut recv, MAX_SESSION_MSG, &mut buf).await {
-                Ok(Some(m)) => {
-                    if in_tx.send(m).await.is_err() {
-                        return Ok(());
-                    }
-                }
-                Ok(None) => return Ok(()),
-                Err(e) => return Err(anyhow!(e)),
-            }
-        }
-    }));
 
     // 同意之前收到的设置，同意之后再生效
     let mut settings: Option<QualitySettings> = None;
@@ -139,10 +95,10 @@ pub async fn run(
     let mut last_msg = Instant::now();
 
     // 同意之后（或者不需要同意时）：开始正常的会话
-    let mut open = |gate: &mut Gate,
-                    deadline: &mut Option<tokio::time::Instant>,
-                    settings: Option<QualitySettings>,
-                    want_audio: bool|
+    let open = |gate: &mut Gate,
+                deadline: &mut Option<tokio::time::Instant>,
+                settings: Option<QualitySettings>,
+                want_audio: bool|
      -> Result<()> {
         *gate = Gate::Open;
         *deadline = None;
@@ -152,7 +108,7 @@ pub async fn run(
             c.active = true;
         });
         let info = shared.info.lock().unwrap();
-        ctl(&HostMsg::Hello(HostHello {
+        ctl.send(&HostMsg::Hello(HostHello {
             hostname: info.hostname.clone(),
             os: info.os.clone(),
             version: info.version.clone(),
@@ -164,16 +120,16 @@ pub async fn run(
             actions: info.actions.clone(),
         }))?;
         if !info.input {
-            ctl(&HostMsg::Notice(Notice::MissingPermissions {
+            ctl.send(&HostMsg::Notice(Notice::MissingPermissions {
                 screen: false,
                 input: true,
             }))?;
         }
         if let Some(e) = &info.encoder {
-            ctl(&HostMsg::Encoder(e.clone()))?;
+            ctl.send(&HostMsg::Encoder(e.clone()))?;
         }
         if let Some(detail) = &info.capture_failure {
-            ctl(&HostMsg::Notice(Notice::CaptureFailed {
+            ctl.send(&HostMsg::Notice(Notice::CaptureFailed {
                 detail: detail.clone(),
             }))?;
         }
@@ -181,11 +137,11 @@ pub async fn run(
         if let Some(s) = settings {
             shared.video.set_settings(s);
         }
-        if let Some(tx) = video_tx.take() {
-            shared.video.add(session_id, tx);
-        }
+        shared.video.add(session_id, io.video.clone());
         if want_audio {
-            shared.audio.subscribe(session_id, audio_tx.clone());
+            shared
+                .audio
+                .subscribe(session_id, io.audio.clone(), ctl.clone());
         }
         info!(session_id, "session started");
         Ok(())
@@ -203,14 +159,14 @@ pub async fn run(
         *gate = Gate::Asking(rx);
         *deadline = Some(tokio::time::Instant::now() + APPROVAL_TIMEOUT);
         info!(session_id, "asking the local user to allow the connection");
-        ctl(&HostMsg::AwaitingApproval)
+        ctl.send(&HostMsg::AwaitingApproval)
     };
 
     let result: Result<()> = async {
         loop {
             let is_open = matches!(gate, Gate::Open);
             tokio::select! {
-                msg = in_rx.recv() => {
+                msg = io.incoming.recv() => {
                     let Some(msg) = msg else { break };
                     last_msg = Instant::now();
                     match msg {
@@ -225,7 +181,7 @@ pub async fn run(
                                 }
                             }
                         }
-                        ControllerMsg::Ping { t } => ctl(&HostMsg::Pong { t })?,
+                        ControllerMsg::Ping { t } => ctl.send(&HostMsg::Pong { t })?,
                         ControllerMsg::Settings(s) if !is_open => settings = Some(s),
                         ControllerMsg::Audio { enabled } if !is_open => want_audio = enabled,
                         // 同意之前不执行任何操作、不发画面
@@ -243,7 +199,7 @@ pub async fn run(
                         }
                         ControllerMsg::Audio { enabled } => {
                             if enabled {
-                                shared.audio.subscribe(session_id, audio_tx.clone());
+                                shared.audio.subscribe(session_id, io.audio.clone(), ctl.clone());
                             } else {
                                 shared.audio.unsubscribe(session_id);
                             }
@@ -259,7 +215,7 @@ pub async fn run(
                         open(&mut gate, &mut deadline, settings.take(), want_audio)?;
                     } else {
                         info!(session_id, "the local user declined the connection");
-                        ctl(&HostMsg::Bye(ByeReason::Declined))?;
+                        ctl.send(&HostMsg::Bye(ByeReason::Declined))?;
                         break;
                     }
                 }
@@ -268,27 +224,27 @@ pub async fn run(
                     Gate::WaitHello => ask(&mut gate, &mut deadline)?,
                     _ => {
                         info!(session_id, "nobody answered the connection request");
-                        ctl(&HostMsg::Bye(ByeReason::Unanswered))?;
+                        ctl.send(&HostMsg::Bye(ByeReason::Unanswered))?;
                         break;
                     }
                 },
                 _ = kick.changed() => {
                     let reason = *kick.borrow_and_update();
                     info!(session_id, ?reason, "the local user disconnected the controller");
-                    ctl(&HostMsg::Bye(reason))?;
+                    ctl.send(&HostMsg::Bye(reason))?;
                     break;
                 }
                 b = bcast.recv() => match b {
                     // 同意之前不转发（Hello 里会带上那时的状态）
                     Ok(b) => if is_open {
-                        ctl_tx.try_send(b).map_err(|_| anyhow!("session control queue overflow"))?;
+                        ctl.send_encoded(b)?;
                     },
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(session_id, n, "missed broadcast messages");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
-                r = &mut writer.0 => return Err(anyhow!("session writer ended: {r:?}")),
+                e = io.writer.failed() => return Err(e),
                 _ = watchdog.tick() => {
                     if last_msg.elapsed() > PEER_TIMEOUT {
                         anyhow::bail!("the controller stopped responding");
@@ -300,33 +256,19 @@ pub async fn run(
     }
     .await;
 
+    // 先让画面 / 声音分发放开这个会话的发送端，写任务才能把排着队的（例如 Bye）发完
     drop(guard);
-    drop(video_tx);
-    drop(audio_tx);
-    drop(ctl_tx);
-    reader.abort();
-    // 等写任务把已排队的数据（例如 Bye）发完
-    if !writer.is_finished() {
-        let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer.0).await;
-    }
-    let result = match result {
-        Ok(()) => match (&mut reader.0).await {
-            Ok(Err(e)) => Err(e),
-            _ => Ok(()),
-        },
-        Err(e) => Err(e),
-    };
-    match &result {
-        Ok(()) => info!(session_id, "session ended"),
-        Err(e) => warn!(session_id, "session failed: {e:#}"),
-    }
-    result
+    drop(ctl);
+    io.close(session_id, result).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::host::{Host, HostConfig};
+    use airhand_link::host::Control;
+    use tokio::sync::mpsc;
+
     #[tokio::test]
     async fn cancellation_releases_subscriptions_and_pending_approval() {
         let cfg: HostConfig = serde_json::from_value(json!({
@@ -339,6 +281,7 @@ mod tests {
         let sh = host.shared.clone();
         let (video_tx, _video_rx) = mpsc::channel(video::QUEUE);
         let (audio_tx, _audio_rx) = mpsc::channel(audio::QUEUE);
+        let (ctl_tx, _ctl_rx) = mpsc::channel(8);
         let (approval_tx, approval_rx) = oneshot::channel();
         let (ready_tx, ready_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -347,7 +290,7 @@ mod tests {
                 id: 7,
             };
             sh.video.add(7, video_tx);
-            sh.audio.subscribe(7, audio_tx);
+            sh.audio.subscribe(7, audio_tx, Control::new(ctl_tx));
             sh.add_pending(7, approval_tx);
             for i in 0..3 {
                 sh.video.push(

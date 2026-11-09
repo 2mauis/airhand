@@ -16,20 +16,16 @@ mod session;
 #[cfg(target_os = "linux")]
 pub(crate) mod x11;
 
-use std::time::Duration;
+use std::sync::Arc;
 
 use airhand_link::ServerState;
-use airhand_link::net::{self, Reconnect};
-use airhand_link::tasks::OwnedTask;
-use airhand_proto::framing::{read_msg, write_msg};
-use airhand_proto::session::ByeReason;
-use airhand_proto::signal::{ClientMsg, Reclaim, ServerMsg};
-use airhand_proto::{MAX_SIGNAL_MSG, Role};
-use anyhow::{Result, anyhow, bail};
+use airhand_link::host::HostEvents;
+use airhand_proto::signal::{Peer, Reclaim};
 use tauri::async_runtime::JoinHandle;
-use tokio::sync::{mpsc, watch};
-use tokio::task::JoinSet;
-use tracing::{info, warn};
+use tokio::sync::mpsc;
+use tracing::warn;
+
+pub use airhand_link::host::HostCmd;
 
 use crate::config;
 use crate::status::{Controller, StatusHub};
@@ -82,15 +78,6 @@ pub(crate) fn missing_permission(e: &anyhow::Error) -> bool {
     }
 }
 
-/// 托盘菜单发给被控端服务的命令
-#[derive(Debug, Clone, Copy)]
-pub enum HostCmd {
-    /// 断开所有正在控制本机的控制端
-    KickAll,
-    /// 断开所有控制端并更换控制码（旧控制码立即失效）
-    NewCode,
-}
-
 pub struct HostService {
     task: JoinHandle<()>,
     cmd: mpsc::UnboundedSender<HostCmd>,
@@ -123,20 +110,25 @@ impl Drop for HostService {
     }
 }
 
-async fn run(hub: StatusHub, mut cmds: mpsc::UnboundedReceiver<HostCmd>) {
+async fn run(hub: StatusHub, cmds: mpsc::UnboundedReceiver<HostCmd>) {
     // 保存过的控制码（config.toml）：第一次连接就取回它
-    let mut reclaim: Option<Reclaim> = config::settings().code();
-    let mut reconnect = Reconnect::new(crate::status::host_reporter(&hub));
-    loop {
-        reconnect.begin();
-        let result = connect_once(&hub, &mut reclaim, &mut cmds).await;
-        hub.send_modify(|s| {
-            s.host.code = None;
-            s.host.controllers.clear();
-        });
-        reconnect.end("host", result).await;
-    }
+    let reclaim = config::settings().code();
+    let events = Arc::new(TrayStatus(hub));
+    airhand_link::host::run(
+        config::link(),
+        config::persistent(),
+        reclaim,
+        events,
+        |conn, session_id, kick| async move {
+            let _ = session::run(conn, session_id, kick).await;
+        },
+        cmds,
+    )
+    .await;
 }
+
+/// 被控端的状态写进托盘的 [`StatusHub`]，控制码保存在 config.toml 里
+struct TrayStatus(StatusHub);
 
 /// 保存控制码（找不到配置文件的位置时什么也不做）。写不进去只是下次启动时换一个控制码，不影响这次运行
 async fn save_code(code: Option<Reclaim>) {
@@ -146,111 +138,41 @@ async fn save_code(code: Option<Reclaim>) {
     }
 }
 
-/// 返回 `Ok(())` 表示需要立即重连（例如更换控制码），`Err` 表示掉线。
-async fn connect_once(
-    hub: &StatusHub,
-    reclaim: &mut Option<Reclaim>,
-    cmds: &mut mpsc::UnboundedReceiver<HostCmd>,
-) -> Result<()> {
-    let mut sig = net::connect_signal(&config::link(), Role::Host).await?;
-    write_msg(
-        &mut sig.send,
-        &ClientMsg::Register {
-            reclaim: *reclaim,
-            keep: config::persistent(),
-        },
-    )
-    .await?;
-
-    // 独立的读任务，保证 select 中的接收是取消安全的
-    let (tx, mut rx) = mpsc::channel::<ServerMsg>(16);
-    let mut recv = sig.recv;
-    let reader = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        while let Ok(Some(m)) = read_msg::<_, ServerMsg>(&mut recv, MAX_SIGNAL_MSG, &mut buf).await
-        {
-            if tx.send(m).await.is_err() {
-                break;
-            }
-        }
-    });
-    let _reader = OwnedTask(reader);
-
-    let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-        .await
-        .map_err(|_| anyhow!("registration timed out"))?
-        .ok_or_else(|| anyhow!("the server closed the connection before registering"))?;
-    let ServerMsg::Registered { code, secret } = first else {
-        bail!("registration failed: {first:?}");
-    };
-    if reclaim.is_some_and(|r| r.code != code) {
-        info!("the previous control code isn't available anymore, got a new one");
+impl HostEvents for TrayStatus {
+    fn server(&self, state: ServerState) {
+        self.0.send_if_modified(|st| {
+            let changed = st.host.server != state;
+            st.host.server = state;
+            changed
+        });
     }
-    let got = Reclaim { code, secret };
-    if *reclaim != Some(got) {
-        save_code(Some(got)).await;
-    }
-    *reclaim = Some(got);
-    info!(code, "host connected to the server");
-    hub.send_modify(|s| {
-        s.host.code = Some(code);
-        s.host.server = ServerState::Connected;
-    });
 
-    let mut sessions: JoinSet<u64> = JoinSet::new();
-    // 每次发送都会让所有会话向控制端发送 Bye（带上这个原因）并结束
-    let (kick_tx, _) = watch::channel(ByeReason::Kicked);
-    loop {
-        tokio::select! {
-            msg = rx.recv() => match msg {
-                Some(ServerMsg::Incoming { session_id, peer }) => {
-                    info!(session_id, name = %peer.name, ip = %peer.ip, "controller wants to connect");
-                    hub.send_modify(|s| s.host.controllers.push(Controller { session_id, peer }));
-                    let (conn, kick) = (sig.conn.clone(), kick_tx.subscribe());
-                    sessions.spawn(async move {
-                        let _ = session::run(conn, session_id, kick).await;
-                        session_id
-                    });
-                }
-                Some(other) => warn!("ignoring server message: {other:?}"),
-                None => match sig.conn.close_reason() {
-                    Some(reason) => bail!(reason),
-                    None => bail!("the server closed the control stream"),
-                },
-            },
-            Some(done) = sessions.join_next() => {
-                if let Ok(id) = done {
-                    hub.send_modify(|s| s.host.controllers.retain(|c| c.session_id != id));
-                }
-            }
-            Some(cmd) = cmds.recv() => {
-                info!(?cmd, "command from the tray");
-                kick_tx.send_replace(match cmd {
-                    HostCmd::KickAll => ByeReason::Kicked,
-                    HostCmd::NewCode => ByeReason::CodeChanged,
-                });
-                if let HostCmd::NewCode = cmd {
-                    // 给会话一点时间把 Bye 发出去，然后放弃旧控制码重新注册
-                    let _ = tokio::time::timeout(Duration::from_millis(800), async {
-                        while sessions.join_next().await.is_some() {}
-                    })
-                    .await;
-                    // 解除服务器上的绑定，并忘掉保存的控制码（万一重新注册之前就退出了，下次启动也不会再用旧码）
-                    let release = async {
-                        write_msg(&mut sig.send, &ClientMsg::Release).await?;
-                        // 服务器处理完 Release 才会读到控制流结束、断开连接
-                        let _ = sig.send.finish();
-                        sig.conn.closed().await;
-                        anyhow::Ok(())
-                    };
-                    let _ = tokio::time::timeout(Duration::from_secs(2), release).await;
-                    *reclaim = None;
-                    save_code(None).await;
-                    sig.conn.close(quinn::VarInt::from_u32(0), b"new code");
-                    return Ok(());
-                }
-            }
-            reason = sig.conn.closed() => bail!(reason),
+    async fn registered(&self, code: Reclaim, changed: bool) {
+        if changed {
+            save_code(Some(code)).await;
         }
+        self.0.send_modify(|s| s.host.code = Some(code.code));
+    }
+
+    async fn released(&self) {
+        save_code(None).await;
+    }
+
+    fn incoming(&self, session_id: u64, peer: &Peer) {
+        let peer = peer.clone();
+        self.0
+            .send_modify(|s| s.host.controllers.push(Controller { session_id, peer }));
+    }
+
+    fn ended(&self, session_id: u64) {
+        self.0
+            .send_modify(|s| s.host.controllers.retain(|c| c.session_id != session_id));
+    }
+
+    fn offline(&self) {
+        self.0.send_modify(|s| {
+            s.host.code = None;
+            s.host.controllers.clear();
+        });
     }
 }

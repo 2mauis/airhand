@@ -125,6 +125,11 @@ impl WinInjector {
                         0,
                     ));
                 }
+                // 相对移动：和真鼠标一样注入（游戏读原始输入或者光标的位移都对得上），
+                // 光标的移动按系统的指针速度 / 加速设置走
+                InputEvent::MouseDelta { dx, dy } => {
+                    self.batch.push(mouse(MOUSEEVENTF_MOVE, *dx, *dy, 0));
+                }
                 InputEvent::MouseButton { button, down } => {
                     if *down {
                         self.buttons.insert(*button);

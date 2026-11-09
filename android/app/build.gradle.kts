@@ -105,6 +105,9 @@ android {
                 repo.resolve("crates/airhand-link/src/controller/session.rs"),
                 repo.resolve("crates/airhand-proto/src/session.rs"),
             ).withPropertyName("rustMessageEnums").withPathSensitivity(PathSensitivity.RELATIVE)
+            // ProtocolTest 读和 Rust、桌面控制台共用的协议样例
+            test.inputs.file(repo.resolve("crates/airhand-link/tests/protocol.json"))
+                .withPropertyName("protocolFixture").withPathSensitivity(PathSensitivity.RELATIVE)
             test.inputs.files(fileTree("src/main/res") { include("values*/strings.xml") })
                 .withPropertyName("strings").withPathSensitivity(PathSensitivity.RELATIVE)
         }

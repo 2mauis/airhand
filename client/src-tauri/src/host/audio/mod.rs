@@ -29,10 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use airhand_proto::framing;
-use airhand_proto::session::{
-    AUDIO_CHANNELS, AUDIO_FRAME_MS, AUDIO_SAMPLE_RATE, AudioFrame, HostMsg,
-};
+use airhand_proto::media::{self, AUDIO_CHANNELS, AUDIO_FRAME_MS, AUDIO_SAMPLE_RATE, AudioHeader};
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::sync::{mpsc, watch};
@@ -250,7 +247,7 @@ impl Drop for AudioSubscription {
     }
 }
 
-/// 订阅被控端声音：编码好的 [`HostMsg::Audio`] 消息（已带长度前缀）会发到 `tx`。
+/// 订阅被控端声音：声音包（[`media::frame`] 编好的，带长度前缀）会发到 `tx`。
 pub fn subscribe(tx: mpsc::Sender<Bytes>) -> AudioSubscription {
     let mut hub = HUB.lock().unwrap();
     let id = NEXT_SUB.fetch_add(1, Ordering::Relaxed);
@@ -293,19 +290,16 @@ fn set_failure(shared: &Shared, failure: Option<String>) {
     });
 }
 
-/// 把一个 Opus 包发给所有订阅者（每种 start 取值只编码一次消息）。
+/// 把一个 Opus 包发给所有订阅者（每种 start 取值只打包一次）。
 fn broadcast(shared: &Shared, seq: u32, data: &[u8], start: bool, captured: Instant) {
     let capture_us = super::clock::us(captured);
     let encode = |start: bool| {
-        let msg = HostMsg::Audio(AudioFrame {
+        let header = AudioHeader {
             seq,
             start,
             capture_us,
-            data: data.to_vec(),
-        });
-        framing::encode_with_capacity(&msg, data.len())
-            .ok()
-            .map(Bytes::from)
+        };
+        Bytes::from(media::frame(&header.encode(), &[data]))
     };
     let (mut normal, mut first) = (None, None);
     let mut subs = shared.subs.lock().unwrap();
@@ -315,7 +309,6 @@ fn broadcast(shared: &Shared, seq: u32, data: &[u8], start: bool, captured: Inst
         } else {
             normal.get_or_insert_with(|| encode(false)).clone()
         };
-        let Some(msg) = msg else { continue };
         s.fresh = false;
         // 队列满（网络跟不上）就丢掉这一包
         if let Err(mpsc::error::TrySendError::Full(_)) = s.tx.try_send(msg) {

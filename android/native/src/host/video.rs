@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use airhand_proto::framing;
-use airhand_proto::session::{Codec, HostMsg, QualitySettings, VideoFrame};
+use airhand_proto::media::{self, VideoHeader};
+use airhand_proto::session::{Codec, QualitySettings};
 use bytes::Bytes;
 use serde::Serialize;
 use serde_json::json;
@@ -24,7 +24,7 @@ use tracing::{debug, info};
 
 use crate::queue::Queue;
 
-/// 每个会话的画面队列（编码好的消息）。在途帧控制之下一般只有一两帧
+/// 每个会话的画面队列（打包好的画面包）。在途帧控制之下一般只有一两帧
 pub const QUEUE: usize = 8;
 
 pub struct VideoHub {
@@ -219,30 +219,24 @@ impl VideoHub {
         if st.sessions.is_empty() {
             return;
         }
-        let mut payload = Vec::with_capacity(st.config.len() + data.len());
-        if key && codec != Codec::AV1 && !starts_with_parameter_set(data, codec) {
-            payload.extend_from_slice(&st.config);
-        }
-        payload.extend_from_slice(data);
         st.seq = st.seq.wrapping_add(1);
         let seq = st.seq;
-        let len = payload.len();
-        let msg = HostMsg::Video(VideoFrame {
+        let header = VideoHeader {
             seq,
             key,
             codec,
             width,
             height,
             capture_us,
-            data: payload,
-        });
-        let bytes = match framing::encode_with_capacity(&msg, len) {
-            Ok(b) => Bytes::from(b),
-            Err(e) => {
-                tracing::warn!("can't encode a video frame: {e}");
-                return;
-            }
         };
+        // 关键帧前面拼上参数集：和画面一起一次拷进包里
+        let config: &[u8] = if key && codec != Codec::AV1 && !starts_with_parameter_set(data, codec)
+        {
+            &st.config
+        } else {
+            &[]
+        };
+        let bytes = Bytes::from(media::frame(&header.encode(), &[config, data]));
         let mut want_key = false;
         for (id, o) in st.sessions.iter_mut() {
             if o.need_key && !key {
@@ -312,35 +306,30 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use airhand_proto::framing;
 
     fn hub() -> (VideoHub, Arc<Queue<String>>) {
         let events = Arc::new(Queue::new(64));
         (VideoHub::new(events.clone()), events)
     }
 
-    fn decode(b: &Bytes) -> VideoFrame {
-        let msg: HostMsg = postcard_decode(&b[4..]);
-        match msg {
-            HostMsg::Video(v) => v,
-            other => panic!("{other:?}"),
-        }
+    struct Frame {
+        seq: u32,
+        key: bool,
+        data: Vec<u8>,
     }
 
-    fn postcard_decode(b: &[u8]) -> HostMsg {
-        // framing 没有同步解码函数：借 read_msg 走一遍
-        let mut framed = (b.len() as u32).to_le_bytes().to_vec();
-        framed.extend_from_slice(b);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let mut buf = Vec::new();
-            framing::read_msg::<_, HostMsg>(&mut &framed[..], 1 << 20, &mut buf)
-                .await
-                .unwrap()
-                .unwrap()
-        })
+    /// 线上的画面包：长度前缀 + 头 + 码流
+    fn decode(b: &Bytes) -> Frame {
+        assert_eq!(
+            u32::from_le_bytes(b[..4].try_into().unwrap()) as usize,
+            b.len() - 4
+        );
+        let h = VideoHeader::decode(&b[4..]).unwrap();
+        Frame {
+            seq: h.seq,
+            key: h.key,
+            data: b[4 + media::HEADER_LEN..].to_vec(),
+        }
     }
 
     #[test]

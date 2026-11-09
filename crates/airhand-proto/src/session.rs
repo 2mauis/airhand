@@ -1,4 +1,6 @@
-//! 会话流（被控端 ⇄ 控制端，经服务器透传）消息。
+//! 会话的控制流（被控端 ⇄ 控制端，经服务器透传）：postcard 编码的消息。
+//!
+//! 画面和声音不在这里：它们各走一条流，用定长头 + 原始数据的媒体包（见 [`crate::media`]）。
 //!
 //! # 会话开始
 //!
@@ -9,21 +11,25 @@
 //! 同意之后才发 `Hello` 和画面，拒绝或者超时没人理会就发 [`HostMsg::Bye`]（[`ByeReason::Declined`] /
 //! [`ByeReason::Unanswered`]）。等待期间照常回应 Ping，控制端不会把它当成失联。
 //! 同一次运行里同一台控制端（同一个 [`ControllerHello::device`]）断线重连时被控端可以不再询问。
+//!
+//! # 鼠标
+//!
+//! 平时鼠标用绝对坐标（[`InputEvent::MouseMove`]）：控制端的指针在哪里，被控端的光标就在哪里。
+//! 被控端的光标隐藏了（[`CursorState::visible`] 为 false，例如游戏里按住右键转视角、第一人称游戏）时，
+//! 控制端改发相对移动（[`InputEvent::MouseDelta`]）：游戏这时自己把光标拉回原位、只看移动了多少，
+//! 绝对坐标会和它打架（视角乱跳、拖到画面边上就转不动了）。
 
 use serde::{Deserialize, Serialize};
 
-/// 被控端 → 控制端
+/// 被控端 → 控制端（控制流）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum HostMsg {
     /// 会话开始（需要本机用户同意时，同意之后才发）
     Hello(HostHello),
     /// 正在等被控端的用户同意这次连接（见模块说明）
     AwaitingApproval,
-    Video(VideoFrame),
     /// 回应 [`ControllerMsg::Ping`]，用于测量端到端往返时延。
-    Pong {
-        t: u64,
-    },
+    Pong { t: u64 },
     /// 显示器列表或当前显示器变化。
     Displays {
         displays: Vec<DisplayInfo>,
@@ -33,16 +39,13 @@ pub enum HostMsg {
     Notice(Notice),
     /// 编码器（重新）创建后通知控制端当前实际使用的编码参数。
     Encoder(EncoderInfo),
-    /// 远端光标形状/可见性变化。控制端用本地光标显示该形状（移动零延迟）。
+    /// 远端光标形状/可见性变化。控制端用本地光标显示该形状（移动零延迟），
+    /// 光标隐藏时改用相对移动（见模块说明）。
     Cursor(CursorState),
     /// 被控端剪贴板文本变化
-    Clipboard {
-        text: String,
-    },
+    Clipboard { text: String },
     /// 被控端主动结束会话（例如用户在托盘点了"断开所有控制端"），控制端不应自动重连。
     Bye(ByeReason),
-    /// 被控端正在播放的声音（控制端用 [`ControllerMsg::Audio`] 开启后才会发送）。
-    Audio(AudioFrame),
 }
 
 /// 被控端给控制端的提示。
@@ -87,26 +90,6 @@ pub enum ByeReason {
     Declined,
     /// 被控端的用户一直没有回应连接请求
     Unanswered,
-}
-
-/// 声音格式固定为 Opus 48 kHz 立体声，每包 20 ms。
-pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
-pub const AUDIO_CHANNELS: u8 = 2;
-pub const AUDIO_FRAME_MS: u32 = 20;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AudioFrame {
-    /// 包序号。没有声音时被控端不发包，序号也不递增。
-    pub seq: u32,
-    /// 静音之后（或刚开始收听时）的第一包。控制端据此区分"声音停了"和"网络抖动"：
-    /// 前者不需要加大缓冲。
-    pub start: bool,
-    /// 这一包解码后第一个采样的采集时间（被控端时钟，微秒），与 [`VideoFrame::capture_us`]
-    /// 是同一个时钟，控制端据此做音画同步。已扣除 Opus 编码器的前瞻延迟。
-    pub capture_us: u64,
-    /// 一个 Opus 包
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -202,21 +185,27 @@ pub enum Codec {
     AV1,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct VideoFrame {
-    /// 帧序号，控制端需对每一帧回 [`ControllerMsg::Ack`]。
-    pub seq: u32,
-    pub key: bool,
-    pub codec: Codec,
-    pub width: u16,
-    pub height: u16,
-    /// 画面呈现的时间（被控端时钟，微秒），与 [`AudioFrame::capture_us`] 是同一个时钟，用于音画同步。
-    pub capture_us: u64,
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
+impl Codec {
+    /// 媒体包头里的编号（见 [`crate::media`]）
+    pub const fn id(self) -> u8 {
+        match self {
+            Codec::H264 => 0,
+            Codec::H265 => 1,
+            Codec::AV1 => 2,
+        }
+    }
+
+    pub const fn from_id(id: u8) -> Option<Codec> {
+        match id {
+            0 => Some(Codec::H264),
+            1 => Some(Codec::H265),
+            2 => Some(Codec::AV1),
+            _ => None,
+        }
+    }
 }
 
-/// 控制端 → 被控端
+/// 控制端 → 被控端（控制流）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ControllerMsg {
     /// 会话流上的第一条消息（见模块说明）
@@ -312,12 +301,19 @@ pub enum TouchPhase {
 /// 同时按下的触摸点上限（与 Android 手势的上限一致）
 pub const MAX_TOUCH_POINTS: u8 = 10;
 
+/// 输入事件。界面传给控制端服务时是 serde 默认的 JSON 形状：`{"MouseMove":{"x":0.5,"y":0.5}}`、`"ReleaseAll"`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum InputEvent {
-    /// 归一化坐标（0..=1），相对当前显示器画面
+    /// 移到这个位置：归一化坐标（0..=1），相对当前显示器画面
     MouseMove {
         x: f32,
         y: f32,
+    },
+    /// 相对移动（被控端光标隐藏时，见模块说明）。单位是鼠标的原始计数，约等于被控端的一个像素；
+    /// 被控端按真实鼠标的移动注入（游戏读到的就是这个移动量），不换算成坐标
+    MouseDelta {
+        dx: i32,
+        dy: i32,
     },
     MouseButton {
         button: MouseButton,
@@ -351,4 +347,77 @@ pub enum InputEvent {
     System {
         action: SystemAction,
     },
+}
+
+impl InputEvent {
+    /// 把一批输入里相邻的鼠标移动合并：绝对移动只留最后一个，相对移动相加。
+    /// 按键、点击的先后顺序不变（移动不会越过点击）
+    pub fn coalesce(events: &mut Vec<InputEvent>) {
+        let mut out: Vec<InputEvent> = Vec::with_capacity(events.len());
+        for e in events.drain(..) {
+            match (out.last_mut(), e) {
+                (Some(InputEvent::MouseMove { x, y }), InputEvent::MouseMove { x: nx, y: ny }) => {
+                    (*x, *y) = (nx, ny);
+                }
+                (
+                    Some(InputEvent::MouseDelta { dx, dy }),
+                    InputEvent::MouseDelta { dx: ndx, dy: ndy },
+                ) => {
+                    *dx = dx.saturating_add(ndx);
+                    *dy = dy.saturating_add(ndy);
+                }
+                (_, e) => out.push(e),
+            }
+        }
+        *events = out;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coalesce_keeps_order_and_sums_deltas() {
+        let mut v = vec![
+            InputEvent::MouseMove { x: 0.1, y: 0.1 },
+            InputEvent::MouseMove { x: 0.2, y: 0.3 },
+            InputEvent::MouseButton {
+                button: MouseButton::Right,
+                down: true,
+            },
+            InputEvent::MouseDelta { dx: 3, dy: -1 },
+            InputEvent::MouseDelta { dx: 4, dy: -2 },
+            InputEvent::MouseButton {
+                button: MouseButton::Right,
+                down: false,
+            },
+            InputEvent::MouseDelta { dx: 1, dy: 1 },
+        ];
+        InputEvent::coalesce(&mut v);
+        assert_eq!(
+            v,
+            [
+                InputEvent::MouseMove { x: 0.2, y: 0.3 },
+                InputEvent::MouseButton {
+                    button: MouseButton::Right,
+                    down: true
+                },
+                InputEvent::MouseDelta { dx: 7, dy: -3 },
+                InputEvent::MouseButton {
+                    button: MouseButton::Right,
+                    down: false
+                },
+                InputEvent::MouseDelta { dx: 1, dy: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn codec_ids_roundtrip() {
+        for c in [Codec::H264, Codec::H265, Codec::AV1] {
+            assert_eq!(Codec::from_id(c.id()), Some(c));
+        }
+        assert_eq!(Codec::from_id(3), None);
+    }
 }

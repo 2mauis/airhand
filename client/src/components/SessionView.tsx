@@ -14,6 +14,7 @@ import {
   IconFit,
   IconKeyboard,
   IconMonitor,
+  IconMouse,
   IconPower,
   IconRefresh,
   IconShrink,
@@ -409,6 +410,20 @@ export function SessionView({ s }: { s: RemoteSession }) {
               </Dropdown>
             )}
           </div>
+          {s.hostPlatform !== "Android" && (
+            // 游戏：鼠标锁定在画面上、发相对移动（被控端隐藏光标时会自动这样做，这里是手动的）
+            <button
+              className={`tb-btn icon ${s.mouseLocked ? "on" : ""}`}
+              title={s.mouseLocked ? t("session.mouseUnlock") : t("session.mouseLock")}
+              onClick={() => {
+                setMenu(null);
+                s.toggleMouseLock();
+                if (s.mouseLocked) setToast(t("session.mouseLocked"));
+              }}
+            >
+              <IconMouse size={17} />
+            </button>
+          )}
           <button
             className={`tb-btn icon ${s.scaleMode === "native" ? "on" : ""}`}
             title={s.scaleMode === "fit" ? t("session.toNative") : t("session.toFit")}

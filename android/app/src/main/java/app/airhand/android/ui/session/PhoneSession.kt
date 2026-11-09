@@ -50,6 +50,7 @@ import androidx.compose.material.icons.outlined.KeyboardHide
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.Monitor
 import androidx.compose.material.icons.outlined.Mouse
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material.icons.automirrored.outlined.VolumeOff
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
@@ -172,8 +173,16 @@ fun PhoneSession(
     val tipKey = gm.name.lowercase()
     val showTips = phase == RemoteSession.Phase.Live && video != null && tipKey !in settings.tipsSeen
 
+    val displays by session.displays.collectAsState()
+    val currentDisplay by session.currentDisplay.collectAsState()
+    val mouseLock by session.mouseLock.collectAsState()
     LaunchedEffect(video) { video?.let { view.setVideoSize(it.first, it.second) } }
     LaunchedEffect(cursor) { view.setCursor(cursor) }
+    LaunchedEffect(mouseLock) { view.mouseLock = mouseLock }
+    // 相对移动按对方屏幕的像素换算
+    LaunchedEffect(displays, currentDisplay) {
+        displays.firstOrNull { it.index == currentDisplay }?.let { view.setRemoteSize(it.width, it.height) }
+    }
     LaunchedEffect(gm) {
         view.gestures.cancel()
         view.gestures.mode = gm
@@ -423,6 +432,7 @@ private fun MainMenu(
     val displays by session.displays.collectAsState()
     val audioOn by session.audioOn.collectAsState()
     val avSyncOn by session.avSyncOn.collectAsState()
+    val mouseLock by session.mouseLock.collectAsState()
     val hostOs by session.hostOs.collectAsState()
 
     Row(Modifier.padding(horizontal = 20.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -479,6 +489,13 @@ private fun MainMenu(
         if (displays.size > 1) {
             Action(Icons.Outlined.Monitor, stringResource(R.string.menu_displays), cell) { onPage(Page.DISPLAYS) }
         }
+        // 锁定鼠标（控制电脑时）：鼠标一直只发移动了多少，游戏里转视角用
+        val lockable = os != OsKind.ANDROID
+        if (lockable) {
+            Action(Icons.Outlined.Lock, stringResource(if (mouseLock) R.string.menu_mouse_lock_on else R.string.menu_mouse_lock_off), cell, active = mouseLock) {
+                session.mouseLock.value = !mouseLock
+            }
+        }
         Action(Icons.Outlined.Crop, stringResource(R.string.menu_fit), cell, enabled = view.zoomed) {
             view.fit()
             onClose()
@@ -486,7 +503,8 @@ private fun MainMenu(
         Action(Icons.AutoMirrored.Outlined.HelpOutline, stringResource(R.string.menu_help), cell) { onPage(Page.HELP) }
         Action(Icons.Outlined.LinkOff, stringResource(R.string.disconnect), cell, danger = true, onClick = onDisconnect)
         // 补齐最后一行，保持格子宽度一致
-        repeat((4 - (9 + (if (displays.size > 1) 1 else 0)) % 4) % 4) { Spacer(cell) }
+        val items = 9 + (if (displays.size > 1) 1 else 0) + (if (lockable) 1 else 0)
+        repeat((4 - items % 4) % 4) { Spacer(cell) }
     }
 }
 

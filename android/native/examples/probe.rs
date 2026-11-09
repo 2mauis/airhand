@@ -15,8 +15,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use airhand_android::rt::rt;
-use airhand_link::controller::{ControllerService, Frontend, SessionEvent, SessionUi, UiClosed};
+use airhand_link::controller::{
+    Command, ControllerService, Frontend, SessionEvent, SessionUi, UiClosed,
+};
 use airhand_link::{LinkConfig, ServerState};
+use airhand_proto::media::{Kind, VideoHeader};
 use airhand_proto::session::{
     Codec, InputEvent, MouseButton, QualitySettings, SystemAction, TouchPhase,
 };
@@ -28,7 +31,7 @@ struct Counters {
     bytes: AtomicU64,
     audio: AtomicU64,
     cursor: AtomicU64,
-    size: Mutex<(u16, u16, u16)>,
+    size: Mutex<(Codec, u16, u16)>,
     events: Mutex<Vec<String>>,
     /// 收到了被控端的 Hello（被控端的用户同意了）
     hello: std::sync::atomic::AtomicBool,
@@ -42,30 +45,29 @@ struct Ui(Arc<Counters>, AckTarget);
 impl SessionUi for Ui {
     fn packet(&self, p: Vec<u8>) -> Result<(), UiClosed> {
         let c = &self.0;
-        match p[0] {
-            1 => {
+        match Kind::of(&p) {
+            Some(Kind::Video) => {
+                let Some(v) = VideoHeader::decode(&p) else {
+                    return Ok(());
+                };
                 c.video.fetch_add(1, Ordering::Relaxed);
-                if p[1] == 1 {
+                if v.key {
                     c.keyframes.fetch_add(1, Ordering::Relaxed);
                 }
                 c.bytes.fetch_add(p.len() as u64, Ordering::Relaxed);
-                let codec = u16::from_le_bytes([p[2], p[3]]);
-                let w = u16::from_le_bytes([p[8], p[9]]);
-                let h = u16::from_le_bytes([p[10], p[11]]);
-                *c.size.lock().unwrap() = (codec, w, h);
+                *c.size.lock().unwrap() = (v.codec, v.width, v.height);
                 // 浏览器模式：收到就确认
-                let seq = u32::from_le_bytes([p[4], p[5], p[6], p[7]]);
                 if let Some((svc, sid)) = self.1.lock().unwrap().as_ref() {
-                    let _ = svc.ack(*sid, seq);
+                    let _ = svc.ack(*sid, v.seq);
                 }
             }
-            2 => {
+            Some(Kind::Cursor) => {
                 c.cursor.fetch_add(1, Ordering::Relaxed);
             }
-            3 => {
+            Some(Kind::Audio) => {
                 c.audio.fetch_add(1, Ordering::Relaxed);
             }
-            _ => {}
+            None => {}
         }
         Ok(())
     }
@@ -86,8 +88,7 @@ impl SessionUi for Ui {
 fn main() {
     airhand_android::rt::init_logging("info,quinn=warn");
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let code = airhand_proto::parse_code(args.first().expect("usage: probe <code> [seconds]"))
-        .expect("bad code");
+    let code = args.first().expect("usage: probe <code> [seconds]").clone();
     let secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(8);
     let flag = |name: &str| {
         args.iter()
@@ -140,7 +141,7 @@ fn main() {
     };
     let info = rt()
         .block_on(svc.connect(
-            code,
+            &code,
             None,
             settings,
             Arc::new(Ui(counters.clone(), slot.clone())),
@@ -149,8 +150,14 @@ fn main() {
         .unwrap_or_else(|p| panic!("connect failed: {p}"));
     println!("connected: {} ({})", info.host_name, info.host_os);
     *slot.lock().unwrap() = Some((svc.clone(), info.sid));
+    let sid = info.sid;
+    let input = |events: Vec<InputEvent>| {
+        svc.command(Command::Input { sid, events })
+            .unwrap_or_else(|p| panic!("input failed: {p}"))
+    };
     if audio {
-        svc.set_audio(info.sid, true).unwrap();
+        svc.command(Command::Audio { sid, enabled: true })
+            .unwrap_or_else(|p| panic!("audio failed: {p}"));
     }
     // 被控端可能要先请它的用户同意：等到 Hello 再开始计时
     let asked = std::time::Instant::now();
@@ -170,82 +177,58 @@ fn main() {
         |id: u8, phase: TouchPhase, x: f32, y: f32| InputEvent::Touch { id, phase, x, y };
     if let (Some((x, y)), true) = (tap, touch) {
         println!("touch tap at {x},{y}");
-        svc.input(info.sid, vec![touch_ev(0, TouchPhase::Down, x, y)])
-            .unwrap();
+        input(vec![touch_ev(0, TouchPhase::Down, x, y)]);
         std::thread::sleep(Duration::from_millis(80));
-        svc.input(info.sid, vec![touch_ev(0, TouchPhase::Up, x, y)])
-            .unwrap();
+        input(vec![touch_ev(0, TouchPhase::Up, x, y)]);
     } else if let Some((x, y)) = tap {
         println!("tap at {x},{y}");
-        svc.input(
-            info.sid,
-            vec![
-                InputEvent::MouseMove { x, y },
-                InputEvent::MouseButton {
-                    button: MouseButton::Left,
-                    down: true,
-                },
-            ],
-        )
-        .unwrap();
-        std::thread::sleep(Duration::from_millis(80));
-        svc.input(
-            info.sid,
-            vec![InputEvent::MouseButton {
+        input(vec![
+            InputEvent::MouseMove { x, y },
+            InputEvent::MouseButton {
                 button: MouseButton::Left,
-                down: false,
-            }],
-        )
-        .unwrap();
+                down: true,
+            },
+        ]);
+        std::thread::sleep(Duration::from_millis(80));
+        input(vec![InputEvent::MouseButton {
+            button: MouseButton::Left,
+            down: false,
+        }]);
     }
     if pinch {
         println!("pinch out at the center");
-        svc.input(
-            info.sid,
-            vec![
-                touch_ev(0, TouchPhase::Down, 0.45, 0.5),
-                touch_ev(1, TouchPhase::Down, 0.55, 0.5),
-            ],
-        )
-        .unwrap();
+        input(vec![
+            touch_ev(0, TouchPhase::Down, 0.45, 0.5),
+            touch_ev(1, TouchPhase::Down, 0.55, 0.5),
+        ]);
         for i in 1..=15 {
             std::thread::sleep(Duration::from_millis(30));
             let d = 0.05 + 0.02 * i as f32;
-            svc.input(
-                info.sid,
-                vec![
-                    touch_ev(0, TouchPhase::Move, 0.5 - d, 0.5),
-                    touch_ev(1, TouchPhase::Move, 0.5 + d, 0.5),
-                ],
-            )
-            .unwrap();
+            input(vec![
+                touch_ev(0, TouchPhase::Move, 0.5 - d, 0.5),
+                touch_ev(1, TouchPhase::Move, 0.5 + d, 0.5),
+            ]);
         }
         std::thread::sleep(Duration::from_millis(30));
-        svc.input(
-            info.sid,
-            vec![
-                touch_ev(0, TouchPhase::Up, 0.15, 0.5),
-                touch_ev(1, TouchPhase::Up, 0.85, 0.5),
-            ],
-        )
-        .unwrap();
+        input(vec![
+            touch_ev(0, TouchPhase::Up, 0.15, 0.5),
+            touch_ev(1, TouchPhase::Up, 0.85, 0.5),
+        ]);
     }
     if let Some(a) = action {
         println!("system action {a:?}");
-        svc.input(info.sid, vec![InputEvent::System { action: a }])
-            .unwrap();
+        input(vec![InputEvent::System { action: a }]);
     }
     if let Some(t) = text {
         println!("typing {t:?}");
-        svc.input(info.sid, vec![InputEvent::Text { text: t }])
-            .unwrap();
+        input(vec![InputEvent::Text { text: t }]);
     }
     std::thread::sleep(Duration::from_secs(secs - secs / 2));
 
     let c = &counters;
     let (codec, w, h) = *c.size.lock().unwrap();
     println!(
-        "frames={} keyframes={} bytes={} audio={} cursor={} last={}x{} codec={}",
+        "frames={} keyframes={} bytes={} audio={} cursor={} last={}x{} codec={:?}",
         c.video.load(Ordering::Relaxed),
         c.keyframes.load(Ordering::Relaxed),
         c.bytes.load(Ordering::Relaxed),

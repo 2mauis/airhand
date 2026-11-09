@@ -2,8 +2,9 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AppInfo, Backend, SavedDevice, ServerState, SessionEvent, SessionInfo, WindowFrame } from "../api";
+import type { AppInfo, Backend, Command, SavedDevice, ServerState, SessionEvent, SessionInfo, WindowFrame } from "../api";
 import type { Lang } from "../i18n";
+import { videoSeq } from "../media";
 
 /** 把异步注册的监听变成同步返回的取消函数 */
 function unlistenLater(p: Promise<UnlistenFn>): () => void {
@@ -31,6 +32,11 @@ function windowFrame(): WindowFrame {
   };
 }
 
+/** 对会话的操作：Rust 的 `ctrl` 命令（和网页版、Android 一样的 Command） */
+function ctrl(command: Command): Promise<void> {
+  return invoke("ctrl", { command });
+}
+
 export function tauriBackend(): Backend {
   return {
     frame: windowFrame(),
@@ -43,14 +49,15 @@ export function tauriBackend(): Backend {
       let unacked: number | null = null;
       let closed = false;
       const ack = (seq: number) => {
-        if (sid !== null) void invoke("ctrl_ack", { sid, seq }).catch(() => {});
+        if (sid !== null) void ctrl({ cmd: "ack", sid, seq }).catch(() => {});
         else unacked = seq;
       };
       const video = new Channel<ArrayBuffer>();
       video.onmessage = (buf) => {
         if (closed) return;
-        // ACK only after the WebView receives this packet, including the IPC hop.
-        if (buf.byteLength >= 24 && new DataView(buf).getUint8(0) === 1) ack(new DataView(buf).getUint32(4, true));
+        // 画面到了 WebView 才确认（把 IPC 这一段也算进在途帧控制）
+        const seq = videoSeq(new DataView(buf));
+        if (seq !== null) ack(seq);
         sink.packet(new Uint8Array(buf));
       };
       const events = new Channel<SessionEvent>();
@@ -64,14 +71,8 @@ export function tauriBackend(): Backend {
       return info;
     },
     onHostOnline: (cb) => unlistenLater(listen<number>("host-online", (e) => cb(e.payload))),
-    clipboardSync: (sid, enabled) => invoke("ctrl_clipboard", { sid, enabled }),
-    audio: (sid, enabled) => invoke("ctrl_audio", { sid, enabled }),
+    command: ctrl,
     localClipboardText: () => invoke<string>("clipboard_text"),
-    input: (sid, events) => invoke("ctrl_input", { sid, events }),
-    settings: (sid, settings) => invoke("ctrl_settings", { sid, settings }),
-    keyframe: (sid) => invoke("ctrl_keyframe", { sid }),
-    selectDisplay: (sid, index) => invoke("ctrl_display", { sid, index }),
-    disconnect: (sid) => invoke("ctrl_disconnect", { sid }),
     switchToHost: () => invoke("switch_to_host"),
     loadDevices: () => invoke<SavedDevice[]>("devices_load"),
     saveDevices: (devices) => invoke("devices_save", { devices }),

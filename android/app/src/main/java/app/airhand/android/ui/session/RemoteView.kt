@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -38,6 +39,9 @@ import kotlin.math.min
  *
  * * 画面按比例缩放到视图里（[content] 是画面在视图里的位置），可以双指放大 / 移动；
  * * 触摸交给 [Gestures]；外接鼠标、键盘直接对应远端的鼠标、键盘；
+ * * 被控端的光标隐藏了（游戏里转视角等）或者打开了锁定鼠标：发相对移动（[relative]）。
+ *   外接鼠标这时被抓住（Android 8+ 的 pointer capture：系统指针隐藏、不会碰到屏幕边停下），
+ *   发鼠标的原始移动量；触摸按画面大小换算成被控端的像素；
  * * 软键盘的输入经 [RemoteInputConnection] 交给 [KeyboardController]。
  */
 @SuppressLint("ViewConstructor")
@@ -88,6 +92,12 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
         override fun move(nx: Float, ny: Float) {
             overlay.invalidate()
             host.onInput(listOf(Input.move(nx, ny)), false)
+        }
+
+        override fun delta(nx: Float, ny: Float) {
+            // 画面宽 / 高的几分之几 → 被控端的像素（不知道对方屏幕多大时按画面的大小）
+            val (w, h) = remoteSize ?: (videoW to videoH)
+            sendDelta(nx * w, ny * h)
         }
 
         override fun button(button: String, down: Boolean) = host.onInput(listOf(Input.button(button, down)), true)
@@ -271,7 +281,82 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
 
     fun setCursor(c: CursorState) {
         cursor = c
+        updateRelative()
         overlay.invalidate()
+    }
+
+    // ───────────────────────────── 相对移动 ─────────────────────────────
+
+    /** 锁定鼠标：不管被控端的光标是否隐藏，一直发相对移动 */
+    var mouseLock = false
+        set(v) {
+            field = v
+            updateRelative()
+        }
+
+    /** 被控端当前显示器的大小（像素），触摸的相对移动按它换算 */
+    private var remoteSize: Pair<Int, Int>? = null
+
+    fun setRemoteSize(w: Int, h: Int) {
+        remoteSize = if (w > 0 && h > 0) w to h else null
+    }
+
+    /** 还不够一个像素的移动量 */
+    private var fracX = 0f
+    private var fracY = 0f
+
+    /** 发相对移动：被控端的光标隐藏了，或者打开了锁定鼠标 */
+    private fun updateRelative() {
+        val r = interactive && (mouseLock || !cursor.visible)
+        if (gestures.relative != r) {
+            gestures.relative = r
+            fracX = 0f
+            fracY = 0f
+        }
+        updateCapture()
+    }
+
+    private fun sendDelta(dx: Float, dy: Float) {
+        fracX += dx
+        fracY += dy
+        val ix = fracX.toInt()
+        val iy = fracY.toInt()
+        if (ix == 0 && iy == 0) return
+        fracX -= ix
+        fracY -= iy
+        host.onInput(listOf(Input.delta(ix, iy)), false)
+    }
+
+    /** 用过外接鼠标（才去抓鼠标：只用触摸屏时没必要） */
+    private var mouseSeen = false
+
+    /** 相对移动时抓住外接鼠标：系统指针隐藏，鼠标事件都交给 [onCapturedPointerEvent]（原始移动量） */
+    private fun updateCapture() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val want = gestures.relative && mouseSeen && hasWindowFocus()
+        if (want && !hasPointerCapture()) {
+            requestPointerCapture()
+        } else if (!want && hasPointerCapture()) {
+            releasePointerCapture()
+        }
+    }
+
+    override fun onCapturedPointerEvent(e: MotionEvent): Boolean {
+        if (!interactive) return false
+        if (e.actionMasked == MotionEvent.ACTION_SCROLL) {
+            scroll(e)
+            return true
+        }
+        // 抓住时的坐标就是移动量（一个事件里可能带着几次采样）
+        var dx = e.x
+        var dy = e.y
+        for (i in 0 until e.historySize) {
+            dx += e.getHistoricalX(i)
+            dy += e.getHistoricalY(i)
+        }
+        if (dx != 0f || dy != 0f) sendDelta(dx, dy)
+        mouseButtons(e)
+        return true
     }
 
     private inner class Overlay(context: Context) : View(context) {
@@ -365,31 +450,52 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
         if (!interactive || !e.isFromSource(InputDevice.SOURCE_CLASS_POINTER)) return super.onGenericMotionEvent(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_HOVER_MOVE -> {
-                moveMouse(e.x, e.y)
+                moveMouse(e)
                 return true
             }
             MotionEvent.ACTION_SCROLL -> {
-                val dy = (e.getAxisValue(MotionEvent.AXIS_VSCROLL) * 120).toInt()
-                val dx = (e.getAxisValue(MotionEvent.AXIS_HSCROLL) * 120).toInt()
-                if (dx != 0 || dy != 0) host.onInput(listOf(Input.wheel(dx, dy)), true)
+                scroll(e)
                 return true
             }
         }
         return super.onGenericMotionEvent(e)
     }
 
-    private fun moveMouse(x: Float, y: Float) {
+    private fun scroll(e: MotionEvent) {
+        val dy = (e.getAxisValue(MotionEvent.AXIS_VSCROLL) * 120).toInt()
+        val dx = (e.getAxisValue(MotionEvent.AXIS_HSCROLL) * 120).toInt()
+        if (dx != 0 || dy != 0) host.onInput(listOf(Input.wheel(dx, dy)), true)
+    }
+
+    private fun moveMouse(e: MotionEvent) {
+        if (!mouseSeen && e.isFromSource(InputDevice.SOURCE_MOUSE)) {
+            mouseSeen = true
+            updateCapture()
+        }
+        if (gestures.relative) {
+            // 还没抓住鼠标（Android 7、窗口刚拿到焦点）：用鼠标的原始移动量
+            val dx = e.getAxisValue(MotionEvent.AXIS_RELATIVE_X)
+            val dy = e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y)
+            if (dx != 0f || dy != 0f) sendDelta(dx, dy)
+            return
+        }
         if (content.width() <= 0f || content.height() <= 0f) return
-        val nx = ((x - content.left) / content.width()).coerceIn(0f, 1f)
-        val ny = ((y - content.top) / content.height()).coerceIn(0f, 1f)
+        val nx = ((e.x - content.left) / content.width()).coerceIn(0f, 1f)
+        val ny = ((e.y - content.top) / content.height()).coerceIn(0f, 1f)
         gestures.setCursor(nx, ny)
         overlay.invalidate()
         host.onInput(listOf(Input.move(nx, ny)), false)
     }
 
-    /** 外接鼠标：位置一一对应，按键原样发过去 */
+    /** 外接鼠标：位置一一对应（相对移动时发移动量），按键原样发过去 */
     private fun mouse(e: MotionEvent): Boolean {
-        moveMouse(e.x, e.y)
+        moveMouse(e)
+        mouseButtons(e)
+        return true
+    }
+
+    /** 鼠标按键变了：发按下 / 松开 */
+    private fun mouseButtons(e: MotionEvent) {
         val now = if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) 0 else e.buttonState
         val changed = now xor mouseButtons
         val events = ArrayList<Any>()
@@ -398,7 +504,6 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
         }
         mouseButtons = now
         if (events.isNotEmpty()) host.onInput(events, true)
-        return true
     }
 
     // ───────────────────────────── 键盘 ─────────────────────────────
@@ -435,6 +540,8 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
             showPending = false
             post { doShowKeyboard() }
         }
+        // 拿到焦点才能抓住鼠标（失去焦点时系统自己会放开）
+        updateCapture()
     }
 
     fun hideKeyboard() {

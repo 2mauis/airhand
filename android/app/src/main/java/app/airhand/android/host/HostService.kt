@@ -160,7 +160,7 @@ class HostService : Service() {
     private fun onEvent(e: JSONObject) {
         when (e.optString("type")) {
             "server" -> {
-                val s = ServerState.parse(e.getJSONObject("server"))
+                val s = ServerState.parse(e.getJSONObject("state"))
                 HostState.update { it.copy(server = s) }
                 updateNotification()
             }

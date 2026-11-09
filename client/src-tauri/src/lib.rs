@@ -38,10 +38,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use airhand_link::controller::{
-    ControllerService, Frontend, HostOnline, SessionEvent, SessionInfo, SessionUi, UiClosed,
+    Command, ControllerService, Frontend, HostOnline, SessionEvent, SessionInfo, SessionUi,
+    UiClosed,
 };
 use airhand_link::{Problem, ServerState};
-use airhand_proto::session::{InputEvent, QualitySettings};
+use airhand_proto::session::QualitySettings;
 use airhand_proto::signal::ResumeToken;
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -440,7 +441,7 @@ fn server_status(state: tauri::State<'_, AppState>) -> ServerState {
     state.hub.borrow().controller.clone()
 }
 
-/// 会话的画面和事件经 Tauri 的 Channel 交给控制台窗口
+/// 会话的媒体包和事件经 Tauri 的 Channel 交给控制台窗口（媒体包是原始字节，不经过 JSON）
 struct ConsoleUi {
     video: Channel<InvokeResponseBody>,
     events: Channel<SessionEvent>,
@@ -468,76 +469,19 @@ async fn ctrl_connect(
     events: Channel<SessionEvent>,
     clipboard: bool,
 ) -> Result<SessionInfo, Problem> {
-    let code = airhand_proto::parse_code(&code).ok_or(Problem::InvalidCode)?;
     let svc = state.controller()?;
     let ui = Arc::new(ConsoleUi { video, events });
     let frontend = Frontend::Desktop {
         clipboard: Box::new(clipboard::ClipSync::new()),
         sync: clipboard,
     };
-    svc.connect(code, resume, settings, ui, frontend).await
+    svc.connect(&code, resume, settings, ui, frontend).await
 }
 
+/// 对会话的操作（输入、画质、确认画面……），和网页版、Android 一样的 [`Command`]
 #[tauri::command]
-async fn ctrl_clipboard(
-    state: tauri::State<'_, AppState>,
-    sid: u32,
-    enabled: bool,
-) -> Result<(), Problem> {
-    state.controller()?.set_clipboard_sync(sid, enabled)
-}
-
-/// 开启/关闭某个会话的远程声音
-#[tauri::command]
-async fn ctrl_audio(
-    state: tauri::State<'_, AppState>,
-    sid: u32,
-    enabled: bool,
-) -> Result<(), Problem> {
-    state.controller()?.set_audio(sid, enabled)
-}
-
-#[tauri::command]
-async fn ctrl_ack(state: tauri::State<'_, AppState>, sid: u32, seq: u32) -> Result<(), Problem> {
-    state.controller()?.ack(sid, seq)
-}
-
-#[tauri::command]
-async fn ctrl_input(
-    state: tauri::State<'_, AppState>,
-    sid: u32,
-    events: Vec<InputEvent>,
-) -> Result<(), Problem> {
-    state.controller()?.input(sid, events)
-}
-
-#[tauri::command]
-async fn ctrl_settings(
-    state: tauri::State<'_, AppState>,
-    sid: u32,
-    settings: QualitySettings,
-) -> Result<(), Problem> {
-    state.controller()?.settings(sid, settings)
-}
-
-#[tauri::command]
-async fn ctrl_keyframe(state: tauri::State<'_, AppState>, sid: u32) -> Result<(), Problem> {
-    state.controller()?.keyframe(sid)
-}
-
-#[tauri::command]
-async fn ctrl_display(
-    state: tauri::State<'_, AppState>,
-    sid: u32,
-    index: u8,
-) -> Result<(), Problem> {
-    state.controller()?.select_display(sid, index)
-}
-
-#[tauri::command]
-async fn ctrl_disconnect(state: tauri::State<'_, AppState>, sid: u32) -> Result<(), Problem> {
-    state.controller()?.disconnect(sid);
-    Ok(())
+async fn ctrl(state: tauri::State<'_, AppState>, command: Command) -> Result<(), Problem> {
+    state.controller()?.command(command)
 }
 
 /// 读取本机剪贴板文本（用于"粘贴到远端"）
@@ -609,14 +553,7 @@ pub fn run() {
             set_language,
             server_status,
             ctrl_connect,
-            ctrl_input,
-            ctrl_ack,
-            ctrl_settings,
-            ctrl_keyframe,
-            ctrl_display,
-            ctrl_disconnect,
-            ctrl_clipboard,
-            ctrl_audio,
+            ctrl,
             clipboard_text,
             set_fullscreen,
             switch_to_host,

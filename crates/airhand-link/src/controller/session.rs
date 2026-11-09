@@ -1,13 +1,13 @@
-//! 控制端的单个会话：接收画面转交给控制台（WebCodecs 硬件解码），转发输入与设置。
+//! 控制端的单个会话：把画面、声音原样转交给界面（界面自己解码），转发输入与设置。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use crate::transport::HostReceiver;
+use crate::transport::{FromHost, HostReceiver};
+use airhand_proto::media::{self, VideoHeader};
 use airhand_proto::session::{
-    AudioFrame, Codec, ControllerMsg, CursorState, DisplayInfo, HostMsg, Notice, Platform,
-    SystemAction, VideoFrame,
+    Codec, ControllerMsg, DisplayInfo, HostMsg, Notice, Platform, SystemAction,
 };
 use anyhow::Result;
 use quinn::SendStream;
@@ -23,11 +23,12 @@ fn now_us() -> u64 {
     EPOCH.elapsed().as_micros() as u64
 }
 
-/// 会话的画面和事件交给谁：桌面版是 Tauri 的 Channel，网页版是浏览器的 WebSocket。
+/// 会话的画面和事件交给谁：桌面版是 Tauri 的 Channel，网页版是浏览器的 WebSocket，Android 是 Kotlin 取的队列。
 ///
-/// 返回 `Err` 表示控制台已经不在了（窗口关了、浏览器断开了），会话随之结束。
+/// 返回 `Err` 表示界面已经不在了（窗口关了、浏览器断开了），会话随之结束。
 pub trait SessionUi: Send + Sync + 'static {
-    /// 画面 / 光标 / 声音数据包，格式见 [`HEADER_LEN`]
+    /// 画面 / 光标 / 声音包（[`airhand_proto::media`] 的格式：24 字节头 + 数据）。
+    /// 界面收到画面包后确认（[`super::Command::Ack`]），被控端的在途帧控制因此把界面这一段也算进去
     fn packet(&self, packet: Vec<u8>) -> Result<(), UiClosed>;
     /// 会话事件（控制台那边是 JSON）
     fn event(&self, event: SessionEvent) -> Result<(), UiClosed>;
@@ -129,69 +130,6 @@ impl From<Notice> for NoticeView {
     }
 }
 
-/// 二进制通道数据包，24 字节头（小端）。前 16 字节按类型区分，`[16..24]` 是采集时间 `capture_us u64`
-///（被控端时钟；视频与声音是同一个时钟，控制端据此做音画同步；光标为 0）：
-///
-/// * 视频 `kind=1`：`kind u8 | key u8 | codec u16 | seq u32 | width u16 | height u16 | reserved u32 | capture_us | 码流…`
-/// * 光标 `kind=2`：`kind u8 | visible u8 | has_shape u16 | reserved u32 | width u16 | height u16 | hot_x u16 | hot_y u16 | 0 | RGBA…`
-/// * 声音 `kind=3`：`kind u8 | start u8 | reserved u16 | seq u32 | reserved[8] | capture_us | Opus 包`
-pub const HEADER_LEN: usize = 24;
-
-fn audio_packet(a: &AudioFrame) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(HEADER_LEN + a.data.len());
-    buf.push(3);
-    buf.push(a.start as u8);
-    buf.extend_from_slice(&[0; 2]);
-    buf.extend_from_slice(&a.seq.to_le_bytes());
-    buf.extend_from_slice(&[0; 8]);
-    buf.extend_from_slice(&a.capture_us.to_le_bytes());
-    buf.extend_from_slice(&a.data);
-    buf
-}
-
-fn cursor_packet(c: &CursorState) -> Vec<u8> {
-    let shape_len = c.shape.as_ref().map_or(0, |s| s.rgba.len());
-    let mut buf = Vec::with_capacity(HEADER_LEN + shape_len);
-    buf.push(2);
-    buf.push(c.visible as u8);
-    buf.extend_from_slice(&(c.shape.is_some() as u16).to_le_bytes());
-    buf.extend_from_slice(&[0; 4]);
-    match &c.shape {
-        Some(s) => {
-            for v in [s.width, s.height, s.hot_x, s.hot_y] {
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        None => buf.extend_from_slice(&[0; 8]),
-    }
-    buf.extend_from_slice(&[0; 8]);
-    if let Some(s) = &c.shape {
-        buf.extend_from_slice(&s.rgba);
-    }
-    buf
-}
-
-fn video_packet(v: &VideoFrame) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(HEADER_LEN + v.data.len());
-    buf.push(1);
-    buf.push(v.key as u8);
-    buf.extend_from_slice(
-        &(match v.codec {
-            Codec::H264 => 0u16,
-            Codec::H265 => 1,
-            Codec::AV1 => 2,
-        })
-        .to_le_bytes(),
-    );
-    buf.extend_from_slice(&v.seq.to_le_bytes());
-    buf.extend_from_slice(&v.width.to_le_bytes());
-    buf.extend_from_slice(&v.height.to_le_bytes());
-    buf.extend_from_slice(&[0; 4]);
-    buf.extend_from_slice(&v.capture_us.to_le_bytes());
-    buf.extend_from_slice(&v.data);
-    buf
-}
-
 struct Stats {
     frames: u32,
     bytes: usize,
@@ -268,20 +206,36 @@ pub(super) async fn run(
     let clip_in = local_clip.clone();
     let reader = async move {
         loop {
-            let msg = recv.recv().await?;
-            st.lock().unwrap().last_msg = Instant::now();
-            match msg {
-                HostMsg::Video(v) => {
+            let msg = match recv.recv().await? {
+                // 画面、声音：只看一眼头做统计，原样交给界面
+                FromHost::Video(p) => {
+                    let h = VideoHeader::decode(&p)
+                        .ok_or_else(|| anyhow::anyhow!("bad video packet header"))?;
                     {
                         let mut s = st.lock().unwrap();
+                        s.last_msg = Instant::now();
                         s.frames += 1;
                         s.total += 1;
-                        s.bytes += v.data.len();
-                        s.w = v.width;
-                        s.h = v.height;
+                        s.bytes += p.len();
+                        s.w = h.width;
+                        s.h = h.height;
                     }
-                    out.packet(video_packet(&v)).map_err(|_| ui_closed())?;
+                    out.packet(p).map_err(|_| ui_closed())?;
+                    continue;
                 }
+                FromHost::Audio(p) => {
+                    {
+                        let mut s = st.lock().unwrap();
+                        s.last_msg = Instant::now();
+                        s.bytes += p.len();
+                    }
+                    out.packet(p).map_err(|_| ui_closed())?;
+                    continue;
+                }
+                FromHost::Control(m) => m,
+            };
+            st.lock().unwrap().last_msg = Instant::now();
+            match msg {
                 HostMsg::Hello(h) => {
                     let _ = out.event(SessionEvent::Hello {
                         hostname: h.hostname,
@@ -324,11 +278,8 @@ pub(super) async fn run(
                 },
                 HostMsg::Bye(reason) => return Err(Problem::from(reason).into()),
                 HostMsg::Cursor(c) => {
-                    out.packet(cursor_packet(&c)).map_err(|_| ui_closed())?;
-                }
-                HostMsg::Audio(a) => {
-                    st.lock().unwrap().bytes += a.data.len();
-                    out.packet(audio_packet(&a)).map_err(|_| ui_closed())?;
+                    out.packet(media::cursor_packet(&c))
+                        .map_err(|_| ui_closed())?;
                 }
                 HostMsg::Encoder(e) => {
                     let _ = out.event(SessionEvent::Encoder {
@@ -427,67 +378,6 @@ fn ui_closed() -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use airhand_proto::session::CursorShape;
-
-    #[test]
-    fn packet_layout() {
-        let capture_us = 0x0102_0304_0506_0708u64;
-        let v = VideoFrame {
-            seq: 9,
-            key: true,
-            codec: Codec::AV1,
-            width: 1920,
-            height: 1080,
-            capture_us,
-            data: vec![7; 5],
-        };
-        let p = video_packet(&v);
-        assert_eq!(&p[..4], &[1, 1, 2, 0]);
-        assert_eq!(u32::from_le_bytes(p[4..8].try_into().unwrap()), 9);
-        assert_eq!(
-            u64::from_le_bytes(p[16..24].try_into().unwrap()),
-            capture_us
-        );
-        assert_eq!(&p[HEADER_LEN..], &[7; 5]);
-
-        let a = AudioFrame {
-            seq: 3,
-            start: true,
-            capture_us,
-            data: vec![1, 2, 3],
-        };
-        let p = audio_packet(&a);
-        assert_eq!(&p[..2], &[3, 1]);
-        assert_eq!(u32::from_le_bytes(p[4..8].try_into().unwrap()), 3);
-        assert_eq!(
-            u64::from_le_bytes(p[16..24].try_into().unwrap()),
-            capture_us
-        );
-        assert_eq!(&p[HEADER_LEN..], &[1, 2, 3]);
-
-        let shape = CursorShape {
-            width: 2,
-            height: 1,
-            hot_x: 1,
-            hot_y: 0,
-            rgba: vec![9; 8],
-        };
-        let p = cursor_packet(&CursorState {
-            visible: true,
-            shape: Some(shape),
-        });
-        assert_eq!(p.len(), HEADER_LEN + 8);
-        assert_eq!(u16::from_le_bytes(p[8..10].try_into().unwrap()), 2);
-        assert_eq!(&p[HEADER_LEN..], &[9; 8]);
-        assert_eq!(
-            cursor_packet(&CursorState {
-                visible: false,
-                shape: None
-            })
-            .len(),
-            HEADER_LEN
-        );
-    }
 
     /// 控制台（client/src/lib/api.ts 的 SessionEvent / Notice 类型）依赖这个 JSON 形状
     #[test]

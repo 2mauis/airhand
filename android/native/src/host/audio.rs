@@ -1,13 +1,15 @@
 //! 被控端的声音分发：Kotlin 采集手机正在播放的声音（AudioPlaybackCapture，Android 10+）并编成 Opus，
 //! 每包 20 ms，交给开着声音的会话。和桌面版一样，没有声音时不发包（Kotlin 那边跳过静音），
 //! 停顿之后的第一包带 `start`，控制端据此区分"声音停了"和"网络抖动"。
+//! 采集不了声音时，开着声音的会话在控制流上收到提示（`Notice::AudioFailed` / `AudioRecovered`）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use airhand_proto::framing;
-use airhand_proto::session::{AudioFrame, HostMsg, Notice};
+use airhand_link::host::Control;
+use airhand_proto::media::{self, AudioHeader};
+use airhand_proto::session::{HostMsg, Notice};
 use bytes::Bytes;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -34,7 +36,10 @@ struct State {
 }
 
 struct Sub {
+    /// 声音流
     tx: mpsc::Sender<Bytes>,
+    /// 控制流（提示）
+    ctl: Control,
     seq: u32,
     last: Option<Instant>,
 }
@@ -54,20 +59,19 @@ impl AudioHub {
     }
 
     /// 会话打开声音。采集已经失败了的话马上告诉它
-    pub fn subscribe(&self, id: u64, tx: mpsc::Sender<Bytes>) {
+    pub fn subscribe(&self, id: u64, tx: mpsc::Sender<Bytes>, ctl: Control) {
         let mut st = self.st.lock().unwrap();
-        if let Some(detail) = &st.failure
-            && let Ok(b) = framing::encode(&HostMsg::Notice(Notice::AudioFailed {
+        if let Some(detail) = &st.failure {
+            let _ = ctl.send(&HostMsg::Notice(Notice::AudioFailed {
                 detail: detail.clone(),
-            }))
-        {
-            let _ = tx.try_send(Bytes::from(b));
+            }));
         }
         let first = st.subs.is_empty();
         st.subs.insert(
             id,
             Sub {
                 tx,
+                ctl,
                 seq: 0,
                 last: None,
             },
@@ -96,16 +100,13 @@ impl AudioHub {
             let start = s.last.is_none_or(|t| now.duration_since(t) > GAP);
             s.last = Some(now);
             s.seq = s.seq.wrapping_add(1);
-            let msg = HostMsg::Audio(AudioFrame {
+            let header = AudioHeader {
                 seq: s.seq,
                 start,
                 capture_us,
-                data: data.to_vec(),
-            });
-            let Ok(b) = framing::encode_with_capacity(&msg, data.len()) else {
-                continue;
             };
-            if s.tx.try_send(Bytes::from(b)).is_err() {
+            let packet = Bytes::from(media::frame(&header.encode(), &[data]));
+            if s.tx.try_send(packet).is_err() {
                 debug!(session = id, "audio queue full, dropping a packet");
             }
         }
@@ -118,16 +119,12 @@ impl AudioHub {
             return;
         }
         st.failure = failure.clone();
-        let notice = match failure {
+        let notice = Control::encode(&HostMsg::Notice(match failure {
             Some(detail) => Notice::AudioFailed { detail },
             None => Notice::AudioRecovered,
-        };
-        let Ok(b) = framing::encode(&HostMsg::Notice(notice)) else {
-            return;
-        };
-        let b = Bytes::from(b);
+        }));
         for s in st.subs.values() {
-            let _ = s.tx.try_send(b.clone());
+            let _ = s.ctl.send_encoded(notice.clone());
         }
     }
 }
@@ -135,18 +132,14 @@ impl AudioHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use airhand_proto::framing;
 
-    fn decode(b: &Bytes) -> HostMsg {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let mut buf = Vec::new();
-            framing::read_msg::<_, HostMsg>(&mut &b[..], 1 << 20, &mut buf)
-                .await
-                .unwrap()
-                .unwrap()
-        })
+    fn notice(rx: &mut mpsc::Receiver<Bytes>) -> Notice {
+        let b = rx.try_recv().unwrap();
+        match framing::decode::<HostMsg>(&b[4..]).unwrap() {
+            HostMsg::Notice(n) => n,
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -154,41 +147,34 @@ mod tests {
         let events = Arc::new(Queue::new(16));
         let hub = AudioHub::new(events.clone());
         let (tx, mut rx) = mpsc::channel(QUEUE);
-        hub.subscribe(1, tx);
+        let (ctl_tx, mut ctl_rx) = mpsc::channel(8);
+        hub.subscribe(1, tx, Control::new(ctl_tx));
         assert_eq!(
             events.pop(Duration::ZERO).unwrap(),
             r#"{"active":true,"type":"audio"}"#
         );
         hub.push(&[1, 2], 10);
         hub.push(&[3], 20);
-        let HostMsg::Audio(a) = decode(&rx.try_recv().unwrap()) else {
-            panic!()
-        };
+        let p = rx.try_recv().unwrap();
+        let a = AudioHeader::decode(&p[4..]).unwrap();
         assert!(a.start);
-        assert_eq!((a.seq, a.capture_us, a.data), (1, 10, vec![1, 2]));
-        let HostMsg::Audio(b) = decode(&rx.try_recv().unwrap()) else {
-            panic!()
-        };
+        assert_eq!((a.seq, a.capture_us), (1, 10));
+        assert_eq!(&p[4 + media::HEADER_LEN..], &[1, 2]);
+        let b = AudioHeader::decode(&rx.try_recv().unwrap()[4..]).unwrap();
         assert!(!b.start);
         assert_eq!(b.seq, 2);
 
         hub.set_failure(Some("no permission".into()));
-        assert!(matches!(
-            decode(&rx.try_recv().unwrap()),
-            HostMsg::Notice(Notice::AudioFailed { .. })
-        ));
+        assert!(matches!(notice(&mut ctl_rx), Notice::AudioFailed { .. }));
         // 之后打开声音的会话马上收到
-        let (tx2, mut rx2) = mpsc::channel(QUEUE);
-        hub.subscribe(2, tx2);
-        assert!(matches!(
-            decode(&rx2.try_recv().unwrap()),
-            HostMsg::Notice(Notice::AudioFailed { .. })
-        ));
+        let (tx2, _rx2) = mpsc::channel(QUEUE);
+        let (ctl2_tx, mut ctl2_rx) = mpsc::channel(8);
+        hub.subscribe(2, tx2, Control::new(ctl2_tx));
+        assert!(matches!(notice(&mut ctl2_rx), Notice::AudioFailed { .. }));
         hub.set_failure(None);
-        assert!(matches!(
-            decode(&rx.try_recv().unwrap()),
-            HostMsg::Notice(Notice::AudioRecovered)
-        ));
+        assert!(matches!(notice(&mut ctl_rx), Notice::AudioRecovered));
+        // 提示不走声音流
+        assert!(rx.try_recv().is_err());
 
         hub.unsubscribe(1);
         assert!(events.pop(Duration::ZERO).is_none());

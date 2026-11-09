@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use airhand_proto::session::AUDIO_SAMPLE_RATE;
+use airhand_proto::media::AUDIO_SAMPLE_RATE;
 use anyhow::{Result, anyhow, bail};
 use objc2_core_audio_types::{AudioBuffer, AudioBufferList};
 use objc2_core_foundation::CFRetained;

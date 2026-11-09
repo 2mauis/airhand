@@ -194,6 +194,8 @@
     <string name="menu_shortcuts">快捷键</string>
     <string name="menu_sound_on">声音：开</string>
     <string name="menu_sound_off">声音：关</string>
+    <string name="menu_mouse_lock_on">锁定鼠标：开</string>
+    <string name="menu_mouse_lock_off">锁定鼠标：关</string>
     <string name="menu_quality">画质</string>
     <string name="menu_clipboard">剪贴板</string>
     <string name="menu_displays">显示器</string>

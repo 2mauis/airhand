@@ -1,9 +1,11 @@
 //! 控制端：在 [`airhand_link::controller::ControllerService`] 外面包一层给 Kotlin 用的接口。
 //!
-//! * 服务事件（与服务器的连接状态、等待的被控端上线了）：JSON 字符串，[`Ctl::poll_event`] 取；
-//! * 会话数据：每个会话一个队列，[`Ctl::poll_session`] 取。画面 / 光标 / 声音是 `airhand_link` 定义的二进制包
-//!   （第一个字节是类型 1 / 2 / 3，见 [`airhand_link::controller::HEADER_LEN`]），会话事件是 JSON（第一个字节是 `{`）；
-//! * 命令：JSON（[`Cmd`]），[`Ctl::call`] 执行。画面的确认走单独的 [`Ctl::ack`]（每帧一次）。
+//! * 服务事件（与服务器的连接状态、等待的被控端上线了）：JSON 字符串，[`Ctl::poll_event`] 取：
+//!   `{"type":"server","state":ServerState}`、`{"type":"hostOnline","code":123456}`（和网页控制台一样）；
+//! * 会话数据：每个会话一个队列，[`Ctl::poll_session`] 取。画面 / 光标 / 声音是媒体包
+//!   （`airhand_proto::media`，第一个字节是类型 1 / 2 / 3），会话事件是 JSON（第一个字节是 `{`）；
+//! * 命令：JSON（[`Cmd`]：`connect` 加上和桌面版、网页版一样的 [`Command`]），[`Ctl::call`] 执行。
+//!   画面的确认走单独的 [`Ctl::ack`]（每帧一次，不经过 JSON）。
 //!
 //! 和网页控制台一样用 [`Frontend::Browser`]：画面在 Kotlin 那边确认；默认送进解码器后确认，
 //! 音画同步时进入有界等待队列后确认，避免主动等待被当成网络拥塞。剪贴板也由 Kotlin 自己处理。
@@ -13,18 +15,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use airhand_link::controller::{
-    ControllerService, Frontend, HostOnline, SessionEvent, SessionUi, UiClosed,
+    Command, ControllerService, Frontend, HostOnline, SessionEvent, SessionUi, UiClosed,
 };
 use airhand_link::net::Report;
 use airhand_link::{LinkConfig, Problem, ServerState};
-use airhand_proto::session::{InputEvent, QualitySettings};
+use airhand_proto::session::QualitySettings;
+use airhand_proto::signal::ResumeToken;
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::queue::Queue;
 use crate::rt::rt;
-use crate::{hex, unhex};
 
 /// 连接服务器用的配置（Kotlin 传来的 JSON）
 #[derive(Debug, Deserialize)]
@@ -52,40 +54,18 @@ impl LinkSettings {
 
 /// Kotlin 发来的命令
 #[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(tag = "cmd", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Cmd {
-    /// 连接被控端（阻塞到有结果）。`resume`：之前连上这台时得到的重连凭证（32 位十六进制）
+    /// 连接被控端（阻塞到有结果），回复 `SessionInfo`。`resume`：之前连上这台时得到的重连凭证
     Connect {
         code: String,
-        resume: Option<String>,
+        #[serde(default)]
+        resume: Option<ResumeToken>,
         settings: QualitySettings,
     },
-    Input {
-        sid: u32,
-        events: Vec<InputEvent>,
-    },
-    Settings {
-        sid: u32,
-        settings: QualitySettings,
-    },
-    Keyframe {
-        sid: u32,
-    },
-    Display {
-        sid: u32,
-        index: u8,
-    },
-    Audio {
-        sid: u32,
-        enabled: bool,
-    },
-    Clipboard {
-        sid: u32,
-        text: String,
-    },
-    Close {
-        sid: u32,
-    },
+    /// 对会话的操作
+    #[serde(untagged)]
+    Session(Command),
 }
 
 /// 会话队列：画面一直有在途帧控制，正常情况下远远到不了上限
@@ -125,7 +105,7 @@ impl Ctl {
         let events = Arc::new(Queue::new(256));
         let ev = events.clone();
         let report: Report = Arc::new(move |s: ServerState| {
-            ev.push(json!({ "type": "server", "server": s }).to_string());
+            ev.push(json!({ "type": "server", "state": s }).to_string());
         });
         let ev = events.clone();
         let host_online: HostOnline = Arc::new(move |code: u32| {
@@ -163,19 +143,14 @@ impl Ctl {
                 code,
                 resume,
                 settings,
-            } => return self.connect(&code, resume.as_deref(), settings),
-            Cmd::Input { sid, events } => self.svc.input(sid, events),
-            Cmd::Settings { sid, settings } => self.svc.settings(sid, settings),
-            Cmd::Keyframe { sid } => self.svc.keyframe(sid),
-            Cmd::Display { sid, index } => self.svc.select_display(sid, index),
-            Cmd::Audio { sid, enabled } => self.svc.set_audio(sid, enabled),
-            Cmd::Clipboard { sid, text } => self.svc.send_clipboard(sid, text),
-            Cmd::Close { sid } => {
-                self.svc.disconnect(sid);
-                if let Some(q) = self.sessions.lock().unwrap().remove(&sid) {
+            } => return self.connect(&code, resume, settings),
+            Cmd::Session(c) => {
+                if let Command::Disconnect { sid } = c
+                    && let Some(q) = self.sessions.lock().unwrap().remove(&sid)
+                {
                     q.close();
                 }
-                Ok(())
+                self.svc.command(c)
             }
         };
         match r {
@@ -184,11 +159,12 @@ impl Ctl {
         }
     }
 
-    fn connect(&self, code: &str, resume: Option<&str>, settings: QualitySettings) -> String {
-        let Some(code) = airhand_proto::parse_code(code) else {
-            return err(Problem::InvalidCode);
-        };
-        let resume = resume.and_then(unhex::<16>);
+    fn connect(
+        &self,
+        code: &str,
+        resume: Option<ResumeToken>,
+        settings: QualitySettings,
+    ) -> String {
         let queue = Arc::new(Queue::new(SESSION_QUEUE));
         let ui = Arc::new(QueueUi(queue.clone()));
         let result = rt().block_on(
@@ -198,16 +174,7 @@ impl Ctl {
         match result {
             Ok(info) => {
                 self.sessions.lock().unwrap().insert(info.sid, queue);
-                json!({
-                    "ok": {
-                        "sid": info.sid,
-                        "code": info.code,
-                        "hostName": info.host_name,
-                        "hostOs": info.host_os,
-                        "resume": hex(&info.resume),
-                    }
-                })
-                .to_string()
+                json!({ "ok": info }).to_string()
             }
             Err(p) => err(p),
         }
@@ -233,23 +200,27 @@ mod tests {
 
     #[test]
     fn commands_parse() {
-        let c: Cmd = serde_json::from_str(
-            r#"{"op":"input","sid":3,"events":[{"MouseMove":{"x":0.5,"y":0.25}},{"MouseButton":{"button":"Left","down":true}},{"Wheel":{"dx":0,"dy":-120}},{"Key":{"code":"KeyA","down":false}},{"Text":{"text":"你好"}},"ReleaseAll"]}"#,
-        )
+        // 和桌面版、网页版共用的命令样例（crates/airhand-link/tests/protocol.json）
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../crates/airhand-link/tests/protocol.json"
+        ))
         .unwrap();
-        let Cmd::Input { sid, events } = c else {
-            panic!()
-        };
-        assert_eq!(sid, 3);
-        assert_eq!(events.len(), 6);
-        assert_eq!(events[0], InputEvent::MouseMove { x: 0.5, y: 0.25 });
-        assert_eq!(events[5], InputEvent::ReleaseAll);
+        for c in fixture["commands"].as_array().unwrap() {
+            let parsed: Cmd =
+                serde_json::from_value(c.clone()).unwrap_or_else(|e| panic!("{c}: {e}"));
+            assert!(matches!(parsed, Cmd::Session(_)), "{c}");
+        }
 
         let c: Cmd = serde_json::from_str(
-            r#"{"op":"connect","code":"123 456","resume":null,"settings":{"fps":30,"bitrate_kbps":4000,"max_short":1080,"adaptive":true,"codec":"H265"}}"#,
+            r#"{"cmd":"connect","code":"123 456","resume":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],"settings":{"fps":30,"bitrate_kbps":4000,"max_short":1080,"adaptive":true,"codec":"H265"}}"#,
         )
         .unwrap();
-        assert!(matches!(c, Cmd::Connect { .. }));
+        assert!(matches!(c, Cmd::Connect { resume: Some(r), .. } if r[15] == 16));
+        let c: Cmd = serde_json::from_str(
+            r#"{"cmd":"connect","code":"123456","settings":{"fps":30,"bitrate_kbps":4000,"max_short":1080,"adaptive":true,"codec":"H264"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(c, Cmd::Connect { resume: None, .. }));
     }
 
     #[test]
@@ -273,16 +244,20 @@ mod tests {
         })
         .unwrap();
         let r: serde_json::Value = serde_json::from_str(&ctl.call(
-            r#"{"op":"connect","code":"12","resume":null,"settings":{"fps":30,"bitrate_kbps":4000,"max_short":1080,"adaptive":true,"codec":"H264"}}"#,
+            r#"{"cmd":"connect","code":"12","resume":null,"settings":{"fps":30,"bitrate_kbps":4000,"max_short":1080,"adaptive":true,"codec":"H264"}}"#,
         ))
         .unwrap();
         assert_eq!(r, json!({ "err": { "kind": "invalidCode" } }));
+        // 没有这个会话
+        let r: serde_json::Value =
+            serde_json::from_str(&ctl.call(r#"{"cmd":"keyframe","sid":9}"#)).unwrap();
+        assert_eq!(r, json!({ "err": { "kind": "noSession" } }));
         // 第一个事件是"正在连接服务器"
         let e: serde_json::Value =
             serde_json::from_str(&ctl.poll_event(Duration::from_secs(5)).unwrap()).unwrap();
         assert_eq!(
             e,
-            json!({ "type": "server", "server": { "state": "connecting" } })
+            json!({ "type": "server", "state": { "state": "connecting" } })
         );
     }
 }

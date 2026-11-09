@@ -3,6 +3,7 @@
 import type { Codec } from "./api";
 import type { AvSync } from "./avsync";
 import { annexBToAvc, avcC, codecString, h264NeedsAvc, markH264NeedsAvc } from "./codec.ts";
+import type { VideoHeader } from "./media.ts";
 
 interface PendingVideo {
   key: boolean;
@@ -23,7 +24,6 @@ interface VideoOptions {
   recovered(): void;
   resized(): void;
 }
-const CODECS: Codec[] = ["H264", "H265", "AV1"];
 const MAX_QUEUED = 120;
 const MAX_BYTES = 32 * 1024 * 1024;
 export class VideoPlayer {
@@ -58,11 +58,11 @@ export class VideoPlayer {
     this.queuedBytes = 0;
   }
 
-  push(dv: DataView, pkt: Uint8Array, hostUs: number) {
+  /** 一个画面包：头 + 码流（见 media.ts） */
+  push(h: VideoHeader, data: Uint8Array) {
+    const hostUs = h.captureUs;
     const v: PendingVideo = {
-      key: dv.getUint8(1) === 1, codec: CODECS[dv.getUint16(2, true)] ?? "H264",
-      seq: dv.getUint32(4, true), width: dv.getUint16(8, true), height: dv.getUint16(10, true),
-      hostUs, data: pkt.subarray(24), due: 0,
+      key: h.key, codec: h.codec, seq: h.seq, width: h.width, height: h.height, hostUs, data, due: 0,
     };
     if (v.key) this.waitKey = false;
     else if (this.waitKey) { this.options.requestKeyframe(); return; }

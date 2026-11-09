@@ -5,25 +5,32 @@
 //! ```text
 //!  被控端(Host) ──QUIC──┐                 ┌──QUIC── 控制端(Controller)
 //!                      │  airhand-server │
-//!   控制流(bi #0) ──────┤   信令 + 中转   ├────── 控制流(bi #0)
+//!   信令流(bi #0) ──────┤   信令 + 中转   ├────── 信令流(bi #0)
 //!   会话流(bi #n) ══════╪═════ 字节透传 ══╪══════ 会话流(bi #n)
 //! ```
 //!
-//! * 每条 QUIC 连接上客户端打开的**第一条**双向流是"控制流"，承载 [`signal`] 消息。
-//! * 每个远控会话双方各打开三条双向流（控制、视频、音频），先写入 [`SessionHeader`]。
-//!   服务器按会话 ID 和 [`SessionLane`] 配对，然后**零拷贝透传**，不解析画面数据。
-//! * 三条流承载 [`session`] 消息，各自有序；跨流没有顺序保证，音画用采集时间同步。
+//! * 每条 QUIC 连接上客户端打开的**第一条**双向流是"信令流"，承载 [`signal`] 消息。
+//! * 每个远控会话双方各打开三条双向流（[`SessionLane`]：控制、画面、声音），先写入 [`SessionHeader`]。
+//!   服务器按会话 ID 和流的类型配对，然后**零拷贝透传**，不解析会话内容。
+//! * 三条流各自有序，跨流没有顺序保证（音画用采集时间同步），一条流堵住不影响其它两条：
 //!
-//! 所有消息使用 `u32 LE 长度前缀 + postcard` 编码，紧凑且解析极快。
+//! | 流   | 方向                | 内容                                              | 编码 |
+//! |------|---------------------|---------------------------------------------------|------|
+//! | 控制 | 双向                | [`session::HostMsg`] / [`session::ControllerMsg`] | postcard（[`framing`]） |
+//! | 画面 | 被控端 → 控制端     | 画面包                                            | 媒体包（[`media`]） |
+//! | 声音 | 被控端 → 控制端     | 声音包                                            | 媒体包（[`media`]） |
+//!
+//! 每条流上都是 `u32 LE 长度前缀 | 负载`。媒体包是定长头 + 原始数据，控制端原样交给界面，不重新编码。
 
 pub mod framing;
+pub mod media;
 pub mod session;
 pub mod signal;
 
 /// 协议版本，服务器与客户端不一致时拒绝连接（见 [`signal`] 模块的"版本握手"）。
 ///
-/// 任何不兼容的改动（增删字段、调整枚举变体顺序……）都要把它加 1。
-pub const PROTOCOL_VERSION: u16 = 8;
+/// 任何不兼容的改动（增删字段、调整枚举变体顺序、改媒体包的头……）都要把它加 1。
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// QUIC ALPN 标识。与版本握手一样永远不变，否则旧客户端连 TLS 握手都过不了，无法得知版本不一致。
 pub const ALPN: &[u8] = b"airhand/1";
@@ -32,10 +39,10 @@ pub const ALPN: &[u8] = b"airhand/1";
 pub const CODE_MIN: u32 = 100_000;
 pub const CODE_MAX: u32 = 999_999;
 
-/// 控制流单条消息上限。
+/// 信令流单条消息上限。
 pub const MAX_SIGNAL_MSG: usize = 64 * 1024;
-/// 会话流单条消息上限（一个 4K 关键帧也远小于这个值）。
-pub const MAX_SESSION_MSG: usize = 32 * 1024 * 1024;
+/// 会话控制流单条消息上限（最大的是 1 MiB 的剪贴板文本和光标形状）。
+pub const MAX_CONTROL_MSG: usize = 2 * 1024 * 1024;
 
 /// 会话流头部魔数。
 pub const SESSION_MAGIC: [u8; 4] = *b"AHS1";
@@ -49,8 +56,7 @@ pub enum Role {
     Controller,
 }
 
-/// Three independent ordered streams per session. Video loss/backpressure must
-/// not block audio or control messages. Values are fixed wire identifiers.
+/// 会话的三条流（见模块说明）。画面丢包 / 积压不能堵住声音和控制消息。取值是线上的编号，不能改。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SessionLane {

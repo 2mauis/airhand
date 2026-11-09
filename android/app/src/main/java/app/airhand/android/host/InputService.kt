@@ -184,6 +184,13 @@ class Injector(private val svc: AccessibilityService) {
             fingers[MOUSE]?.let { f -> move(f, x, y) }
             return
         }
+        // 相对移动（控制端只在被控端的光标隐藏时发，手机没有光标；收到了就当作按像素移动）
+        e.optJSONObject("MouseDelta")?.let {
+            x = (x + it.optInt("dx")).coerceIn(0f, (w - 1).toFloat())
+            y = (y + it.optInt("dy")).coerceIn(0f, (h - 1).toFloat())
+            fingers[MOUSE]?.let { f -> move(f, x, y) }
+            return
+        }
         e.optJSONObject("Touch")?.let {
             val id = it.optInt("id")
             if (id !in 0 until MAX_FINGERS) return

@@ -197,6 +197,8 @@
     <string name="menu_shortcuts">Shortcuts</string>
     <string name="menu_sound_on">Sound on</string>
     <string name="menu_sound_off">Sound off</string>
+    <string name="menu_mouse_lock_on">Mouse lock on</string>
+    <string name="menu_mouse_lock_off">Mouse lock off</string>
     <string name="menu_quality">Quality</string>
     <string name="menu_clipboard">Clipboard</string>
     <string name="menu_displays">Displays</string>

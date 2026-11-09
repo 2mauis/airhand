@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use airhand_proto::session::AUDIO_SAMPLE_RATE;
+use airhand_proto::media::AUDIO_SAMPLE_RATE;
 use anyhow::{Context as _, Result, anyhow, bail};
 use libpulse_binding as pa;
 use pa::callbacks::ListResult;

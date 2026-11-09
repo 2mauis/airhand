@@ -29,6 +29,10 @@ import kotlin.math.min
  * 双指捏合 / 移动只缩放本机的画面
  *
  * 三指点击 = 打开 / 收起键盘（多点触摸方式下三指手势也传给对方，不用来开键盘）。
+ *
+ * **相对移动**（[relative]：被控端的光标隐藏了，例如游戏里拖动转视角；或者打开了锁定鼠标）：
+ * 触控板的移动、触屏的拖动发"移动了多少"（[Out.delta]），不再发位置；点击也不先把光标挪到哪里。
+ * 游戏这时自己把光标拉回原位、只看移动量，发位置会和它打架（视角乱跳、拖到画面边上就转不动了）。
  */
 class Gestures(private val out: Out, private val timers: Timers, private val slop: Float) {
 
@@ -39,6 +43,9 @@ class Gestures(private val out: Out, private val timers: Timers, private val slo
         /** 画面在视图里的宽高（像素，放大后变大） */
         fun contentSize(): Pair<Float, Float>
         fun move(nx: Float, ny: Float)
+
+        /** 相对移动：移动了画面宽 / 高的多少（不是位置），由接收方换算成被控端的像素 */
+        fun delta(nx: Float, ny: Float)
         fun button(button: String, down: Boolean)
         fun wheel(dx: Int, dy: Int)
         fun zoom(factor: Float, fx: Float, fy: Float)
@@ -66,6 +73,9 @@ class Gestures(private val out: Out, private val timers: Timers, private val slo
     data class P(val id: Int, val x: Float, val y: Float)
 
     var mode = Mode.TRACKPAD
+
+    /** 发相对移动（见类的说明）。只对触控板和触屏方式有用：直通、多点触摸是控制手机，没有光标 */
+    var relative = false
 
     /** 远端指针（归一化） */
     var cursorX = 0.5f
@@ -153,9 +163,12 @@ class Gestures(private val out: Out, private val timers: Timers, private val slo
                 if (!doubleTapDrag) longTimer = timers.after(LONG_PRESS_MS) { onLongPress() }
             }
             Mode.TOUCH -> {
-                val r = out.toRemote(p.x, p.y) ?: return
-                setCursor(r.first, r.second)
-                out.move(cursorX, cursorY)
+                // 相对移动时（游戏）按下不挪光标，不然视角会跳一下
+                if (!relative) {
+                    val r = out.toRemote(p.x, p.y) ?: return
+                    setCursor(r.first, r.second)
+                    out.move(cursorX, cursorY)
+                }
                 longTimer = timers.after(LONG_PRESS_MS) { onLongPress() }
             }
             Mode.PASSTHROUGH -> {
@@ -197,7 +210,7 @@ class Gestures(private val out: Out, private val timers: Timers, private val slo
     }
 
     private fun click(button: String) {
-        out.move(cursorX, cursorY)
+        if (!relative) out.move(cursorX, cursorY)
         out.button(button, true)
         out.button(button, false)
     }
@@ -265,13 +278,13 @@ class Gestures(private val out: Out, private val timers: Timers, private val slo
                 Mode.MULTITOUCH -> {}
                 Mode.TRACKPAD -> if (doubleTapDrag) {
                     out.haptic()
-                    out.move(cursorX, cursorY)
+                    if (!relative) out.move(cursorX, cursorY)
                     out.button(LEFT, true)
                     dragging = true
                 }
                 Mode.TOUCH -> if (!longFired) {
                     // 从按下的位置开始拖
-                    out.toRemote(startX, startY)?.let { out.move(it.first, it.second) }
+                    if (!relative) out.toRemote(startX, startY)?.let { out.move(it.first, it.second) }
                     out.button(LEFT, true)
                     dragging = true
                 }
@@ -292,14 +305,25 @@ class Gestures(private val out: Out, private val timers: Timers, private val slo
                 if (w <= 0 || h <= 0) return
                 val speed = hypot(dx, dy) / dt // 像素 / 毫秒
                 val gain = accel(speed)
+                if (relative) {
+                    // 被控端的光标隐藏着：只发移动了多少，本机画的指针不动
+                    out.delta(dx / w * gain, dy / h * gain)
+                    return
+                }
                 setCursor(cursorX + dx / w * gain, cursorY + dy / h * gain)
                 out.move(cursorX, cursorY)
                 out.follow()
             }
             Mode.TOUCH -> if (dragging) {
-                out.toRemote(p.x, p.y)?.let {
-                    setCursor(it.first, it.second)
-                    out.move(cursorX, cursorY)
+                if (relative) {
+                    // 游戏里拖动转视角：手指在画面上移动了多少，就发多少
+                    val (w, h) = out.contentSize()
+                    if (w > 0 && h > 0) out.delta(dx / w, dy / h)
+                } else {
+                    out.toRemote(p.x, p.y)?.let {
+                        setCursor(it.first, it.second)
+                        out.move(cursorX, cursorY)
+                    }
                 }
             }
             Mode.PASSTHROUGH -> {

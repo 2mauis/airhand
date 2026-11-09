@@ -1,7 +1,13 @@
 //! 控制端服务：维护与服务器的连接（自动重连），管理多个并发会话。
 //!
-//! 与界面无关：会话的画面和事件交给 [`SessionUi`]。控制台可以和本服务在同一台电脑上（桌面版），
-//! 也可以是经网络连过来的浏览器（网页版），两者的区别见 [`Frontend`]。
+//! 与界面无关。三种界面（桌面版的 WebView、网页控制台的浏览器、Android）用同一套接口：
+//!
+//! * 界面 → 服务：[`ControllerService::connect`] 开始会话，之后都是 [`Command`]（JSON 形状三边一样）；
+//! * 服务 → 界面：会话的画面、光标、声音是媒体包（[`airhand_proto::media`]，原样转交），
+//!   其它是 [`SessionEvent`]（JSON），都交给 [`SessionUi`]。
+//!
+//! 界面和本服务可以在同一台电脑上（桌面版、Android），也可以是经网络连过来的浏览器（网页版），
+//! 区别见 [`Frontend`]。
 //!
 //! # 被控端掉线后的重连
 //!
@@ -30,7 +36,7 @@ use airhand_proto::signal::{ClientMsg, ConnectError, ResumeToken, ServerMsg, Ses
 use airhand_proto::{MAX_SIGNAL_MSG, Role};
 use anyhow::{Result, anyhow};
 use quinn::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
@@ -38,7 +44,7 @@ use tracing::{info, warn};
 
 use crate::net::{self, LinkConfig, Reconnect, Report};
 use crate::{Problem, ServerState};
-pub use session::{HEADER_LEN, NoticeView, SessionEvent, SessionUi, UiClosed};
+pub use session::{NoticeView, SessionEvent, SessionUi, UiClosed};
 
 /// 桌面版检查本机剪贴板变化的间隔
 pub const CLIPBOARD_POLL: Duration = Duration::from_millis(300);
@@ -53,23 +59,88 @@ pub trait ClipboardSync: Send + 'static {
 
 /// 控制台在哪里。
 pub enum Frontend {
-    /// 桌面控制台：由 WebView 收到画面后确认，并同步这台电脑的剪贴板
+    /// 桌面控制台：本服务同步这台电脑的剪贴板
     Desktop {
         clipboard: Box<dyn ClipboardSync>,
-        /// 是否同步剪贴板（之后可用 [`ControllerService::set_clipboard_sync`] 切换）
+        /// 是否同步剪贴板（之后可用 [`Command::ClipboardSync`] 切换）
         sync: bool,
     },
-    /// 浏览器，经网络连到本服务（网页控制台）：
+    /// 剪贴板由界面自己同步（网页控制台的浏览器、Android）：被控端复制的文本作为
+    /// [`SessionEvent::Clipboard`] 交给界面，界面复制的文本用 [`Command::Clipboard`] 发给被控端。
     ///
-    /// * 画面由浏览器收到后确认（[`ControllerService::ack`]），被控端的在途帧控制因此把浏览器这一段网络也算进去，
-    ///   这段网络慢的时候画面不会在中间越积越多；
-    /// * 剪贴板是浏览器的：被控端复制的文本作为 [`SessionEvent::Clipboard`] 交给浏览器，
-    ///   浏览器复制的文本用 [`ControllerService::send_clipboard`] 发给被控端。
+    /// 不管哪种界面，画面都由界面在最后一段（IPC / 网络）之后确认（[`Command::Ack`]），
+    /// 被控端的在途帧控制因此把这一段也算进去，这段慢的时候画面不会在中间越积越多。
     Browser,
 }
 
 /// 服务器通知：控制码为 `code` 的被控端重新上线了，在等它的会话（[`Problem::HostOffline`]）现在重连
 pub type HostOnline = Arc<dyn Fn(u32) + Send + Sync>;
+
+/// 界面对一个会话的操作。JSON：`{"cmd": "input", "sid": 1, "events": [...]}`，三种界面一样
+/// （桌面版经 Tauri 的 `ctrl` 命令，网页版经 WebSocket，Android 经 JNI）。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "cmd", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum Command {
+    /// 输入事件（同一批里相邻的鼠标移动会合并）
+    Input {
+        sid: u32,
+        events: Vec<InputEvent>,
+    },
+    Settings {
+        sid: u32,
+        settings: QualitySettings,
+    },
+    /// 请被控端马上编一个关键帧（解码器出错、刚切回这个会话）
+    Keyframe {
+        sid: u32,
+    },
+    /// 切换到被控端的另一个显示器
+    Display {
+        sid: u32,
+        index: u8,
+    },
+    /// 开启 / 关闭被控端的声音
+    Audio {
+        sid: u32,
+        enabled: bool,
+    },
+    /// 把界面复制的文本发给被控端（网页版、Android：剪贴板由界面自己读）
+    Clipboard {
+        sid: u32,
+        text: String,
+    },
+    /// 打开 / 关闭剪贴板同步（桌面版：由本服务同步这台电脑的剪贴板）
+    ClipboardSync {
+        sid: u32,
+        enabled: bool,
+    },
+    /// 界面收到了第 `seq` 帧画面（累积确认），见 [`SessionUi::packet`]
+    Ack {
+        sid: u32,
+        seq: u32,
+    },
+    /// 断开会话（先松开所有按着的键）
+    Disconnect {
+        sid: u32,
+    },
+}
+
+impl Command {
+    /// 这个命令针对的会话
+    pub fn sid(&self) -> u32 {
+        match self {
+            Command::Input { sid, .. }
+            | Command::Settings { sid, .. }
+            | Command::Keyframe { sid }
+            | Command::Display { sid, .. }
+            | Command::Audio { sid, .. }
+            | Command::Clipboard { sid, .. }
+            | Command::ClipboardSync { sid, .. }
+            | Command::Ack { sid, .. }
+            | Command::Disconnect { sid } => *sid,
+        }
+    }
+}
 
 type Pending = Arc<Mutex<HashMap<u32, oneshot::Sender<Result<SessionGrant, ConnectError>>>>>;
 
@@ -139,15 +210,17 @@ impl ControllerService {
         Self { inner, task }
     }
 
+    /// 连接控制码为 `code` 的被控端（用户输入的样子，允许空格 / 短横线）。
     /// `resume`：重连时带上之前连上这个控制码时得到的凭证（[`SessionInfo::resume`]），第一次连接时为 `None`
     pub async fn connect(
         &self,
-        code: u32,
+        code: &str,
         resume: Option<ResumeToken>,
         settings: QualitySettings,
         ui: Arc<dyn SessionUi>,
         frontend: Frontend,
     ) -> Result<SessionInfo, Problem> {
+        let code = airhand_proto::parse_code(code).ok_or(Problem::InvalidCode)?;
         let live = self
             .inner
             .live
@@ -250,55 +323,52 @@ impl ControllerService {
         })
     }
 
+    /// 执行界面的命令
+    pub fn command(&self, cmd: Command) -> Result<(), Problem> {
+        let msg = match cmd {
+            Command::Input { sid, events } => (sid, ControllerMsg::Input(events)),
+            Command::Settings { sid, settings } => {
+                (sid, ControllerMsg::Settings(settings.sanitized()))
+            }
+            Command::Keyframe { sid } => (sid, ControllerMsg::RequestKeyframe),
+            Command::Display { sid, index } => (sid, ControllerMsg::SelectDisplay { index }),
+            Command::Audio { sid, enabled } => (sid, ControllerMsg::Audio { enabled }),
+            Command::Clipboard { sid, text } => {
+                if text.is_empty() || text.len() > MAX_CLIPBOARD_TEXT {
+                    return Ok(());
+                }
+                (sid, ControllerMsg::Clipboard { text })
+            }
+            Command::ClipboardSync { sid, enabled } => {
+                let sessions = self.inner.sessions.lock().unwrap();
+                let s = sessions.get(&sid).ok_or(Problem::NoSession)?;
+                // 网页版、Android 没有这个开关：剪贴板由界面自己决定发不发
+                if let Some(c) = &s.clipboard {
+                    c.store(enabled, Ordering::Relaxed);
+                }
+                return Ok(());
+            }
+            Command::Ack { sid, seq } => return self.ack(sid, seq),
+            Command::Disconnect { sid } => {
+                self.disconnect(sid);
+                return Ok(());
+            }
+        };
+        self.send(msg.0, msg.1)
+    }
+
     fn send(&self, sid: u32, msg: ControllerMsg) -> Result<(), Problem> {
         let sessions = self.inner.sessions.lock().unwrap();
         let s = sessions.get(&sid).ok_or(Problem::NoSession)?;
         s.tx.send(msg)
     }
 
-    pub fn input(&self, sid: u32, events: Vec<InputEvent>) -> Result<(), Problem> {
-        self.send(sid, ControllerMsg::Input(events))
-    }
-
-    pub fn settings(&self, sid: u32, s: QualitySettings) -> Result<(), Problem> {
-        self.send(sid, ControllerMsg::Settings(s.sanitized()))
-    }
-
-    pub fn keyframe(&self, sid: u32) -> Result<(), Problem> {
-        self.send(sid, ControllerMsg::RequestKeyframe)
-    }
-
-    pub fn select_display(&self, sid: u32, index: u8) -> Result<(), Problem> {
-        self.send(sid, ControllerMsg::SelectDisplay { index })
-    }
-
-    pub fn set_audio(&self, sid: u32, enabled: bool) -> Result<(), Problem> {
-        self.send(sid, ControllerMsg::Audio { enabled })
-    }
-
-    /// 前端收到了这一帧（桌面 WebView / 浏览器 / Android）。确认是累积的。
+    /// 界面收到了这一帧（[`Command::Ack`]；Android 每帧走一次 JNI，不经过 JSON）。确认是累积的
     pub fn ack(&self, sid: u32, seq: u32) -> Result<(), Problem> {
         self.send(sid, ControllerMsg::Ack { seq })
     }
 
-    /// 把浏览器复制的文本发给被控端（[`Frontend::Browser`]）
-    pub fn send_clipboard(&self, sid: u32, text: String) -> Result<(), Problem> {
-        if text.is_empty() || text.len() > MAX_CLIPBOARD_TEXT {
-            return Ok(());
-        }
-        self.send(sid, ControllerMsg::Clipboard { text })
-    }
-
-    /// 打开 / 关闭剪贴板同步（[`Frontend::Desktop`]；网页版由浏览器自己决定发不发）
-    pub fn set_clipboard_sync(&self, sid: u32, enabled: bool) -> Result<(), Problem> {
-        let sessions = self.inner.sessions.lock().unwrap();
-        let s = sessions.get(&sid).ok_or(Problem::NoSession)?;
-        if let Some(c) = &s.clipboard {
-            c.store(enabled, Ordering::Relaxed);
-        }
-        Ok(())
-    }
-
+    /// 断开会话（[`Command::Disconnect`]）
     pub fn disconnect(&self, sid: u32) {
         if let Some(s) = self.inner.sessions.lock().unwrap().remove(&sid) {
             let _ =

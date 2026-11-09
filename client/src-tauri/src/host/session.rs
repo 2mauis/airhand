@@ -1,21 +1,17 @@
 //! 被控端的单个远控会话。
 
 use airhand_link::flow::Flow;
-use airhand_link::tasks::OwnedTask;
-use airhand_link::transport::{SessionStreams, open_session, write_lane};
+use airhand_link::host::{HostSession, PEER_TIMEOUT};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use airhand_proto::framing::{self, read_msg};
 use airhand_proto::session::{
     ByeReason, ControllerMsg, DisplayInfo, HostHello, HostMsg, Notice, Platform, QualitySettings,
 };
-use airhand_proto::{MAX_SESSION_MSG, Role};
-use anyhow::{Result, anyhow};
-use bytes::Bytes;
+use anyhow::Result;
 use quinn::Connection;
-use tokio::sync::{mpsc, watch};
-use tracing::{info, warn};
+use tokio::sync::watch;
+use tracing::info;
 
 use super::audio::{self, AudioSubscription};
 use super::capture;
@@ -24,8 +20,8 @@ use super::pipeline::Pipeline;
 use crate::clipboard::{self, ClipSync};
 use crate::config;
 
-/// 控制端每秒都会发 Ping，这么久没有任何消息说明对方已失联
-const PEER_TIMEOUT: Duration = Duration::from_secs(30);
+/// 画面的发送队列：在途帧控制之下最多一两帧，多了宁可让编码器等着
+const VIDEO_QUEUE: usize = 2;
 
 /// 告诉控制端的平台（控制端据此选快捷键、提示的说法）
 #[cfg(windows)]
@@ -65,11 +61,8 @@ pub async fn run(
     session_id: u64,
     mut kick: watch::Receiver<ByeReason>,
 ) -> Result<()> {
-    let SessionStreams {
-        control: (send, mut recv),
-        video: (video_send, _video_recv),
-        audio: (audio_send, _audio_recv),
-    } = open_session(&conn, session_id, Role::Host).await?;
+    let mut io = HostSession::open(&conn, session_id, VIDEO_QUEUE, audio::QUEUE).await?;
+    let ctl = io.ctl.clone();
 
     let (mut displays, codecs, notice) = tokio::task::spawn_blocking(|| {
         (
@@ -84,16 +77,7 @@ pub async fn run(
     let (hostname, os) = crate::sysinfo::host_identity();
     info!(session_id, displays = displays.len(), "session started");
 
-    // Independent bounded queues AND QUIC streams: video loss cannot hold up Pong/audio.
-    let (out_tx, out_rx) = mpsc::channel::<Bytes>(2);
-    let (ctl_tx, ctl_rx) = mpsc::channel::<Bytes>(32);
-    let (audio_tx, audio_rx) = mpsc::channel::<Bytes>(audio::QUEUE);
-    let ctl = |m: &HostMsg| -> Result<()> {
-        ctl_tx
-            .try_send(Bytes::from(framing::encode(m)?))
-            .map_err(|_| anyhow!("the session is closed"))
-    };
-    ctl(&HostMsg::Hello(HostHello {
+    ctl.send(&HostMsg::Hello(HostHello {
         hostname,
         os,
         version: config::VERSION.to_string(),
@@ -106,53 +90,29 @@ pub async fn run(
         actions: Vec::new(),
     }))?;
     if displays.is_empty() {
-        ctl(&HostMsg::Notice(Notice::NoDisplays))?;
+        ctl.send(&HostMsg::Notice(Notice::NoDisplays))?;
     }
     if let Some(notice) = notice {
-        ctl(&HostMsg::Notice(notice))?;
+        ctl.send(&HostMsg::Notice(notice))?;
     }
     // 缺少系统权限（macOS）：告诉控制端为什么没有画面 / 不能操作；之后权限有变化时再发
     let mut missing = super::missing_permissions();
     if missing != (false, false) {
-        ctl(&HostMsg::Notice(permission_notice(missing)))?;
+        ctl.send(&HostMsg::Notice(permission_notice(missing)))?;
     }
-
-    let mut writer = OwnedTask(tokio::spawn(async move {
-        tokio::try_join!(
-            write_lane(send, ctl_rx),
-            write_lane(video_send, out_rx),
-            write_lane(audio_send, audio_rx)
-        )
-    }));
-
-    // 读任务：read_msg 不是取消安全的，单独放在一个任务里，通过通道交给主循环
-    let (in_tx, mut in_rx) = mpsc::channel::<ControllerMsg>(64);
-    let mut reader = OwnedTask(tokio::spawn(async move {
-        let mut buf = Vec::with_capacity(1024);
-        loop {
-            match read_msg::<_, ControllerMsg>(&mut recv, MAX_SESSION_MSG, &mut buf).await {
-                Ok(Some(m)) => {
-                    if in_tx.send(m).await.is_err() {
-                        return Ok(());
-                    }
-                }
-                Ok(None) => return Ok(()),
-                Err(e) => return Err(anyhow!(e)),
-            }
-        }
-    }));
 
     let mut settings = QualitySettings::default();
     let flow = Arc::new(Flow::default());
-    let mut pipeline = (!displays.is_empty()).then(|| {
+    let start = |display: u8, settings: QualitySettings| {
         Pipeline::start(
-            current,
+            display,
             settings,
-            out_tx.clone(),
-            ctl_tx.clone(),
+            io.video.clone(),
+            ctl.clone(),
             flow.clone(),
         )
-    });
+    };
+    let mut pipeline = (!displays.is_empty()).then(|| start(current, settings));
     let mut injector = Injector::new();
     let mut sound: Option<AudioSubscription> = None;
     let fallback = DisplayInfo {
@@ -177,7 +137,7 @@ pub async fn run(
     let result: Result<()> = async {
         loop {
             tokio::select! {
-                msg = in_rx.recv() => {
+                msg = io.incoming.recv() => {
                     let Some(msg) = msg else { break };
                     last_msg = Instant::now();
                     match msg {
@@ -203,11 +163,11 @@ pub async fn run(
                                 injector.release_all();
                                 // 先停旧管线再启动新管线（新管线从关键帧开始）
                                 if let Some(p) = pipeline.take() { p.stop().await; }
-                                pipeline = Some(Pipeline::start(current, settings, out_tx.clone(), ctl_tx.clone(), flow.clone()));
-                                ctl(&HostMsg::Displays { displays: displays.clone(), current })?;
+                                pipeline = Some(start(current, settings));
+                                ctl.send(&HostMsg::Displays { displays: displays.clone(), current })?;
                             }
                         }
-                        ControllerMsg::Ping { t } => ctl(&HostMsg::Pong { t })?,
+                        ControllerMsg::Ping { t } => ctl.send(&HostMsg::Pong { t })?,
                         ControllerMsg::Clipboard { text } => clip.apply(text),
                         // 桌面被控端不请本机用户同意，用不到控制端的标识
                         ControllerMsg::Hello(_) => {}
@@ -215,10 +175,10 @@ pub async fn run(
                             if !enabled {
                                 sound = None;
                             } else if sound.is_none() {
-                                let s = audio::subscribe(audio_tx.clone());
+                                let s = audio::subscribe(io.audio.clone());
                                 // 别的会话已经在采集、并且正打不开：马上告诉这个控制端
                                 if let Some(detail) = s.failure() {
-                                    ctl(&HostMsg::Notice(Notice::AudioFailed { detail }))?;
+                                    ctl.send(&HostMsg::Notice(Notice::AudioFailed { detail }))?;
                                 }
                                 sound = Some(s);
                             }
@@ -227,18 +187,16 @@ pub async fn run(
                 }
                 _ = clip_tick.tick() => {
                     if let Some(text) = clip.poll().await {
-                        ctl(&HostMsg::Clipboard { text })?;
+                        ctl.send(&HostMsg::Clipboard { text })?;
                     }
                 }
                 _ = kick.changed() => {
                     let reason = *kick.borrow_and_update();
                     info!(session_id, ?reason, "the local user disconnected the controller");
-                    ctl(&HostMsg::Bye(reason))?;
+                    ctl.send(&HostMsg::Bye(reason))?;
                     break;
                 }
-                r = &mut writer.0 => {
-                    return Err(anyhow!("session writer ended: {r:?}"));
-                }
+                e = io.writer.failed() => return Err(e),
                 _ = watchdog.tick() => {
                     if last_msg.elapsed() > PEER_TIMEOUT {
                         anyhow::bail!("the controller stopped responding");
@@ -246,7 +204,7 @@ pub async fn run(
                 }
                 // 声音采集打不开 / 恢复了（只在控制端开着声音时）
                 failure = audio_failure(&mut sound) => {
-                    ctl(&HostMsg::Notice(match failure {
+                    ctl.send(&HostMsg::Notice(match failure {
                         Some(detail) => Notice::AudioFailed { detail },
                         None => Notice::AudioRecovered,
                     }))?;
@@ -257,7 +215,7 @@ pub async fn run(
                     if now != missing {
                         info!(session_id, screen = !now.0, input = !now.1, "permissions changed");
                         missing = now;
-                        ctl(&HostMsg::Notice(permission_notice(now)))?;
+                        ctl.send(&HostMsg::Notice(permission_notice(now)))?;
                     }
                 }
                 // 显示器变了：鼠标坐标是按这里的列表换算的，旧列表会让点击落到别的位置
@@ -274,9 +232,9 @@ pub async fn run(
                             current = next;
                             injector.release_all();
                             if let Some(p) = pipeline.take() { p.stop().await; }
-                            pipeline = Some(Pipeline::start(current, settings, out_tx.clone(), ctl_tx.clone(), flow.clone()));
+                            pipeline = Some(start(current, settings));
                         }
-                        ctl(&HostMsg::Displays { displays: displays.clone(), current })?;
+                        ctl.send(&HostMsg::Displays { displays: displays.clone(), current })?;
                     }
                 }
             }
@@ -286,30 +244,13 @@ pub async fn run(
     .await;
 
     injector.release_all();
+    // 先停掉还拿着画面 / 声音发送端的东西，写任务才能把排着队的（例如 Bye）发完
     if let Some(p) = pipeline {
         p.stop().await;
     }
     drop(sound);
-    drop(audio_tx);
-    drop(out_tx);
-    drop(ctl_tx);
-    reader.abort();
-    // 等待写任务把已排队的数据（例如 Bye）发完
-    if !writer.is_finished() {
-        let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer.0).await;
-    }
-    let result = match result {
-        Ok(()) => match (&mut reader.0).await {
-            Ok(Err(e)) => Err(e),
-            _ => Ok(()),
-        },
-        Err(e) => Err(e),
-    };
-    match &result {
-        Ok(()) => info!(session_id, "session ended"),
-        Err(e) => warn!(session_id, "session failed: {e:#}"),
-    }
-    result
+    drop(ctl);
+    io.close(session_id, result).await
 }
 
 #[cfg(test)]

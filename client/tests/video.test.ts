@@ -24,17 +24,15 @@ test("decoder configure errors recover; late output is closed without drawing", 
     sync: { onVideo: (_h: number, now: number) => now } as any,
     requestKeyframe() { keys++; }, unsupported() { unsupported++; }, recovered() {}, resized() {},
   });
-  const packet = new Uint8Array(25);
-  const dv = new DataView(packet.buffer);
-  dv.setUint8(1, 1); dv.setUint16(2, 2, true); // AV1 keyframe
-  dv.setUint16(8, 16, true); dv.setUint16(10, 16, true);
+  const key = { seq: 1, key: true, codec: "AV1" as const, width: 16, height: 16, captureUs: 0 };
+  const data = new Uint8Array(1);
   try {
-    assert.doesNotThrow(() => player.push(dv, packet, 0));
+    assert.doesNotThrow(() => player.push(key, data));
     assert.equal(unsupported, 1);
     assert.equal(keys, 1);
     assert.equal(decoders[0].state, "closed");
     fail = false;
-    player.push(dv, packet, 0);
+    player.push(key, data);
     player.reset();
     decoders[1].callbacks.output({ close() { closed++; } });
     assert.equal(closed, 1);

@@ -3,13 +3,14 @@
 //! 和桌面版（`client/src-tauri/src/host/`）的分工不同：屏幕采集、编码、声音、注入输入都在 Kotlin 那边
 //!（MediaProjection、MediaCodec、AccessibilityService），这里只管网络：
 //!
-//! * Kotlin → Rust：编码好的画面 / 声音（[`Host::video`] / [`Host::audio`]），状态变化（[`Op`]，JSON）；
+//! * Kotlin → Rust：编码好的画面 / 声音（[`Host::video_hub`] / [`Host::audio_hub`]），状态变化（[`Op`]，JSON）；
 //! * Rust → Kotlin：事件队列（JSON，见 [`Host::poll_event`]）：与服务器的连接状态、分配到的控制码、
 //!   正在控制的设备、需不需要画面 / 声音、控制端发来的输入和剪贴板；
 //! * 画面的节奏由 [`video::VideoHub`] 控制（Kotlin 的渲染线程每一轮调用 `tick` 和 `wait_window`）。
 //!
-//! 控制码像桌面版一样固定（`Register::keep`）：Kotlin 把服务器分配的控制码和密钥保存在
-//! 应用自己的数据目录里，下次启动时带上（[`HostConfig::reclaim`]）取回同一个控制码。
+//! 与服务器的连接和会话的三条流和桌面版共用 [`airhand_link::host`]。控制码像桌面版一样固定
+//!（`Register::keep`）：Kotlin 把服务器分配的控制码和密钥保存在应用自己的数据目录里，
+//! 下次启动时带上（[`HostConfig::reclaim`]）取回同一个控制码。
 
 pub mod audio;
 mod session;
@@ -20,22 +21,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use airhand_link::net::{self, Reconnect, Report};
-use airhand_link::tasks::OwnedTask;
-use airhand_link::{LinkConfig, ServerState};
-use airhand_proto::framing::{self, read_msg, write_msg};
-use airhand_proto::session::{
-    ByeReason, Codec, DisplayInfo, EncoderInfo, HostMsg, Notice, SystemAction,
-};
-use airhand_proto::signal::{ClientMsg, Reclaim, ServerMsg};
-use airhand_proto::{MAX_SIGNAL_MSG, Role};
-use anyhow::{Result, anyhow, bail};
+use airhand_link::ServerState;
+use airhand_link::host::{Control, HostCmd, HostEvents};
+use airhand_proto::session::{Codec, DisplayInfo, EncoderInfo, HostMsg, Notice, SystemAction};
+use airhand_proto::signal::{Peer, Reclaim};
+use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tokio::task::{JoinHandle, JoinSet};
-use tracing::{info, warn};
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::task::JoinHandle;
+use tracing::info;
 
 use crate::ctl::LinkSettings;
 use crate::queue::Queue;
@@ -100,13 +96,6 @@ pub enum Op {
     Approval { required: bool },
 }
 
-/// 托盘那边的"命令"
-#[derive(Debug, Clone, Copy)]
-enum HostCmd {
-    KickAll,
-    NewCode,
-}
-
 /// 会话开始时告诉控制端的信息，以及之后的变化
 pub(crate) struct Info {
     pub hostname: String,
@@ -162,9 +151,7 @@ impl Shared {
     }
 
     fn broadcast(&self, msg: &HostMsg) {
-        if let Ok(b) = framing::encode(msg) {
-            let _ = self.broadcast.send(Bytes::from(b));
-        }
+        let _ = self.broadcast.send(Control::encode(msg));
     }
 
     fn report_controllers(&self) {
@@ -243,7 +230,20 @@ impl Host {
             })
         });
         let (cmd, rx) = mpsc::unbounded_channel();
-        let task = rt().spawn(run(link, shared.clone(), reclaim, rx));
+        let sh = shared.clone();
+        let task = rt().spawn(airhand_link::host::run(
+            link,
+            true,
+            reclaim,
+            shared.clone(),
+            move |conn, session_id, kick| {
+                let sh = sh.clone();
+                async move {
+                    let _ = session::run(conn, session_id, kick, sh).await;
+                }
+            },
+            rx,
+        ));
         Ok(Arc::new(Host { shared, cmd, task }))
     }
 
@@ -335,137 +335,47 @@ impl Drop for Host {
     }
 }
 
-fn reporter(shared: &Arc<Shared>) -> Report {
-    let sh = shared.clone();
-    Arc::new(move |s: ServerState| sh.event(json!({ "type": "server", "server": s })))
-}
-
-async fn run(
-    link: Arc<LinkConfig>,
-    shared: Arc<Shared>,
-    mut reclaim: Option<Reclaim>,
-    mut cmds: mpsc::UnboundedReceiver<HostCmd>,
-) {
-    let mut reconnect = Reconnect::new(reporter(&shared));
-    loop {
-        reconnect.begin();
-        let result = connect_once(&link, &shared, &mut reclaim, &mut cmds).await;
-        shared.controllers.lock().unwrap().clear();
-        shared.report_controllers();
-        reconnect.end("host", result).await;
+/// 被控端服务发生的事变成给 Kotlin 的事件（控制码由 Kotlin 保存）
+impl HostEvents for Shared {
+    fn server(&self, state: ServerState) {
+        self.event(json!({ "type": "server", "state": state }));
     }
-}
 
-/// 返回 `Ok(())` 表示需要立即重连（更换控制码），`Err` 表示掉线。
-async fn connect_once(
-    link: &LinkConfig,
-    shared: &Arc<Shared>,
-    reclaim: &mut Option<Reclaim>,
-    cmds: &mut mpsc::UnboundedReceiver<HostCmd>,
-) -> Result<()> {
-    let mut sig = net::connect_signal(link, Role::Host).await?;
-    write_msg(
-        &mut sig.send,
-        &ClientMsg::Register {
-            reclaim: *reclaim,
-            keep: true,
-        },
-    )
-    .await?;
-
-    // 独立的读任务，保证 select 中的接收是取消安全的
-    let (tx, mut rx) = mpsc::channel::<ServerMsg>(16);
-    let mut recv = sig.recv;
-    let reader = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        while let Ok(Some(m)) = read_msg::<_, ServerMsg>(&mut recv, MAX_SIGNAL_MSG, &mut buf).await
-        {
-            if tx.send(m).await.is_err() {
-                break;
-            }
-        }
-    });
-    let _reader = OwnedTask(reader);
-
-    let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-        .await
-        .map_err(|_| anyhow!("registration timed out"))?
-        .ok_or_else(|| anyhow!("the server closed the connection before registering"))?;
-    let ServerMsg::Registered { code, secret } = first else {
-        bail!("registration failed: {first:?}");
-    };
-    if reclaim.is_some_and(|r| r.code != code) {
-        info!("the previous control code isn't available anymore, got a new one");
+    async fn registered(&self, code: Reclaim, _changed: bool) {
+        self.event(json!({ "type": "registered", "code": code.code, "secret": hex(&code.secret) }));
     }
-    *reclaim = Some(Reclaim { code, secret });
-    info!(code, "host connected to the server");
-    shared.event(json!({ "type": "registered", "code": code, "secret": hex(&secret) }));
-    shared.event(json!({ "type": "server", "server": ServerState::Connected }));
 
-    let mut sessions: JoinSet<u64> = JoinSet::new();
-    // 每次发送都会让所有会话向控制端发送 Bye（带上这个原因）并结束
-    let (kick_tx, _) = watch::channel(ByeReason::Kicked);
-    loop {
-        tokio::select! {
-            msg = rx.recv() => match msg {
-                Some(ServerMsg::Incoming { session_id, peer }) => {
-                    info!(session_id, name = %peer.name, ip = %peer.ip, "controller wants to connect");
-                    shared.controllers.lock().unwrap().push(ControllerView {
-                        id: session_id,
-                        name: peer.name.clone(),
-                        ip: peer.ip.to_string(),
-                        pending: false,
-                        active: false,
-                    });
-                    shared.report_controllers();
-                    let (conn, kick, sh) = (sig.conn.clone(), kick_tx.subscribe(), shared.clone());
-                    sessions.spawn(async move {
-                        let _ = session::run(conn, session_id, kick, sh).await;
-                        session_id
-                    });
-                }
-                Some(other) => warn!("ignoring server message: {other:?}"),
-                None => match sig.conn.close_reason() {
-                    Some(reason) => bail!(reason),
-                    None => bail!("the server closed the control stream"),
-                },
-            },
-            Some(done) = sessions.join_next() => {
-                if let Ok(id) = done {
-                    shared.controllers.lock().unwrap().retain(|c| c.id != id);
-                    shared.report_controllers();
-                }
-            }
-            Some(cmd) = cmds.recv() => {
-                info!(?cmd, "command from the app");
-                // 断开了的设备要重新请本机用户同意
-                shared.trusted.lock().unwrap().clear();
-                kick_tx.send_replace(match cmd {
-                    HostCmd::KickAll => ByeReason::Kicked,
-                    HostCmd::NewCode => ByeReason::CodeChanged,
-                });
-                if let HostCmd::NewCode = cmd {
-                    // 给会话一点时间把 Bye 发出去，然后放弃旧控制码重新注册
-                    let _ = tokio::time::timeout(Duration::from_millis(800), async {
-                        while sessions.join_next().await.is_some() {}
-                    })
-                    .await;
-                    let release = async {
-                        write_msg(&mut sig.send, &ClientMsg::Release).await?;
-                        // 服务器处理完 Release 才会读到控制流结束、断开连接
-                        let _ = sig.send.finish();
-                        sig.conn.closed().await;
-                        anyhow::Ok(())
-                    };
-                    let _ = tokio::time::timeout(Duration::from_secs(2), release).await;
-                    *reclaim = None;
-                    shared.event(json!({ "type": "released" }));
-                    sig.conn.close(quinn::VarInt::from_u32(0), b"new code");
-                    return Ok(());
-                }
-            }
-            reason = sig.conn.closed() => bail!(reason),
-        }
+    async fn released(&self) {
+        self.event(json!({ "type": "released" }));
+    }
+
+    fn incoming(&self, session_id: u64, peer: &Peer) {
+        self.controllers.lock().unwrap().push(ControllerView {
+            id: session_id,
+            name: peer.name.clone(),
+            ip: peer.ip.to_string(),
+            pending: false,
+            active: false,
+        });
+        self.report_controllers();
+    }
+
+    fn ended(&self, session_id: u64) {
+        self.controllers
+            .lock()
+            .unwrap()
+            .retain(|c| c.id != session_id);
+        self.report_controllers();
+    }
+
+    fn offline(&self) {
+        self.controllers.lock().unwrap().clear();
+        self.report_controllers();
+    }
+
+    fn kicked(&self, _cmd: HostCmd) {
+        // 断开了的设备要重新请本机用户同意
+        self.trusted.lock().unwrap().clear();
     }
 }
 
