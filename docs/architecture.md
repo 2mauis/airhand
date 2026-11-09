@@ -79,6 +79,7 @@ The same `airhand.exe` plays several roles depending on its command line (`clien
 | Rate control | The controller ACKs every frame. The host caps the number of **in-flight frames** (≈ RTT × fps + 2); on a slow network it waits and **skips to the newest frame** instead of building up lag. Adaptive bitrate steps down under congestion and recovers gradually |
 | Transport | QUIC with **BBR**. Control, audio and video use separate bounded queues and QUIC streams, avoiding video stream head-of-line blocking. Connection bandwidth is still shared; the web console's final hop remains a single WebSocket |
 | Decoding | The controller decodes on the GPU with **WebCodecs** (`optimizeForLatency`) and paints straight into a `desynchronized` Canvas |
+| Display | The picture is **scaled only once**: the controller requests the resolution the picture actually occupies in the window, in device pixels (never above the user's cap), the host scales straight to it, and the controller shows it 1:1 aligned to device pixels (see `client/src/lib/fit.ts`). A second scaling in the browser (especially by a factor close to 1, or at half-pixel offsets) makes text blurry |
 | Cursor | The remote cursor's **shape** is mirrored to the local cursor and movement is handled locally, so there is **no perceptible cursor lag** |
 | Background sessions | Sessions that aren't on screen drop to 5 fps |
 

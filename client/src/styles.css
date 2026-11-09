@@ -1435,6 +1435,8 @@ kbd {
 }
 .remote-canvas {
   display: block;
+  /* 1:1 显示时用 left/top 把画面对齐到设备像素（见 session.ts 的 layout） */
+  position: relative;
   outline: none;
   flex-shrink: 0;
   image-rendering: auto;

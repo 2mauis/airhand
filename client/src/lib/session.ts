@@ -5,6 +5,7 @@
 // * 解码器 optimizeForLatency，帧解码后立即绘制到 desynchronized Canvas，不排队等 vsync；
 // * 鼠标移动按 8ms 合并，按键/点击立即发送；
 // * 不可见的会话自动降到 5fps，节省带宽与对端 CPU；
+// * 画面只缩放一次：按画面在窗口里显示的大小请求分辨率，收到后按 1:1 显示（见 fit.ts）；
 // * 只有当前正在查看的会话播放声音，其余会话通知被控端停止采集声音；
 // * 音画同步（可选）：按采集时间把画面推迟到与声音对齐后再解码显示，见 avsync.ts。
 import {
@@ -30,6 +31,7 @@ import { t } from "./i18n";
 import { RECOVERS, type SessionNotice } from "./messages";
 import { CODEC_LABEL } from "./presets";
 import { store } from "./store";
+import { fitSize, stricter, viewMaxShort } from "./fit";
 
 /** waiting = 对方掉线了，等它重新上线（服务器会通知，见 hostOnline） */
 /** `approving`：连上了，在等对方的用户同意（之后收到 hello 才是 `live`） */
@@ -54,6 +56,8 @@ export interface EncoderState {
 }
 
 const BACKGROUND_FPS = 5;
+/** 显示区域的大小停下来这么久才按新大小请求分辨率（拖动窗口边框时不要每一下都让对方重建编码器） */
+const VIEW_LIMIT_DELAY_MS = 400;
 const MAX_RETRIES = 30;
 /** 等对方上线时，保险起见每隔这么久也试一次（正常情况下服务器会在对方上线时马上通知） */
 const WAIT_CHECK_MS = 60_000;
@@ -140,6 +144,13 @@ export class RemoteSession {
   // 布局
   private hostEl: HTMLElement | null = null;
   private resizeObs: ResizeObserver | null = null;
+  /** 画面的显示区域（设备像素）；还没挂到页面上时为 null */
+  private viewport: { w: number; h: number } | null = null;
+  /** 按显示区域向被控端请求的短边上限（0 = 不限），与用户选的上限取较严的发过去 */
+  private viewLimit = 0;
+  private viewLimitTimer: number | undefined;
+  /** 最近一次想改 viewLimit 的时刻（与 performance.now() 同一时基） */
+  private viewLimitAt = -Infinity;
 
   // 输入
   private interactive = false;
@@ -230,9 +241,9 @@ export class RemoteSession {
     this.audioError = null;
     this.attemptAt = performance.now();
     let info;
-    const sent = this.settings;
+    const sent = this.effectiveSettings();
     try {
-      info = await api.connect(this.code, this.resume, this.settings, sink, this.clipboardSync);
+      info = await api.connect(this.code, this.resume, sent, sink, this.clipboardSync);
     } catch (e) {
       // A Closed event already decided whether to retry. An old failure must
       // not overwrite that decision, or restart a deliberately declined call.
@@ -253,8 +264,8 @@ export class RemoteSession {
     // hello 也可能比这里先到，那时已经是 live 了
     this.retries = 0;
     this.closedReason = null;
-    // 在后台要降帧率；连接过程中设置变了（例如 Hello 先到，换了编码格式，那时还没有 sid 发不出去）也要重发
-    if (!this.visible || this.settings !== sent) this.pushSettings();
+    // 连接过程中设置变了（例如 Hello 先到，换了编码格式、按显示区域改了分辨率，那时还没有 sid 发不出去）：重发
+    if (!sameQuality(this.effectiveSettings(), sent)) this.pushSettings();
     // 新的会话流默认不发声音，需要重新请求
     this.audioOn = false;
     this.syncAudio();
@@ -356,6 +367,7 @@ export class RemoteSession {
     clearTimeout(this.retryTimer);
     this.input.dispose();
     this.video.reset();
+    clearTimeout(this.viewLimitTimer);
     if (this.sid !== null) void api.disconnect(this.sid).catch(() => {});
     this.sid = null;
     this.state = "closed";
@@ -382,11 +394,13 @@ export class RemoteSession {
         this.currentDisplay = ev.current;
         this.hostCodecs = ev.codecs;
         this.fitCodec();
+        this.updateViewLimit();
         break;
       case "displays":
         this.displays = ev.displays;
         this.currentDisplay = ev.current;
         this.cursorScale = 0;
+        this.updateViewLimit();
         break;
       case "stats":
         this.stats = {
@@ -582,21 +596,58 @@ export class RemoteSession {
   private layout() {
     const host = this.hostEl;
     if (!host) return;
-    const vw = this.canvas.width;
-    const vh = this.canvas.height;
-    let w: number;
-    let h: number;
-    if (this.scaleMode === "native" && this.interactive) {
-      w = vw / devicePixelRatio;
-      h = vh / devicePixelRatio;
-    } else {
-      const s = Math.min(host.clientWidth / vw, host.clientHeight / vh);
-      w = Math.max(1, Math.floor(vw * s));
-      h = Math.max(1, Math.floor(vh * s));
+    const fw = this.canvas.width;
+    const fh = this.canvas.height;
+    const dpr = devicePixelRatio || 1;
+    const r = host.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) this.viewport = { w: Math.floor(r.width * dpr), h: Math.floor(r.height * dpr) };
+    // 画面的显示大小（设备像素），以及是否 1:1
+    let size = { w: fw, h: fh, exact: true };
+    if (!this.nativeScale && this.viewport) size = fitSize(fw, fh, this.viewport.w, this.viewport.h);
+    const style = this.canvas.style;
+    style.width = `${size.w / dpr}px`;
+    style.height = `${size.h / dpr}px`;
+    style.left = style.top = "";
+    if (size.exact && !this.nativeScale) {
+      // 1:1 显示时左上角要落在整数设备像素上：差半个像素浏览器也会插值，文字又糊了
+      const c = this.canvas.getBoundingClientRect();
+      const snap = (v: number) => (Math.round(v * dpr) - v * dpr) / dpr;
+      style.left = `${snap(c.left)}px`;
+      style.top = `${snap(c.top)}px`;
     }
-    this.canvas.style.width = `${w}px`;
-    this.canvas.style.height = `${h}px`;
     this.applyCursor();
+    this.updateViewLimit();
+  }
+
+  /** 原始大小（可滚动）显示 */
+  private get nativeScale() {
+    return this.scaleMode === "native" && this.interactive;
+  }
+
+  /**
+   * 按显示区域重新算向被控端请求的短边上限（见 fit.ts）。原始大小显示时不限。
+   *
+   * 一段时间没变过就马上发；连续变化时（拖动窗口边框、窗口动画）等停下来再发，免得对方一直重建编码器。
+   */
+  private updateViewLimit() {
+    const d = this.displays[this.currentDisplay];
+    let want: number;
+    if (this.nativeScale) want = 0;
+    else if (d && this.viewport) want = viewMaxShort(d.width, d.height, this.viewport.w, this.viewport.h);
+    else return;
+    clearTimeout(this.viewLimitTimer);
+    this.viewLimitTimer = undefined;
+    if (want === this.viewLimit) return;
+    const apply = () => {
+      this.viewLimitTimer = undefined;
+      this.viewLimit = want;
+      this.pushSettings();
+    };
+    const now = performance.now();
+    const quiet = now - this.viewLimitAt >= VIEW_LIMIT_DELAY_MS;
+    this.viewLimitAt = now;
+    if (quiet) apply();
+    else this.viewLimitTimer = window.setTimeout(apply, VIEW_LIMIT_DELAY_MS);
   }
 
   // ───────────────────────── 可见性 / 设置 ─────────────────────────
@@ -683,10 +734,16 @@ export class RemoteSession {
     this.updateSettings({ ...this.settings, codec: bestCodec(decoders, this.hostCodecs) });
   }
 
+  /** 实际发给被控端的画质：分辨率不超过画面的显示区域，不可见时降帧率 */
+  private effectiveSettings(): QualitySettings {
+    const s = { ...this.settings, max_short: stricter(this.settings.max_short, this.viewLimit) };
+    if (!this.visible) s.fps = Math.min(s.fps, BACKGROUND_FPS);
+    return s;
+  }
+
   private pushSettings() {
     if (this.sid === null) return;
-    const s = this.visible ? this.settings : { ...this.settings, fps: Math.min(this.settings.fps, BACKGROUND_FPS) };
-    void api.settings(this.sid, s).catch(() => {});
+    void api.settings(this.sid, this.effectiveSettings()).catch(() => {});
   }
 
   selectDisplay(index: number) {
@@ -731,4 +788,9 @@ export class RemoteSession {
   focus() { this.input.focus(); }
   private releaseAll() { this.input.releaseAll(); }
   private enqueue(events: InputEvent[], urgent: boolean) { this.input.enqueue(events, urgent); }
+}
+
+function sameQuality(a: QualitySettings, b: QualitySettings): boolean {
+  return a.fps === b.fps && a.bitrate_kbps === b.bitrate_kbps && a.max_short === b.max_short
+    && a.adaptive === b.adaptive && a.codec === b.codec;
 }
