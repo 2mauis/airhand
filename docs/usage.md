@@ -10,13 +10,15 @@ Double-click to run (on Windows install it first, see [Windows installation](#wi
 - The **control code** and "Copy control code"
 - Who is controlling this computer right now, and **Disconnect all controllers**
 - **Change control code**: the old code stops working immediately and connected controllers are disconnected
-- Open console and **Start with Windows** (Windows) / Switch to controller (macOS, Linux) / Language / Quit
+- Open console and **Start with Windows** (Windows) / Switch to controller (macOS, Linux) and **Open at login** (macOS) / Language / Quit
 
 After a network drop the host reconnects automatically with exponential backoff and **gets its old control code back**, even after a server restart. The code is **fixed**: it's saved in `config.toml`, and the server keeps it for this computer however long it stays offline (codes unused for 180 days are released), so it stays the same across restarts and upgrades until you change it.
 
 > On Linux the tray icon uses AppIndicator. It works out of the box on Ubuntu, KDE, Xfce and similar; stock GNOME needs the "AppIndicator and KStatusNotifierItem Support" extension. Without an AppIndicator library the program still runs as a host and prints the control code to the log (stderr).
 
 > On macOS the host needs two system permissions: **Screen & System Audio Recording** (to capture the screen and sound) and **Accessibility** (to control the keyboard and mouse). macOS asks on the first start; while one is missing, the menu says so, and clicking that item opens the matching page in System Settings → Privacy & Security. A connected controller is told which permission is missing too (in the controller's own language), and the message goes away once it is granted. After granting Screen & System Audio Recording, reopen Airhand. Airhand normally lives in the menu bar only and shows up in the Dock while the console is open.
+
+> **Open at login** on macOS (switched in the menu bar icon's menu): after you log in, Airhand starts in the menu bar by itself, so the Mac can still be controlled after a restart (on macOS programs can only run after login, and the login window can't be captured anyway; with automatic login it amounts to starting at boot). It is the same entry as "Open at Login" in System Settings → General → Login Items ("Login Items & Extensions" on some versions of macOS), so turning it off there works too and the menu follows. **It's turned on the first time Airhand runs from the Applications folder** (macOS shows a "Login Item Added" notification), and only that once: if you turn it off, it stays off and Airhand never turns it back on by itself. Only an Airhand in the Applications folder (`/Applications` or `~/Applications`) can turn it on: when it's opened straight from Downloads or a disk image, macOS runs it from a temporary location that won't be there next time, so the menu asks you to move it to the Applications folder first.
 
 ## Windows installation
 
@@ -42,12 +44,12 @@ Everything Airhand saves is in one `config.toml` (with comments). The menu in th
 |---|---|
 | `server` | Relay server `host:port`; without it, the address built into the program |
 | `server_fp` | Relay certificate fingerprint; `""` turns verification off (development only); without it, the built-in fingerprint |
-| `autostart` | Start with Windows (Windows only, also in the tray menu) |
+| `autostart` | Windows: start with Windows (also in the tray menu). macOS: a record of Open at login; System Settings is what counts, so editing only this line has no effect. Without it, Open at login hasn't been turned on by default yet (see above) |
 | `[code]` | This computer's control code, and the secret that gets it back. Delete `code` and `secret` to get a new code |
 | `[[device]]` | The console's **My devices**: computers you've connected to (control code, their name, the name you gave them, last quality settings, last connected). Saved automatically on connect, up to 50. To add one by hand, write the 6 digits as `code` |
 
 - Restart Airhand after changing settings (Quit, then open it again). Airhand keeps your edits and comments when it saves the code or devices
-- **Deleted by accident** (the file or the whole directory): it's recreated with the default settings at startup, and within a few seconds while running. This computer's control code, the autostart setting and My devices carry over from before the deletion, so nothing is lost; other settings go back to their defaults
+- **Deleted by accident** (the file or the whole directory): it's recreated with the default settings at startup, and within a few seconds while running. This computer's control code, the autostart setting (on macOS, the record of Open at login) and My devices carry over from before the deletion, so nothing is lost; other settings go back to their defaults
 - A control code is enough to control its computer, so treat it like a key. On macOS / Linux only your account can read and write the file (mode 600, directory 700). On Windows the file is in the install directory, readable by every account on the computer: this computer's secret is encrypted with DPAPI for the SYSTEM account, and the codes in My devices with the Windows account that saved them, so other accounts and other computers can't read them (each account on the same computer only sees its own devices)
 - Windows removes it when uninstalling; on macOS / Linux it stays after the program is removed (as is customary there), so delete the directory above if you don't need it anymore
 

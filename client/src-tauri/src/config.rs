@@ -10,7 +10,8 @@
 //!
 //! * **配置文件 `config.toml`**（见 [`Settings`]）：可以手动改服务器地址和指纹；还保存着服务器分配的控制码
 //!   （固定不变，见 `airhand_proto::signal` 的"固定控制码"）、控制台的"我的设备"（见 [`crate::devices`]），
-//!   Windows 上还有开机自动启动。所有数据都只在这一个文件里。位置（见 [`path`]）：
+//!   Windows 上还有开机自动启动（macOS 上是登录时自动启动的记录，见 [`autostart_default_pending`]）。
+//!   所有数据都只在这一个文件里。位置（见 [`path`]）：
 //!   * Windows：程序所在目录（安装目录）。文件由系统服务里的被控端维护（见 [`crate::winsvc`]），
 //!     托盘进程没有写权限，控制台保存设备时经命名管道交给它写；
 //!   * macOS：`~/Library/Application Support/app.airhand.client/`；Linux：`~/.config/airhand/`。只有本账户能读写（600）。
@@ -88,7 +89,7 @@ pub struct Settings {
     pub server: String,
     /// 中转服务器证书指纹（`server_fp`），空字符串表示不校验
     pub server_fp: String,
-    /// 开机自动启动（`autostart`，Windows 安装版）
+    /// 开机自动启动（`autostart`，Windows 安装版）。macOS 上以系统设置为准，这一项只是记录（见 [`autostart_default_pending`]）
     pub autostart: bool,
     /// 服务器分配的控制码和加密过的密钥（`[code]`），用 [`Settings::code`] 解开
     saved_code: Option<(i64, String)>,
@@ -389,12 +390,11 @@ fn regenerate(before: Option<&str>) -> Result<DocumentMut> {
     let Some(old) = before.and_then(|t| t.parse::<DocumentMut>().ok()) else {
         return Ok(doc);
     };
-    // 只有 Windows 的模板里有
-    if let (Some(on), Some(item)) = (
-        old.get("autostart").and_then(Item::as_bool),
-        doc.get_mut("autostart"),
-    ) {
-        *item = toml_edit::value(on);
+    // Windows 的模板里有；macOS 的模板里没有，之前有的话（已经按默认打开过登录时自动启动）照样加上
+    if let Some(on) = old.get("autostart").and_then(Item::as_bool)
+        && (doc.contains_key("autostart") || cfg!(target_os = "macos"))
+    {
+        put_autostart(&mut doc, on);
     }
     if let (Some(from), Some(to)) = (
         old.get("code").and_then(Item::as_table_like),
@@ -560,13 +560,69 @@ pub fn save_code(code: Option<Reclaim>) -> Result<()> {
     })
 }
 
-/// 保存开机自动启动的设置
-#[cfg_attr(not(windows), allow(dead_code))]
+/// 保存开机自动启动的设置（macOS：登录时自动启动的记录）
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn save_autostart(on: bool) -> Result<()> {
     edit(|doc| {
-        doc["autostart"] = toml_edit::value(on);
+        put_autostart(doc, on);
         Ok(())
     })
+}
+
+/// macOS：还没有按默认打开过登录时自动启动（配置文件里还没有 `autostart`）。
+///
+/// macOS 的模板里没有这一项：第一次从"应用程序"文件夹运行时，Airhand 和 Windows 一样默认打开登录时自动启动，
+/// 然后记下 `autostart`，之后再也不会自己打开——用户关掉了就一直关着（见 [`crate::login_item`]）。
+/// 配置文件不存在、写坏了时返回 `false`：判断不了，宁可不打开
+#[cfg(target_os = "macos")]
+pub fn autostart_default_pending() -> bool {
+    read_text()
+        .and_then(|t| t.parse::<DocumentMut>().ok())
+        .is_some_and(|doc| !doc.contains_key("autostart"))
+}
+
+/// 写入 `autostart`。已经有了就只改值；没有（macOS 的模板里没有）时加上一段说明，放在文件开头的说明后面
+/// （直接插入的话 toml_edit 会把它排在整个文件的第一行，开头的说明前面）
+fn put_autostart(doc: &mut DocumentMut, on: bool) {
+    if let Some(item) = doc.get_mut("autostart") {
+        *item = toml_edit::value(on);
+        return;
+    }
+    let note = autostart_note();
+    // 文件开头的说明属于排在最前面的那一项：已经有别的值（例如用户写了 server）时是那个值，
+    // 否则是第一个表（模板里的 [code]），这时在最后一个空行处分开，前半段（开头的说明）移到 autostart 前面
+    let has_values = doc.iter().any(|(_, item)| item.is_value());
+    let mut prefix = format!("\n{note}");
+    if !has_values
+        && let Some((_, item)) = doc.iter_mut().find(|(_, item)| item.is_table())
+        && let Some(table) = item.as_table_mut()
+    {
+        let old = table
+            .decor()
+            .prefix()
+            .and_then(|p| p.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let (head, tail) = old
+            .rfind("\n\n")
+            .map_or((old.as_str(), ""), |i| old.split_at(i + 1));
+        prefix = format!("{head}\n{note}");
+        table
+            .decor_mut()
+            .set_prefix(format!("\n{}", tail.trim_start_matches('\n')));
+    }
+    doc.insert("autostart", toml_edit::value(on));
+    if let Some(mut key) = doc.as_table_mut().key_mut("autostart") {
+        key.leaf_decor_mut().set_prefix(prefix);
+    }
+}
+
+/// macOS 上 `autostart` 前面的说明
+fn autostart_note() -> String {
+    tr!(
+        "# 登录时自动启动（\"系统设置 → 通用 → 登录项\"里的\"登录时打开\"）。第一次从\"应用程序\"文件夹运行时默认打开。\n# 以系统设置为准：在菜单栏图标的菜单里切换、或者在系统设置里改，这里都会跟着更新；只改这一项不起作用\n",
+        "# Open at login (\"Open at Login\" in System Settings → General → Login Items). Turned on the first time Airhand runs from the Applications folder.\n# System Settings is what counts: switch it in the menu bar icon's menu or in System Settings and this line follows; editing only this line has no effect\n"
+    )
 }
 
 /// 保存控制台的"我的设备"：整个列表换成 `list`（[`crate::devices::for_file`] 整理过的，`code` 已经加密）
@@ -837,8 +893,8 @@ mod tests {
         let s = parse(&after).unwrap();
         assert_eq!(s.server, DEFAULT_SERVER);
         assert_eq!(s.code(), Some(code));
-        // 开机自动启动只有 Windows 有
-        assert_eq!(s.autostart, cfg!(not(windows)));
+        // 开机自动启动（Windows）、登录时自动启动的记录（macOS）接着用；Linux 没有这一项，是默认值
+        assert_eq!(s.autostart, cfg!(target_os = "linux"));
         assert_eq!(
             crate::devices::entries(&after.parse().unwrap()),
             vec![device("482913")]
@@ -861,6 +917,66 @@ mod tests {
         // 不知道之前的内容（或者之前的内容坏了）：就是默认配置
         assert_eq!(regenerate(None).unwrap().to_string(), template());
         assert_eq!(regenerate(Some("[code")).unwrap().to_string(), template());
+    }
+
+    /// macOS / Linux 的模板里没有 autostart（macOS 上有没有它表示是否已经按默认打开过登录时自动启动）。
+    /// 加上时带一段说明，排在文件开头的说明后面、[code] 的说明前面；之后只改值
+    #[test]
+    #[cfg(not(windows))]
+    fn autostart_goes_after_the_header() {
+        let tpl = template();
+        let mut doc: DocumentMut = tpl.parse().unwrap();
+        assert!(!doc.contains_key("autostart"));
+        put_autostart(&mut doc, true);
+        let text = doc.to_string();
+        println!("{text}");
+        let note = autostart_note();
+        let note = note.lines().next().unwrap();
+        let first_line = tpl.lines().next().unwrap();
+        let fp_line = tpl.lines().find(|l| l.starts_with("# server_fp")).unwrap();
+        let code_note = tpl
+            .lines()
+            .rev()
+            .skip_while(|l| !l.starts_with("[code]"))
+            .skip(1)
+            .take_while(|l| l.starts_with('#'))
+            .last()
+            .unwrap();
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("missing {s:?}"));
+        assert!(text.starts_with(first_line), "开头的说明不在第一行了");
+        assert!(at(fp_line) < at(note));
+        assert!(at(note) < at("autostart = true"));
+        assert!(at("autostart = true") < at(code_note));
+        assert!(at(code_note) < at("[code]"));
+        // 空行隔开，不和前后的说明挤在一起
+        assert!(text.contains(&format!("\n\n{note}")));
+        assert!(text.contains(&format!("autostart = true\n\n{code_note}")));
+        // 模板里原有的说明一行都不少
+        for line in tpl.lines().filter(|l| !l.is_empty()) {
+            assert!(text.contains(line), "少了 {line:?}");
+        }
+        assert!(parse(&text).unwrap().autostart);
+
+        // 再改只改值，说明只有一份
+        put_autostart(&mut doc, false);
+        let text = doc.to_string();
+        assert_eq!(text.matches(note).count(), 1);
+        assert!(!parse(&text).unwrap().autostart);
+
+        // 用户自己写了 server：加在它后面，开头的说明不动
+        let mine = tpl.replacen(
+            "# server = \"relay.example.com:4433\"",
+            "server = \"relay.example.com:4433\"",
+            1,
+        );
+        let mut doc: DocumentMut = mine.parse().unwrap();
+        put_autostart(&mut doc, true);
+        let text = doc.to_string();
+        assert!(text.starts_with(first_line));
+        assert!(text.find("server = ").unwrap() < text.find("autostart = true").unwrap());
+        let s = parse(&text).unwrap();
+        assert!(s.autostart);
+        assert_eq!(s.server, "relay.example.com:4433");
     }
 
     /// 真正的文件：

@@ -26,6 +26,10 @@ pub struct AppStatus {
     pub controller: ServerState,
     /// Windows 安装版：被控端运行在系统服务里（见 [`crate::winsvc`]）；被控端在本进程里运行时为 `None`
     pub service: Option<ServiceStatus>,
+    /// macOS：登录时自动启动（见 [`crate::login_item`]）。不是从 App 运行（开发时直接运行可执行文件）、
+    /// 或者还没查到时为 `None`
+    #[cfg(target_os = "macos")]
+    pub(crate) login_item: Option<crate::login_item::State>,
 }
 
 impl Default for AppStatus {
@@ -35,6 +39,8 @@ impl Default for AppStatus {
             host: HostStatus::default(),
             controller: ServerState::Connecting,
             service: None,
+            #[cfg(target_os = "macos")]
+            login_item: None,
         }
     }
 }

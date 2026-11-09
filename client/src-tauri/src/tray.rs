@@ -1,4 +1,5 @@
-//! 系统托盘：图标 + 右键菜单（模式、服务器状态、控制码、切换模式、开机自动启动、语言、退出）。
+//! 系统托盘：图标 + 右键菜单（模式、服务器状态、控制码、切换模式、开机自动启动 / macOS 的登录时自动启动、
+//! 语言、退出）。
 
 use std::sync::OnceLock;
 
@@ -152,6 +153,10 @@ fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
                     )?)?;
                 }
             }
+            #[cfg(target_os = "macos")]
+            if let Some(s) = st.login_item {
+                menu.append(&login_item_entry(app, s)?)?;
+            }
         }
     }
     menu.append(&language_menu(app)?)?;
@@ -204,6 +209,35 @@ fn service_items(
         None::<&str>,
     )?)?;
     Ok(())
+}
+
+/// macOS：登录时自动启动（见 [`crate::login_item`]）。不在"应用程序"文件夹里时不能点，说明怎么做；
+/// 要在系统设置里允许时，点一下打开系统设置
+#[cfg(target_os = "macos")]
+fn login_item_entry(
+    app: &AppHandle,
+    s: crate::login_item::State,
+) -> tauri::Result<CheckMenuItem<Wry>> {
+    use crate::login_item::State;
+    let text = match s {
+        State::NotInstalled => tr!(
+            "登录时自动启动（先把 Airhand 拖进“应用程序”文件夹）",
+            "Open at login (move Airhand to the Applications folder first)"
+        ),
+        State::NeedsApproval => tr!(
+            "登录时自动启动（要在系统设置里允许，点击打开）",
+            "Open at login (allow it in System Settings, click to open)"
+        ),
+        State::On | State::Off => tr!("登录时自动启动", "Open at login"),
+    };
+    CheckMenuItem::with_id(
+        app,
+        "autostart",
+        text,
+        s != State::NotInstalled,
+        s == State::On,
+        None::<&str>,
+    )
 }
 
 /// 被控端：服务器状态、控制码、正在控制本机的控制端

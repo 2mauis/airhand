@@ -4,6 +4,7 @@
 //! * 托盘菜单可切换为**控制端**：打开现代化控制台，可同时控制多台电脑；
 //! * Windows 需要安装：被控端作为系统服务运行（见 `winsvc`），托盘只负责显示和操作；
 //!   调试构建直接运行时被控端在本进程里运行。macOS / Linux 的被控端一直在本进程里运行；
+//! * macOS 的登录时自动启动是系统的登录项（见 [`login_item`]），第一次从"应用程序"文件夹运行时默认打开；
 //! * 配置和数据只有一个 `config.toml`（见 [`config`]）：服务器设置、本机的控制码、控制台的"我的设备"
 //!   （见 [`devices`]）。Windows 在安装目录，macOS 在 `~/Library/Application Support/app.airhand.client/`，
 //!   Linux 在 `~/.config/airhand/`；被删掉了会自动重新生成。其余运行时产生的文件退出时删除（见 [`ephemeral`]）；
@@ -20,6 +21,8 @@ mod e2e;
 mod ephemeral;
 mod fullscreen;
 pub mod host;
+#[cfg(target_os = "macos")]
+mod login_item;
 mod single_instance;
 pub mod status;
 mod sysinfo;
@@ -285,6 +288,26 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
                     warn!("can't start the Airhand service: {e:#}");
                 }
             });
+        }
+        #[cfg(target_os = "macos")]
+        "autostart" => {
+            let hub = app.state::<AppState>().hub.clone();
+            // 等用户允许的也算"打开"：再点一下是去系统设置里允许（菜单里就是这么写的）
+            let on = hub.borrow().login_item != Some(login_item::State::On);
+            // 会经 XPC 问系统，不在主线程上等
+            std::thread::spawn(move || match login_item::set(on, true) {
+                Ok(s) => {
+                    info!(state = ?s, "open at login changed");
+                    record_login_item(s);
+                    hub.send_modify(|st| st.login_item = Some(s));
+                }
+                Err(e) => {
+                    warn!("{e}");
+                    hub.send_modify(|_| {});
+                }
+            });
+            // 勾选项被点击时系统会自动翻转勾选状态：先按原来的状态重建菜单，切换完了再刷新
+            app.state::<AppState>().hub.send_modify(|_| {});
         }
         #[cfg(target_os = "macos")]
         "perm_screen" => {
@@ -612,6 +635,7 @@ pub fn run() {
                     host::macos::request_permissions();
                 }
                 watch_permissions(hub.clone());
+                login_item_startup(hub.clone());
             }
 
             // 状态（或界面语言）变化 → 刷新托盘 / 通知控制台
@@ -708,7 +732,8 @@ fn start_service_link(_app: &AppHandle, _hub: &StatusHub) -> Hosting {
     unreachable!("the host only runs as a service on Windows")
 }
 
-/// macOS：用户在系统设置里授予 / 收回权限时刷新托盘菜单（菜单里有未授权的提示）。
+/// macOS：用户在系统设置里授予 / 收回权限、打开 / 关掉登录时自动启动时刷新托盘菜单
+/// （菜单里有未授权的提示、登录时自动启动的勾选）。
 #[cfg(target_os = "macos")]
 fn watch_permissions(hub: StatusHub) {
     tauri::async_runtime::spawn(async move {
@@ -725,8 +750,63 @@ fn watch_permissions(hub: StatusHub) {
                 last = now;
                 hub.send_modify(|_| {});
             }
+            // 问系统要几毫秒到几十毫秒（XPC），不占用异步运行时的线程
+            let Ok(item) = tokio::task::spawn_blocking(login_item::state).await else {
+                continue;
+            };
+            let before = hub.borrow().login_item;
+            // 还没查过（启动时由 login_item_startup 查）或者没变：不动
+            if before.is_none() || item == before {
+                continue;
+            }
+            info!(state = ?item, "open at login changed in System Settings");
+            if let Some(s) = item {
+                record_login_item(s);
+            }
+            hub.send_modify(|st| st.login_item = item);
         }
     });
+}
+
+/// macOS：启动时查一下登录时自动启动的状态。第一次从"应用程序"文件夹运行时（config.toml 里还没有 `autostart`）
+/// 和 Windows 一样默认打开，只做这一次：之后用户在菜单或者系统设置里关掉了就一直关着（见 [`login_item`]）。
+#[cfg(target_os = "macos")]
+fn login_item_startup(hub: StatusHub) {
+    use login_item::State;
+    std::thread::spawn(move || {
+        let mut state = login_item::state();
+        if config::autostart_default_pending() {
+            match state {
+                Some(State::Off) => match login_item::set(true, false) {
+                    Ok(s) => {
+                        info!(state = ?s, "open at login: on by default (first run from the Applications folder)");
+                        record_login_item(s);
+                        state = Some(s);
+                    }
+                    // 没记下来：下次启动再试
+                    Err(e) => warn!("{e}"),
+                },
+                // 已经登记过（例如删掉重装）：照现在的记下来，不改
+                Some(s @ (State::On | State::NeedsApproval)) => record_login_item(s),
+                // 不是 App、还不在"应用程序"文件夹里：放进去之后第一次运行时再做
+                Some(State::NotInstalled) | None => {}
+            }
+        }
+        hub.send_modify(|st| st.login_item = state);
+    });
+}
+
+/// macOS：把登录时自动启动的状态记进 config.toml（只是记录，以系统设置为准）
+#[cfg(target_os = "macos")]
+fn record_login_item(s: login_item::State) {
+    let on = match s {
+        login_item::State::On => true,
+        login_item::State::Off | login_item::State::NeedsApproval => false,
+        login_item::State::NotInstalled => return,
+    };
+    if let Err(e) = config::save_autostart(on) {
+        warn!("can't save the open at login setting: {e:#}");
+    }
 }
 
 fn init_logging() {

@@ -128,6 +128,10 @@ objc2-screen-capture-kit = { version = "0.3", default-features = false, features
   "std", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-foundation",
   "objc2-core-graphics", "objc2-core-media",
 ] }
+# 登录时自动启动（SMAppService，见 src/login_item.rs）
+objc2-service-management = { version = "0.3", default-features = false, features = [
+  "std", "SMAppService", "objc2", "objc2-foundation",
+] }
 objc2-video-toolbox = { version = "0.3", default-features = false, features = [
   "std", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession",
   "VTVideoEncoderList", "objc2-core-media", "objc2-core-video",
