@@ -69,4 +69,12 @@ check('spec：新增 Rust 内联测试算触及测试', addedInlineRustTests('++
 check('spec：非 .rs 文件里的 #[test] 字样、普通代码行不算', addedInlineRustTests('+++ b/docs/specs/a.md\n+#[test]\n') === false && addedInlineRustTests('+++ b/crates/x/src/a.rs\n+fn test_like() {}\n') === false);
 check('spec：TEMPLATE.md / README.md 豁免；删除 spec 不触发；子目录评审记录不是 spec', checkSpecTests(['docs/specs/TEMPLATE.md']) && checkSpecTests(['docs/specs/README.md']) && checkSpecTests(['docs/specs/a.md'], []) && checkSpecTests(['docs/specs/review/a.md']));
 check('privacy：跳过 node_modules / .wrangler / package-lock.json 与图片，不误跳相似文件名', shouldSkip('node_modules/a.js') && shouldSkip('x/.wrangler/s.json') && shouldSkip('package-lock.json') && shouldSkip('shots/a.PNG') && !shouldSkip('docs/node_modules-notes.md') && !shouldSkip('src/package-lock.json.md') && !shouldSkip('src/worker.js'));
+// go.sum 窄例外：夹具用字符串拼接，避免本测试文件自身被 privacy-scan 命中
+const GS = 'github.com/example/mod v0.1.0/go.mod h1:Jo8rI7m0NieZyLI5e2CDlRd' + 'RqRRB4S7Xp77ukDjH+Fw=';
+const GS2 = 'github.com/example/mod v0.1.0 h1:Jo8rI7m0NieZyLI5e2CDlRd' + 'RqRRB4S7Xp77ukDjH+Fw=';
+const gsHit = (t, file) => scanText(t, file).map((h) => h.split(' ')[1]);
+check('privacy：go.sum 校验和行（含 /go.mod 与普通两种）不命中 cloudflare-token-like', gsHit(GS, 'go.sum').length === 0 && gsHit(GS2, 'spike/p2p/helper/go.sum').length === 0 && gsHit(GS + '\r', 'a/go.sum').length === 0);
+check('privacy：同样内容在非 go.sum 文件仍命中', gsHit(GS, 'notes.md').includes('cloudflare-token-like') && gsHit(GS, 'go.sum.txt').includes('cloudflare-token-like') && gsHit(GS, 'mygo.sum').includes('cloudflare-token-like') && gsHit(GS, 'x').includes('cloudflare-token-like'));
+check('privacy：go.sum 里非校验和形状的行仍命中', gsHit('token ' + 'Jo8rI7m0NieZyLI5e2CDlRd' + 'RqRRB4S7Xp77ukDjH', 'go.sum').includes('cloudflare-token-like') && gsHit(GS + ' extra', 'go.sum').includes('cloudflare-token-like') && gsHit('Jo8rI7m0NieZyLI5e2CDlRd' + 'RqRRB4S7Xp77ukDjH+Fw=', 'go.sum').includes('cloudflare-token-like'));
+check('privacy：go.sum 里的其他规则（邮箱、IPv4、GitHub token）仍命中', gsHit('a.b@' + 'gmail.com', 'go.sum').includes('email') && gsHit('8.8.' + '4.4', 'go.sum').includes('ipv4') && gsHit('ghp_' + 'a1B2'.repeat(9), 'go.sum').includes('github-token'));
 const f = R.filter((x) => !x).length; console.log(`结果：${R.length - f}/${R.length} 通过`); process.exit(f ? 1 : 0);

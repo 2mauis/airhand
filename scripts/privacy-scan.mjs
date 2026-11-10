@@ -36,11 +36,17 @@ export function shouldSkip(file) {
   return parts.slice(0, -1).some((p) => SKIP_DIRS.has(p)) || parts[parts.length - 1] === 'package-lock.json' || BINARY_EXT.test(file);
 }
 
+// 窄例外：只对文件名为 go.sum 的路径、且整行是 Go 模块校验和形状（`<module> <version>[/go.mod] h1:<base64>=`）的行，
+// 豁免 cloudflare-token-like 这一条规则（模块哈希恰好含 40 位字母数字串会误报）；其他规则、其他文件、其他形状的行不放宽。
+const GOSUM_LINE = /^\S+ v[^\s/]+(?:\/go\.mod)? h1:[A-Za-z0-9+/]{43}=$/;
+export const isGoSumChecksumLine = (where, line) => String(where).split('/').pop() === 'go.sum' && GOSUM_LINE.test(line.replace(/\r$/, ''));
+
 export function scanText(text, where) {
   const hits = [];
   text.split('\n').forEach((line, i) => {
     if (/privacy-scan:\s*allow/.test(line)) return; // 显式豁免（需在 PR 中说明理由） // nosemgrep: ajinabraham.njsscan.dos.regex_dos.regex_dos -- 固定字面量正则，无嵌套量词
-    for (const r of RULES) for (const m of line.matchAll(r.re)) if (!r.ok(m[0])) hits.push(`${where}:${i + 1} ${r.id}`);
+    const goSumLine = isGoSumChecksumLine(where, line);
+    for (const r of RULES) { if (goSumLine && r.id === 'cloudflare-token-like') continue; for (const m of line.matchAll(r.re)) if (!r.ok(m[0])) hits.push(`${where}:${i + 1} ${r.id}`); }
     for (const w of words) if (line.toLowerCase().includes(w.toLowerCase())) hits.push(`${where}:${i + 1} wordlist`);
   });
   return hits;
