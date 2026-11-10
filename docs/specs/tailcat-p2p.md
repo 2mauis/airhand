@@ -1,6 +1,6 @@
 # tailcat 临时点对点直连（Direct P2P transport）
 
-> 状态：**规格 r5（2026-11-10 项目负责人对开放问题 11–14 的决定后修订：改写 never 模式下的同意与 IP 暴露不变量；补直连码率上限策略；第 5 轮复审见评审记录），未实现**。本文件只描述设计；不含功能代码。本版**仍未含 Phase 0 实测数据**（超时 / 阈值 / 候选通道 / Windows 结论 / 码率上限 C 的确定值待 spike）；spike 完成后出 r6 再复审、再批准 (B)。评审记录见 [`tailcat-p2p-review.md`](tailcat-p2p-review.md)（各轮报告全文在 [`review/`](review/)）。
+> 状态：**规格 r6 / r6.1（2026-11-10 项目负责人 14:30 Asia/Taipei 决定：写入 Phase 0 五项前提、码率上限 C、I3 窗口包数上限，以及 never 模式隐私风险；真机测试列为批准 (B) 的前提。r6.1 闭合第 6 轮 S1，并落实针对性复审提出的 S2），未实现**。本文件只描述设计；不含功能代码。Phase 0 数据来自云 VM 报告（`spike/tailcat-p2p-phase0` 分支 `docs/specs/tailcat-p2p-phase0-report.md`，PR #3 head `065c6f7`，保持 Draft，spike 代码不进入 Phase 1），**不是**参考硬件，批准 (B) 前须用项目负责人指定的真机复核。评审记录见 [`tailcat-p2p-review.md`](tailcat-p2p-review.md)（各轮报告全文在 [`review/`](review/)）。
 > 基线：上游 `sqlpxc/airhand` `main` @ `a317551`（协议版本 v9，工作区版本 0.2.2，MIT）。
 > 集成对象：`https://github.com/tailscale/tailcat`，**固定到 tag `v0.7.0`（commit `15ab9e6`；`546a07d` 是该附注 tag 对象的哈希，不是 commit）**，`go.mod` 要求 Go 1.27.1，BSD-3-Clause。`main`（调研时 `e00cdde`）上的未发布改动（`AllowClient` 钩子、`perf`、`libtailcat`）**不作为依赖**。
 
@@ -20,7 +20,7 @@
 
 ### 已核实的 tailcat 事实
 
-核对范围：下表凡未标注者均已对 `v0.7.0` 源码核对（`Server.AllowedClients` / `AddAllowedClient`、`ServedTCPPorts` / `ServedUDPPorts`、`MaxUDPPayload = 1232`、`Client.DiscoPing`、`Server.Status`、`Client.PublicKey`）；标注 `main` 的条目不属于 `v0.7.0`，不得依赖；**未证实（v0.7.0）**：`Client.Ping` 内部超时、超 1232 字节写入的库内行为、magicsock 何时开始经 DERP 双发。
+核对范围：下表凡未标注者均已对 `v0.7.0` 源码核对（`Server.AllowedClients` / `AddAllowedClient`、`ServedTCPPorts` / `ServedUDPPorts`、`MaxUDPPayload = 1232`、`Client.DiscoPing`、`Server.Status`、`Client.PublicKey`）；标注 `main` 的条目不属于 `v0.7.0`，不得依赖。Phase 0 已实测：`Client.Ping` 对未授权客户端内部超时 10 s（路径判定必须用 `DiscoPing`）；超 1232 字节写入被静默丢弃；直连稳定期间自建 DERP 上数据包与 disco 包均为 0，只看 `CurAddr` 的闸门在静默断路后窗口内会有 0–10 个数据包经 DERP。
 
 | 项目 | 结论 |
 |---|---|
@@ -33,7 +33,7 @@
 | 安全属性 | 默认地址是**不记名凭据**（含 PSK）；`v0.7.0` 用 `Server.AllowedClients`（`Start` 之前给定的公钥列表，对应 CLI `--allow`）限制可连接的客户端节点公钥；另有运行时的 `AddAllowedClient`；**列表为空时放行所有客户端**，`AddAllowedClient` 在加入第一个公钥之前同样放行所有人（所以本设计在 `Start` 时即给定非空列表，并在公钥无效 / 为空时拒绝 Start）；`AllowClient` 钩子仅在 `main`。威胁模型文档明确“早期实验性、原本面向同一人的两端”，对互不信任双方的使用仍在加固，历史上出过经 DERP 可触发的崩溃 |
 | 包过滤默认值 | `Server.ServedTCPPorts == nil` 时对本机地址放行**全部 TCP 端口**（再由 `OnTCP == nil` 回 RST）；`ServedUDPPorts == nil` 时全部 UDP 端口交给 `OnUDP` 判断。**必须显式设置为空非 nil 的 TCP 范围与单端口 UDP 范围**（见“安全模型”） |
 | 不可禁止 DERP 承载数据 | `Server` / `Client` 没有“禁止 DERP 数据面”的选项；magicsock 路径退化时自动改走 DERP 且不通知调用方 |
-| UDP | 库提供 `OnUDP` / `DialUDPPort`（`ConnPacketConn`），**单包载荷上限 `MaxUDPPayload = 1232` 字节**（README：超过“不保证送达”，库内是丢弃 / 报错 / 分片**未证实**，Phase 0 实测）；**CLI 的 `serve` / `forward` 只转发 TCP**（UDP 只在 `exit-node`、socks UDP ASSOCIATE、`main` 上未发布的 `perf` 里出现） |
+| UDP | 库提供 `OnUDP` / `DialUDPPort`（`ConnPacketConn`），**单包载荷上限 `MaxUDPPayload = 1232` 字节**（README：超过“不保证送达”；Phase 0 实测：写 1233–60000 字节返回 nil，数据报被静默丢弃，1200 与 1232 能送达）；**CLI 的 `serve` / `forward` 只转发 TCP**（UDP 只在 `exit-node`、socks UDP ASSOCIATE、`main` 上未发布的 `perf` 里出现） |
 | 稳定性 | README 明确：Go API、CLI 参数、线格式**都可能变化**，无稳定性承诺。`main` 上还有 `cmd/libtailcat`（C ABI，支持 UDP / 禁用路径探测 / 固定允许列表，**不在 `v0.7.0`**），见下“方案 C′” |
 
 ### 集成形态（本规格的设计选择，待评审确认）
@@ -63,9 +63,12 @@ airhand 的传输是 QUIC（UDP）。只用 tailcat CLI 只能得到 TCP 转发�
 2. 双方在 `Hello` 里声明是否启用直连能力。仅当**双方都启用**、**且已取得直连同意**（见 I12：`approve = "ask"` 时由被控端用户在确认窗授予“直连”；`approve = "never"` 且 `[direct] enabled` 时由运营者显式配置视为同意）才进入升级流程；否则与未启用时完全一致。**取得直连同意之前不交换任何地址、不启动 helper、不联系 tailcat / DERP。**
 3. **公钥先行**（`v0.7.0` 的 `AllowedClients` 为空时**放行所有客户端**，`AddAllowedClient` 在加入第一个公钥之前同样如此，所以必须在 `Start` 时就给定非空列表）：控制端先创建自己的 helper dial 实例（本 `epoch` 新的客户端密钥），用 `Client.PublicKey()`（拨号前即可取得）取得客户端节点公钥，经控制流发 `ControllerMsg::DirectRequest { epoch, client_key }`。`client_key` 为空或无法解析时，Rust 侧与 helper 都**拒绝 Start**（I14）。
 4. 被控端只在**已取得直连同意且 `HostHello` 已发出之后**才处理 `DirectRequest`（此前收到的一律丢弃，未取得直连同意的回 `DirectDecline`，I12 / I16）。桌面被控端默认 `approve = "ask"`，每个新会话都要确认（此前桌面被控端不请求同意）；`approve = "never"` 的路径见 I21。被控端为该 `epoch` 在 helper 进程内**新建**一个 tailcat `Server`（新的密钥与 PSK，`AllowedClients = [client_key]`），并生成一次性令牌与该会话的临时自签证书；经控制流回 `HostMsg::DirectOffer { epoch, kind, body, quic_fp, token, ttl }`。
-5. 控制端 helper 以 offer 中的地址拨号，并按 §2 的规则检测路径；**仅当路径为 `direct`** 才继续。超时（默认值由 Phase 0 实测后确定，不小于 12 秒，需覆盖 DERP 图拉取与引导）或只有 DERP 则放弃，会话继续走中转，不报错。
-6. 控制端经 helper 的数据报通道用 quinn 连接被控端的**直连 QUIC 监听**，出示一次性令牌并校验 `quic_fp`；被控端校验令牌 / 会话 / `epoch` / 有效期通过后，等待控制端在**直连连接**上开三条流（`SessionHeader` 与中转上相同）。
-7. **提交（commit）由被控端裁决，顺序固定**：三条直连流就绪后，被控端 **先在中转控制流上发 `DirectSwitch { epoch }`（被控端→控制端方向的栅栏）**，**再**把 `DirectCommit { epoch }` 作为**直连控制流的第一条消息**发出。被控端若在自身超时前没有收到完整的三条流，则放弃该 `epoch`（迟到的 `DirectRequest` / 连接一律忽略，I13）。**控制端打开三条流后设 T（默认 2 秒，Phase 0 校准）超时，以“读到 `DirectCommit`（不论它是否因栅栏而暂存在缓存里）”为准：收不到就经中转发 `DirectFallback { epoch }`**；被控端对已提交的 `epoch` 也必须接受它。
+5. 控制端 helper 以 offer 中的地址拨号，并按 §2 的规则检测路径；**仅当路径为 `direct`** 才继续。超时（`upgrade_timeout_secs` 默认 15，下限 12，需覆盖 DERP 图拉取与引导）或只有 DERP 则放弃，会话继续走中转，不报错。
+6. **先保证控制端首个直连 QUIC 包不会因被控端闸门未开而丢失**（I24）。Phase 0 实测被控端判定 direct 比控制端晚约 93–111 ms，若控制端在被控端闸门仍关闭时发出 QUIC Initial 且该包被丢弃，只能等约 1 s 的 PTO 重传，升级耗时分成约 0.44 s 与约 1.40 s 两档。本规格采用以下两种方案之一（不得只靠调小 `initial_rtt` / PTO 来掩盖首包被丢）：
+   - **方案 (a)（首选）**：被控端闸门打开后经中转发 `HostMsg::DirectGateOpen { epoch }`（`epoch` 须为当前升级；迟到或 `epoch` 不匹配的提示按 I13 忽略）。控制端在本端闸门已打开**且**收到该提示之前，不得发出首个直连 QUIC 包。等不到（时限计入 `upgrade_timeout_secs`）则放弃本次升级、保持中转。
+   - **方案 (b)（等效，不是 Phase 1 的默认实现）**：被控端 helper 在闸门关闭时短时缓存入站方向的数据包（而不是丢弃），使控制端可以在被控端闸门打开之前发出首包且该包不被丢失。缓存须有界限：最多 32 个数据包或 64 KiB（以先到者为准），最长存活 `min(rx_silence_ms, max(250 ms, 4 × 路径判定时差上界))`（时差上界默认 150 ms，故默认最长 600 ms，且不得超过静默阈值），只接受已在 `AllowedClients` 中的对端，本 `epoch` 结束或闸门打开并交付后立即清空。方案 (b) 下，入站静默的“首个入站”以**开闸并交付缓存**的时刻起算，不以缓存包的到达时刻起算，以免一开闸就因粘性静默而关上。协议仍保留 `DirectGateOpen` 变体，但方案 (b) 下被控端不发送、控制端不依赖。方案 (b) **不**要求控制端等待 `DirectGateOpen`，也不使用方案 (a) 那两条“等待 / 发送 DirectGateOpen”的用例。**Phase 1 按首选方案 (a) 编写先红用例与实现；改用方案 (b) 须先修订规格并替换用例。**
+   两种方案都必须通过确定性用例：升级期间被控端因闸门关闭而丢弃的直连 QUIC 包数为 0，且不出现因 Initial 丢失而走 PTO 的重传（`first_quic_initial_not_lost_to_host_gate`）。随后控制端经 helper 的数据报通道用 quinn 连接被控端的**直连 QUIC 监听**，出示一次性令牌并校验 `quic_fp`；被控端校验令牌 / 会话 / `epoch` / 有效期通过后，等待控制端在**直连连接**上开三条流（`SessionHeader` 与中转上相同）。
+7. **提交（commit）由被控端裁决，顺序固定**：三条直连流就绪后，被控端 **先在中转控制流上发 `DirectSwitch { epoch }`（被控端→控制端方向的栅栏）**，**再**把 `DirectCommit { epoch }` 作为**直连控制流的第一条消息**发出。被控端若在自身超时前没有收到完整的三条流，则放弃该 `epoch`（迟到的 `DirectRequest` / 连接一律忽略，I13）。**控制端打开三条流后设 T（`max(2 s, 4 × 直连 RTT)`，默认 2 秒；Phase 0 上 quic→commit 约 4 ms，2 s 足够）超时，以“读到 `DirectCommit`（不论它是否因栅栏而暂存在缓存里）”为准：收不到就经中转发 `DirectFallback { epoch }`**；被控端对已提交的 `epoch` 也必须接受它。
 8. **切换规则**：
    - **画面 / 声音**：被控端提交后把发送端切到直连流并立即发一个关键帧；接收端**始终同时读取中转流与直连流**，新通道的首个关键帧到达后丢弃旧通道的画面包（按帧序号），声音丢弃序号 ≤ 已交付序号的包（24 字节媒体头没有 epoch 字段，所以规则以“来自哪条通道 + 序号”表达）。
    - **控制流（升级方向，栅栏）**：控制消息没有序号、跨流无顺序保证。每个发送端在**旧通道（中转）**上发出的**最后一条**消息是 `DirectSwitch { epoch }`，之后才在直连上发新消息；接收端读到该栅栏之前只处理旧通道，新通道的消息先缓存，读到栅栏后再处理缓存。控制端在收到 `DirectCommit` 后用同样方式切换自己的发送端。`Ack` / `Ping` / `Pong` 与顺序无关，缓存期间照常处理（避免在途窗口停住）。**栅栏等待上限**不写死 500 ms，由 Phase 0 按中转 RTT 校准（可配置或自适应）；**超时时丢弃缓存的直连控制消息并执行与回退相同的流程**（丢失由状态重同步补偿），不照常处理（会乱序）。
@@ -74,14 +77,19 @@ airhand 的传输是 QUIC（UDP）。只用 tailcat CLI 只能得到 TCP 转发�
 
 ### 2. 路径检测、存活检测与回退（对 DERP 的有界承诺）
 
-**路径检测规则（helper 内的“闸门”）**：tailcat 无法禁止 DERP 承载数据，所以规格承诺**有界**而非“零”（I3）。闸门关闭时 helper 立即丢弃来自 Rust 一侧的数据报，并报告 `path = derp|none`。
-- 控制端（`Client` 没有 `Status`，只能用 `DiscoPing`）：pong 经 DERP 返回 ⇒ 立即判非 direct；连续 M 次（默认 2）在 `max(750 ms, 3×RTT)` 内没有收到 direct pong ⇒ 判非 direct（避免跨洲 RTT 被误判）。
-- 被控端：轮询 `Server.Status()` 中该对端的当前地址 / 中继字段，当前地址为空 ⇒ 判非 direct。
-- 升级前双方的闸门**各自**关闭，直到本端检测为 direct 才打开；直连 QUIC 握手在升级超时内可重试，容忍两端判定时间差。
-- 被控端 `Server.Status()` 的轮询间隔（默认 ≤ 250 ms）与 `CurAddr` 失效延迟都计入 I3 窗口，窗口上限 = 轮询间隔 + 判定延迟（Phase 0 实测）。
-- 窗口期（从路径退化到闸门关闭）内仍可能有少量数据报经共享 DERP 发出；严格为零的前提只能是**自建 DERP**。magicsock 在直连信任期内是否会双发 DERP、何时开始双发，列为 Phase 0 实测项（未证实）。
+**路径检测规则（helper 内的“闸门”）**：tailcat 无法禁止 DERP 承载数据，所以规格承诺**有界**而非“零”（I3）。闸门是**双向**的：关闭时，出站方向立即丢弃来自 Rust 一侧、本欲写入隧道的数据报；入站方向丢弃隧道来的、本欲交给 Rust 的数据报（方案 (b) 在关闭时改为短时缓存，见第 6 步与 I24）。并报告 `path = derp|none`。
+- 控制端（`Client` 没有 `Status`，只能用 `DiscoPing`；不得用 `Client.Ping` 判定路径，其内部超时固定约 10 s）：pong 经 DERP 返回 ⇒ 立即判非 direct；连续 M = 2 次在 `max(750 ms, 3×RTT)` 内没有收到 direct pong ⇒ 判非 direct。Phase 0 在自建 DERP、静默断路后控制端闸门 **1.51 s** 关闭（6/6）。
+- 被控端：**不能只看** `Server.Status()` 的 `CurAddr`。Phase 0 证实 magicsock 的 UDP 信任期为 6.5 s，只看 `CurAddr` 时静默断路后闸门要 **4.72 s** 才关（超过 2 s 阈值），窗口内有 0–10 个数据包经 DERP。因此被控端闸门在以下任一条件成立时关闭：（1）`CurAddr` 为空；（2）**入站静默**：该 flow 上连续 1000 ms 无入站数据报（默认 `rx_silence_ms = 1000`）。Phase 0 加上（2）后闸门 **1.02 s** 关闭（6/6），窗口内经 DERP 的数据包为 **0**。直连期间控制端每 250 ms 发 `Ping`，静止桌面也有入站流量，30 分钟 soak（含仿真 1% 丢包与抖动）下被控端闸门离开 direct 0 次。
+- **入站静默的计时**：静默计时只在本 `epoch` 的该 flow 上、闸门**已经打开之后**观测到第一个入站数据报（方案 (b) 则为“开闸并交付缓存”的时刻）才开始。“从未有入站”、以及开闸之前到达并被缓存的包，都不得把已打开或即将打开的闸门关上。升级阶段还没有直连控制流上的 `Ping`（控制端要等读到中转上的 `DirectSwitch` 之后才在直连上发 Ping，见 I6），因此**不得用控制流 Ping 来证明开闸后会有入站**。改为：直连专用 `direct_transport_config()` 把 quinn 的 `keep_alive_interval` 设为 ≤ 250 ms（QUIC PING 帧走数据报通道，不经控制流，与 I6 的栅栏规则不冲突），保证开闸后、提交前后、静止桌面时都有入站，避免误关闸。验收：「`host_gate_not_closed_during_fence_wait_on_static_screen`」（栅栏等待期间、静止桌面、无控制流 Ping 时不得因静默关闸）。
+- **静默关闭是粘性的**：粘性只针对**本 `epoch` 内已经打开过、之后又关闭**的闸门（因静默或因 `CurAddr` 变为空）。升级开始时闸门本来就是关着的，不在此列，仍可按路径判定打开。一旦已打开过的闸门关闭，本 `epoch` 内不再打开，也不再为该 `epoch` 发 `DirectGateOpen`；按路径失效走回退（控制端闸门在已打开后关闭同样触发 `DirectFallback`），换新 `epoch`（见下条重试规则）。
+- **K 驱动闸门的等效方案**（可选，不是默认）：允许由 Rust 侧的存活判定 K 驱动 helper 在直连已提交之后关闭闸门，但仍须满足 I3（关闭 ≤ 2 s；自建 DERP 上窗口内数据包为 0）。**提交之前**（升级阶段还没有直连 Ping，K 不成立）必须保留入站静默或其它不依赖直连 Ping 的关闭条件，不得在升级阶段只看 `CurAddr`（Phase 0 只看 `CurAddr` 为 4.72 s，已否决）。用于驱动闸门的 K 加上 IPC 与轮询必须 ≤ 2 s，因此**不得**把驱动闸门的 K 取成 2 s（存活检测用于误回退判定的 K 实现值仍可以是 2 s，那是另一条路径）。该方案的验收必须覆盖升级阶段。
+- 升级前双方的闸门**各自**关闭，直到本端检测为 direct 才打开。控制端发出首个直连 QUIC 包的时机见第 6 步与 I24，不得再依赖“升级超时内重试以容忍判定时间差”来掩盖首包被丢。
+- 被控端 `Server.Status()` 的轮询间隔默认 **100 ms**（≤ 250 ms）。I3 窗口上限在采用入站静默时为静默阈值 + 轮询间隔（1000 + 100 ms）；Phase 0 实测 1.02 s。自建 DERP 上窗口内 0 包的验收，绑定到“关闭时刻早于 magicsock UDP 信任期（6.5 s）过期”这一机理：静默方案约 1.02 s 关闭，早于信任期结束，因此不会开始经 DERP 双发。不得把在 1.02 s 测得的 0 包直接外推到接近 2 s 才关闭的实现；若实际关闭时限明显长于 1.02 s，须重测包数。
+- 采用入站静默（升级阶段必须保留）后，**自建 DERP 上 I3 窗口内的数据包上限为 0**（Phase 0 在约 1.02 s 关闭时实测，6/6）。对 Tailscale 托管 DERP 的窗口期与限速，Phase 0 未测，批准 (B) 前须真机复核（该项测试本身须项目负责人许可，因会联系第三方服务）；不把 0 包当成已在托管 DERP 上证实的结果。直连稳定期间，自建 DERP 上数据包与 disco 包均为 0。
 
-**存活检测（不依赖画面）**：桌面被控端只在画面变化时编码、无声音不发包，静止桌面没有帧也没有 Ack，因此**不能**用画面包或 Ack 判存活。改用直连控制流上的 Ping/Pong：直连期间控制端以比现有 1 秒更短的间隔（默认 250 ms，Phase 0 校准；`Ping` 是现有消息，不改协议）发 `Ping`，被控端回 `Pong`；控制端在直连上 K 秒收不到 `Pong` ⇒ 经中转发 `DirectFallback`；被控端在直连上 K 秒收不到 `Ping` ⇒ 回退。K 取 `max(1.5 s, N×间隔 + 2×RTT)` 一类形式（N、系数由 Phase 0 校准），**不再要求小于 2 秒的命令队列过期**：直连通道的写超时 / 队列过期按通道区分，直连通道上的任何超时、写失败都只转为回退，不影响中转通道的既有判定（被控端对中转的写卡住判定现状为 10 秒，措辞以源码为准）。K 中的 RTT：控制端取自 Ping/Pong 往返；被控端用本会话直连 QUIC 连接自身的 RTT 估计（`Flow` 的 srtt 在通道切换后 `min_rtt` 约 10 秒才更新，切换 / 回退时重置 `min_rtt`，Phase 0 观察是否造成码率抖动）。该规则同时覆盖两个方向的非对称故障。直连 QUIC 连接关闭 / 空闲同样视为失效。
+**存活检测（不依赖画面）**：桌面被控端只在画面变化时编码、无声音不发包，静止桌面没有帧也没有 Ack，因此**不能**用画面包或 Ack 判存活。改用直连控制流上的 Ping/Pong：直连期间控制端以 250 ms 间隔（`Ping` 是现有消息，不改协议）发 `Ping`，被控端回 `Pong`；控制端在直连上 K 秒收不到 `Pong` ⇒ 经中转发 `DirectFallback`；被控端在直连上 K 秒收不到 `Ping` ⇒ 回退。K 取 `max(1.5 s, 4×间隔 + 2×RTT)`（RTT 400 ms 时为 1.8 s）；Phase 0 soak 使用 K = 2 s，误回退 0 次。**不再要求小于 2 秒的命令队列过期**：直连通道的写超时 / 队列过期按通道区分，直连通道上的任何超时、写失败都只转为回退，不影响中转通道的既有判定（被控端对中转的写卡住判定现状为 10 秒，措辞以源码为准）。K 中的 RTT：控制端取自 Ping/Pong 往返；被控端用本会话直连 QUIC 连接自身的 RTT 估计（`Flow` 的 srtt 在通道切换后 `min_rtt` 约 10 秒才更新，切换 / 回退时重置 `min_rtt`）。该规则同时覆盖两个方向的非对称故障。直连 QUIC 连接关闭 / 空闲同样视为失效。
+
+**写超时看门狗（I25）**：Phase 0 发现，不限速打满（helper CPU > 100%，约 500–900 Mbps）时，被控端 helper 的写协程会永久阻塞在 gVisor `UDPConn.WriteTo`，直连吞吐降到 0，直到 QUIC 空闲超时；限速 20 / 60 / 200 / 400 Mbps 的运行未复现。根因在 tailcat 所依赖的 gVisor / netstack，不在本设计内修复（最小复现若要提交上游，不在本 fork 的 Phase 1 范围）。因此 helper 对写入隧道的 `Write` / `WriteTo`，以及候选 (ii) 下往 Rust 方向的管道写，都必须设写超时（默认 `write_timeout_ms = 500`，可配下限 100 ms、上限 2000 ms）；超时即上报直连失效，Rust 侧按回退流程切回中转，**结束当前 helper 进程并拉起新进程**开新 `epoch`，**不结束会话**。该次回退计入“30 秒、最多 3 次”的重试。Rust 侧的 K 判定仍作兜底。限速本身不能替代该看门狗。500 ms 在 200 / 400 Mbps 下会不会误触发，云 VM 未测，列入真机复核判据。
 
 **回退（反向栅栏）**：
 - 失效侧立即把自己的发送端切回中转流并请求关键帧，并且它在**中转**控制流上发出的**第一条**消息必须是 `DirectFallback { epoch }`。**发起方也丢弃该 `epoch` 此后收到的所有直连控制消息**（含已缓存的）；直连上未确认的输入丢失，靠 `release_all()` 与状态重同步补偿（不改为“带确认的回退”，避免多一轮往返）。
@@ -89,9 +97,10 @@ airhand 的传输是 QUIC（UDP）。只用 tailcat CLI 只能得到 TCP 转发�
 - **栅栏之后中转上仍须处理的消息**：`Bye`（I10）、对端的 `DirectFallback`（幂等）、对向未完成的 `DirectSwitch`（该 `epoch` 已放弃，忽略）。回退后迟到的 `DirectCommit` 一律忽略。
 - **“改投中转”的范围**：只限**尚未写出且未过期**的消息；已过期的输入**不补发**；正在直连上写的那一条视为丢失。
 - **状态重同步**：被控端在本地调用 `release_all()` 释放按键；控制端的 `airhand-link` **按会话缓存最近一次 `Settings` / `Audio` / `SelectDisplay`，回退后重发**（`Settings` 与 `Audio` 的重发是幂等的；缓存的 `SelectDisplay` 在收到被控端的 `HostMsg::Displays { current }` 时同步更新，避免旧序号把画面切回去，被控端已 `follow_display` 切换的以被控端为准）（不依赖“清空本地按键状态”，也不新增 `ReleaseAll` 输入事件）；剪贴板以最新状态为准。
-- **写入失败不结束会话**：直连通道的写入失败 / 卡住一律转为回退并把符合上条范围的排队消息改投中转；**直连通道失败只触发回退，绝不结束会话**；仅中转连接断开才结束会话（与 I10 一致）。helper 进程退出 / 崩溃视同直连失效，由 Rust 侧监督，不自动无限重启。
-- 每次重新升级都使用**新的 `epoch`、新的 tailcat 密钥 / 地址 / 令牌**（旧的立即销毁）；因路径 / 存活检测而回退后，每隔 30 秒、最多 3 次重试。**若本会话已由被控端收回“直连”权限，则本会话不再重试升级**（`revoked_direct_not_retried_in_session`）。
-- 并发与进程模型：**每个会话一个 helper 进程；每个 `epoch` 在进程内新建 `Server`（控制端新建 `Client` 与密钥）并 `Close` 旧的**。同一进程内多个 `Server` 是否安全（例如进程级全局设置）**未证实**，Phase 0 验证；不安全则改为每个 `epoch` 一个进程。并发上限默认 2（可配，须小于服务器为每台被控端预留的会话槽位，该槽位默认 4；客户端拿不到服务器环境变量，不得引用 `AIRHAND_MAX_SESSIONS`），超出的会话保持中转。
+- **写入失败不结束会话**：直连通道的写入失败 / 卡住 / helper 写超时（I25）一律转为回退并把符合上条范围的排队消息改投中转；**直连通道失败只触发回退，绝不结束会话**；仅中转连接断开才结束会话（与 I10 一致）。helper 进程退出 / 崩溃视同直连失效，由 Rust 侧监督，不自动无限重启。
+- 每次重新升级都使用**新的 `epoch`、新的 tailcat 密钥 / 地址 / 令牌**（旧的立即销毁）；因路径 / 存活检测 / 写超时（I25）而回退后，每隔 30 秒、最多 3 次重试（写超时回退**计入**这 3 次）。**若本会话已由被控端收回“直连”权限，则本会话不再重试升级**（`revoked_direct_not_retried_in_session`）。I25 触发时**结束当前 helper 进程并拉起新进程**再开新 `epoch`，不得在同一进程（同一 gVisor netstack）里新建 `Server` 来逃避已观察到的写卡死；同进程其他 `Server` 在饱和卡死时是否受影响仍标为未测。
+- 并发与进程模型：**每个会话一个 helper 进程；每个 `epoch` 在进程内新建 `Server`（控制端新建 `Client` 与密钥）并 `Close` 旧的**。Phase 0 在同一进程内跑 3 个 `Server`，互相独立、无 goroutine 泄漏；设计仍保持每会话一进程。饱和卡死时同一进程内其他 `Server` 是否受影响未测。并发上限默认 2（可配，须小于服务器为每台被控端预留的会话槽位，该槽位默认 4；客户端拿不到服务器环境变量，不得引用 `AIRHAND_MAX_SESSIONS`），超出的会话保持中转。
+- 栅栏等待上限：`max(1 s, 2 × 中转 srtt)`（不写死 500 ms）。Commit 等待 T：`max(2 s, 4 × 直连 RTT)`（Phase 0 上 quic→commit 约 4 ms，T = 2 s 足够）。
 
 ### 3. 协议改动（`PROTOCOL_VERSION` 9 → 10）
 
@@ -104,6 +113,7 @@ airhand 的传输是 QUIC（UDP）。只用 tailcat CLI 只能得到 TCP 转发�
   - `HostMsg::DirectCommit { epoch }`（直连控制流上的第一条消息；之前先在中转上发 `DirectSwitch`）
   - `HostMsg::DirectSwitch { epoch }` / `ControllerMsg::DirectSwitch { epoch }`（升级方向：旧通道上的最后一条消息）
   - `HostMsg::DirectFallback { epoch }` / `ControllerMsg::DirectFallback { epoch }`（回退方向：中转上的第一条消息）
+  - `HostMsg::DirectGateOpen { epoch }`（**方案 (a)**：被控端闸门打开后经中转发送；控制端收到前不得发首个直连 QUIC 包，I24。方案 (b) 不发送、不依赖此消息，但协议变体保留）
   - 确认与断开（r4）：沿用现有 `HostMsg::AwaitingApproval`、`ByeReason::{Declined, Unanswered, Kicked, CodeChanged}`；`HostHello` 新增 `granted: Permissions { input, clipboard, audio, direct }`；新增 `HostMsg::PermissionsChanged { granted }`、无字段的 `ControllerMsg::Bye`、`ByeReason::Busy`（均追加在枚举末尾）。
 - 前向兼容的实际情况（已对照源码）：控制流上**任何**解码错误都会结束会话，postcard 对未知枚举变体会报错，所以“预留扩展”**不**提供前向兼容；`DirectOffer` 因此用 `kind: u8` + 不透明 `body`，接收端遇到不认识的 `kind` 回 `DirectDecline`，不依赖解码器容忍未知变体。Kotlin / TypeScript 不解析 postcard，只处理 Rust 转出的 JSON 事件与媒体包；**r4 起桌面前端（`client/` 的 TypeScript）需要新增确认窗、指示条、`PermissionsChanged`、路径显示与 SAS 的界面**（列入 F21 / F23 / F26），Android / 网页控制端不改行为但须容忍新的事件与 `Problem` 类型（例如 `Busy`，也可复用现有 `Problem::HostBusy`），并有“旧前端忽略未知事件”的用例；但 `android/native`、`web/` 的 Rust 代码要为新字段 / 新变体通过编译。
 - 媒体包头（24 字节）与 `tests/protocol.json` 样例**不变**。
@@ -123,8 +133,11 @@ airhand 的传输是 QUIC（UDP）。只用 tailcat CLI 只能得到 TCP 转发�
 |---|---|---|
 | `enabled` | `false` | 总开关；关闭时**不会启动 helper、不会联系任何 tailcat / DERP 主机** |
 | `derp_map_url` | tailcat 默认 | 必须 `https://`；可指向自建 DERP 图；自建 DERP 时主机名可嵌入地址，不再访问 Tailscale 托管服务 |
-| `upgrade_timeout_secs` | 由 Phase 0 实测定，≥ 12 | 等待直连路径的时间 |
-| 其它阈值 | 由 Phase 0 实测定 | 栅栏等待上限、Commit 等待 T、Ping 间隔与存活检测 K、路径判定的 M / RTT 系数、`Server.Status()` 轮询间隔 |
+| `upgrade_timeout_secs` | `15` | 等待直连路径的时间，下限 12；Phase 0 在 VM 内最差约 2.2 s，保留余量覆盖未测的真实 NAT / DERP 冷启动 / 公网时延，真机复核后可再收紧 |
+| `rx_silence_ms` | `1000` | 被控端闸门的入站静默阈值。可配范围：下限 **1000 ms**（与 Phase 0 soak 一致；更低的值须另行实测，因为下限若小于 Ping / QUIC keep-alive 间隔，静止桌面会误关闸，违反 I2）；上限须满足 `rx_silence_ms` + Status 轮询间隔 < 2000 ms（默认轮询 100 ms 时，上限 1899 ms）。若配置值使实际关闭时限明显长于 1.02 s，须按 §2 重测窗口包数。升级阶段必须使用该条件（或其它不依赖直连 Ping 的关闭条件），不能只靠 K 驱动 |
+| `write_timeout_ms` | `500` | helper 写入隧道（及候选 (ii) 往 Rust 的管道写）的超时，范围 100–2000 ms；超时即按 I25 回退并重启 helper 进程 |
+| `bitrate_cap_kbps` | `100000` | 直连会话编码目标码率上限 C（100 Mbps）；必须 ≤ 100000；回退中转后解除，见“直连会话码率上限”与 I26 |
+| 其它阈值 | 见 §2 | 栅栏等待上限 `max(1 s, 2 × 中转 srtt)`、Commit 等待 T `max(2 s, 4 × 直连 RTT)`、Ping 间隔 250 ms、存活检测 K = `max(1.5 s, 4×间隔 + 2×RTT)`（误回退判定的实现值可用 2 s；**驱动闸门的 K 不得取 2 s**，须满足 K + IPC + 轮询 ≤ 2 s）、M = 2、`Server.Status()` 轮询 100 ms |
 | `max_sessions` | `2` | 同时升级的会话数上限 |
 
 被控端确认相关的 `[host] approve` / `approval_timeout_secs` / `reconfirm_minutes` / `max_pending_approvals` 见“被控端确认与主动断开”（这些**不属于** `[direct]`，且 `approve = "ask"` 对中转会话同样生效）。
@@ -204,7 +217,7 @@ helper 可执行文件的路径**不可配置**：固定为主程序同目录下
 
 ### Windows 安装版的确认窗位置与授权通道
 
-Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在托盘进程，二者经命名管道通信（`winsvc/`；管道允许同会话交互用户进程连接，`ToAgent` 现仅有 `KickAll` / `NewCode` / `SetAutostart` / `SaveDevices`）。r4 定：确认窗放在托盘进程；新增 `ToAgent::Approve { session_id, granted }` / `ToAgent::Decline { session_id }`；agent 在收到前校验管道客户端进程为本安装目录下的 `airhand.exe`（如实说明：同用户攻击者不在防护范围内，其本来就能控制该用户会话）。**`approve = "ask"` 时，登录屏 / 锁屏没有托盘，现架构下没有可显示确认窗的路径 ⇒ 确认超时拒绝**（结论，不再是“未证实”）；是否能在 agent 内于安全桌面弹窗，列为可选的后续验证项，不在 Phase 1 范围。**`approve = "never"` 时不依赖确认窗**，登录屏 / 锁屏下会话仍可按 I21 建立；若同时开启了 `[direct] enabled`，直连升级也可进行。**此期间没有本机指示条、不能在本机一键停止共享或收回权限、也不能显示 SAS**（I22 的例外）：本机侧的停止 / 换码须等出现可显示托盘的会话，或运营者在本机用其他途径改配置 / 结束进程；远程侧仍可通过控制端断开结束该会话。不采用“无法显示指示条就不升级直连”（那会改变无人值守直连的默认可用性，须项目负责人另行决定）。若 Phase 0 证实 Windows SYSTEM 被控端无法运行受限 helper，则按已有退路禁用该被控端上的直连，never + 直连在 Windows 安装版被控端上同样不可用（写入 r6）。
+Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在托盘进程，二者经命名管道通信（`winsvc/`；管道允许同会话交互用户进程连接，`ToAgent` 现仅有 `KickAll` / `NewCode` / `SetAutostart` / `SaveDevices`）。r4 定：确认窗放在托盘进程；新增 `ToAgent::Approve { session_id, granted }` / `ToAgent::Decline { session_id }`；agent 在收到前校验管道客户端进程为本安装目录下的 `airhand.exe`（如实说明：同用户攻击者不在防护范围内，其本来就能控制该用户会话）。**`approve = "ask"` 时，登录屏 / 锁屏没有托盘，现架构下没有可显示确认窗的路径 ⇒ 确认超时拒绝**（结论，不再是“未证实”）；是否能在 agent 内于安全桌面弹窗，列为可选的后续验证项，不在 Phase 1 范围。**`approve = "never"` 时不依赖确认窗**，登录屏 / 锁屏下会话仍可按 I21 建立；若同时开启了 `[direct] enabled`，直连升级也可进行。**此期间没有本机指示条、不能在本机一键停止共享或收回权限、也不能显示 SAS**（I22 的例外）：本机侧的停止 / 换码须等出现可显示托盘的会话，或运营者在本机用其他途径改配置 / 结束进程；远程侧仍可通过控制端断开结束该会话。不采用“无法显示指示条就不升级直连”（那会改变无人值守直连的默认可用性；该选项与其它 never 模式隐私缓解一并列为「待项目负责人决定」，见下节，不作为本规格默认设计）。Phase 0 **未测** Windows 受限令牌 / AppContainer（只验证了 Windows 交叉编译，helper 约 19 MB）。在项目负责人指定的真机复核之前，退路仍然有效：若证实不可行，Windows SYSTEM agent 作为被控端时禁用直连，never + 直连在 Windows 安装版被控端上同样不可用。
 
 ### 配置
 
@@ -249,8 +262,8 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 ## 不变量
 
 - **I1** 默认关闭；关闭时：**不发任何 `Direct*` 消息、不启动子进程、不联系 tailcat / DERP**（线上消息与“v10 且未启用”一致；与 v9 不互通）。
-- **I2** 直连失败、超时、对端未启用、helper 缺失 / 校验失败 / 崩溃，一律**静默回退**中转，不中断会话、不弹错误（只在诊断面板留痕）。**静止桌面（无画面、无声音）不得触发回退**。
-- **I3**（有界）路径一旦按 §2 规则判为非 `direct`，helper 闸门关闭，停止把数据报写入隧道；升级前不为“尚未 direct”的路径切换发送端。窗口期内少量数据报可能经共享 DERP；严格为零仅在自建 DERP 下成立。具体时限由路径判定规则与 Phase 0 实测给出（含 RTT 相关项），不写死 250 ms。
+- **I2** 直连失败、超时、对端未启用、helper 缺失 / 校验失败 / 崩溃 / 写超时（I25），一律**静默回退**中转，不中断会话、不弹错误（只在诊断面板留痕）。**静止桌面（无画面、无声音）不得触发回退**。
+- **I3** 路径一旦按 §2 规则判为非 `direct`，helper 闸门双向关闭（出站不再写入隧道，入站丢弃或按 I24 方案 (b) 短时缓存）；升级前不为“尚未 direct”的路径切换发送端。被控端闸门必须包含入站静默条件（默认 1000 ms 无入站即关；计时从本 `epoch` 该 flow 的首个入站数据报之后才开始；关闭在本 `epoch` 内粘性）。允许在直连已提交之后由 Rust 侧 K 驱动关闭，但升级阶段仍须保留静默或其它不依赖直连 Ping 的关闭条件；驱动闸门的 K + IPC + 轮询 ≤ 2 s。闸门须在路径退化后 **2 s 内**关闭。在自建 DERP 上，当关闭时刻早于 magicsock 信任期（6.5 s）过期时，窗口内经 DERP 发出的**数据包上限为 0**（Phase 0 在约 1.02 s 关闭时实测为 0；只看 `CurAddr` 时为 0–10 / 4.72 s，该方案已否决）。托管 DERP 上的窗口期须真机复核（须项目负责人许可），不得把 0 包写成已在托管 DERP 上证实。
 - **I4** 握手消息（`Hello` / `Welcome` / `Incompatible`）与 ALPN 的编码不变；`PROTOCOL_VERSION` 升到 10。
 - **I5** 令牌一次性：只对一个会话、一个 `epoch`、有效期内有效；重放、过期、错会话、错 `epoch` 一律拒绝。
 - **I6** 同一时刻每条逻辑流只有一个**发送**通道。升级方向：栅栏保证控制消息不乱序、不丢失，画面 / 声音按序号去重且不倒退。回退方向：以 `DirectFallback` 反向栅栏切断直连控制流，迟到的直连控制消息被丢弃；直连上未确认的数据可能丢失，以按键释放与状态重同步补偿。
@@ -258,9 +271,9 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 - **I8** 不依赖解码器对未知变体的容忍：新增 `kind` 一律由 `DirectDecline` 回应；协议扩展以版本号为界。
 - **I9** helper 只服务一个 UDP 端口、无 TCP 服务；对其他端口 / TCP 不回 RST（探测超时）；回环通道的暴露面按所选候选 (i)/(ii) 的约束。
 - **I10** 托盘显示 / 断开 / 更换控制码对直连会话的语义与中转会话相同；升级过程中被踢 / 更换控制码，两条通道一并结束；`Bye` 一律经中转发送。
-- **I11** 直连 QUIC 单个数据报载荷 ≤ 1232 字节（直连专用 `Endpoint` 与 `direct_transport_config()`：`initial_mtu` ≤ 1232、`min_mtu` 1200、关闭 MTU 探测、`EndpointConfig` 最大 UDP 载荷 1232；中转用的 `transport_config()` 不变）。具体 quinn API 名称在 Phase 0 对照 0.11 源码确认。
+- **I11** 直连 QUIC 单个数据报载荷 ≤ 1232 字节。不得依赖库报错：Phase 0 证实超限写入返回 nil 并被静默丢弃。直连专用 `Endpoint` 与 `direct_transport_config()` 使用 quinn 0.11.12 的 `initial_mtu(1232)`、`min_mtu(1200)`、`mtu_discovery_config(None)`、`EndpointConfig::max_udp_payload_size(1232)`；只设 `max_udp_payload_size` 而不提高 `initial_mtu` 时 MTU 会停在 1200。中转用的 `transport_config()` 不变。helper 的 Pump 对超限包计数丢弃。
 - **I12** `DirectOffer` 只在**已取得直连同意**且 `HostHello` 已发之后发送。被控端的直连同意来源只有两种，且都必须对端 `ControllerHello.direct` 为真：（a）`approve = "ask"`：被控端用户在该会话确认窗中授予“直连”权限；（b）`approve = "never"` 且 `[direct] enabled = true`：运营者显式配置视为同意（I21）。控制端以本端 `[direct] enabled` 为对暴露自身地址的同意。此前收到的、以及未取得直连同意时收到的 `DirectRequest` 一律丢弃（后者回 `DirectDecline`）。
-- **I13** 提交由被控端裁决；迟到的 `DirectRequest` / 接受 / 连接（`epoch` 已过期或放弃）一律忽略；任一端经中转收到对端的 `DirectFallback` 立即回退；控制端等不到 `DirectCommit` 超时即回退。
+- **I13** 提交由被控端裁决；迟到的 `DirectRequest` / 接受 / 连接 / `DirectGateOpen`（`epoch` 已过期、不匹配或已放弃）一律忽略；任一端经中转收到对端的 `DirectFallback` 立即回退；控制端等不到 `DirectCommit` 超时即回退。方案 (a) 下等不到 `DirectGateOpen` 的时限计入 `upgrade_timeout_secs`，超时则放弃本次升级、保持中转。
 - **I14** `client_key` 为空或无法解析时，Rust 侧与 helper 都拒绝 Start（不得起一个放行所有客户端的 `Server`）；helper **不调用** `AddAllowedClient`（运行时追加会重新引入“列表为空即放行”的窗口）。
 - **I15** 桌面被控端 `approve = "ask"`（默认）时，每个新控制端会话在用户确认前：**不发 `HostMsg::Hello`、不发画面 / 声音**，只发 `AwaitingApproval`；只**处理** `ControllerMsg::Hello`（取设备标识与直连能力位）/ `Ping` / `Bye`；`Settings` / `Audio` / `SelectDisplay` **只记下最新值，确认后生效**（与 Android 一致，避免回归）；输入、剪贴板、`Ack`、`Direct*` 一律丢弃。**超时（默认 60 秒）即拒绝**（`Bye(Unanswered)`），点拒绝为 `Bye(Declined)`；二者对控制端是终止性的（`Problem::is_final()`，不自动重连）。`approve = "never"` 不适用本条，见 I21。
 - **I16** 取得直连同意之前：不交换任何地址 / 令牌 / 密钥，被控端不启动 helper，控制端 helper 不联网（不拉 DERP 图、不连 DERP）；未取得直连同意的会话永不启动 helper。同意的判定与 I12 相同。
@@ -268,18 +281,21 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 - **I18** **停止共享**：结束所有会话的**中转与直连两条路径**（`Bye(CodeChanged)` 经中转；销毁每个会话的 tailcat `Server`、令牌、直连连接；结束 helper 进程）并**更换控制码使旧码立即失效**；之后迟到的直连连接 / 令牌 / 旧码一律拒绝。被控端“断开此控制端”结束选中会话的两条路径（`Bye(Kicked)`），不换码；在 `approve = "ask"` 下被断开的设备须重新确认才能回来，在 `approve = "never"` 下持码人可以再连回来。
 - **I19** 控制端主动断开：经中转发无字段的 `ControllerMsg::Bye`，随后关闭直连连接并结束 helper；被控端收到后清理该会话的全部直连资源。控制端的断开入口在会话期间始终可用（含升级进行中与直连状态）。被控端的本机断开入口在指示条 / 托盘可显示时始终可用；登录屏 / 锁屏等没有指示条时，本机侧不适用，见 I22。
 - **I20** 权限由被控端强制执行（每项在两个方向上都要有执行点）：关闭“输入控制”后丢弃后续输入；关闭“剪贴板”后既不应用控制端发来的内容、也不再向控制端推送（桌面端现状这两处都不受条件限制，需新增）；关闭“声音”后取消订阅；收回“直连”权限立即回退中转并销毁 helper / tailcat 实例（不换码），且本会话不再自动重试升级；权限变化经 `HostMsg::PermissionsChanged` 通知控制端。
-- **I21** `approve = "never"` 是运营者显式开启的无人值守模式：不弹确认窗、不发 `AwaitingApproval`，会话立即发 `HostHello` 并开始画面。`HostHello.granted` 取值：输入 / 剪贴板 / 声音沿用现有行为（全部为真）；**`direct` 当且仅当同时显式开启 `[direct] enabled` 且对端 `ControllerHello.direct` 为真时为真**。运营者显式同时开启这两项配置，即视为对“暴露本机公网 / 内网地址并经第三方 DERP 引导”的同意，无需再逐会话勾选（此为 r4「never 禁用直连」的修订）。只开 `never` 而不开 `[direct] enabled`，或对端未声明直连能力时，`granted.direct` 为假，不发 `DirectOffer`、不启动 helper。该模式须显式开启，托盘可显示时给出醒目警告（说明：持码人可在无人确认的情况下接入；若直连已启用，还将获知本机地址）。放宽这两项配置的生效规则见“配置的读取与生效”。
+- **I21** `approve = "never"` 是运营者显式开启的无人值守模式：不弹确认窗、不发 `AwaitingApproval`，会话立即发 `HostHello` 并开始画面。`HostHello.granted` 取值：输入 / 剪贴板 / 声音沿用现有行为（全部为真）；**`direct` 当且仅当同时显式开启 `[direct] enabled` 且对端 `ControllerHello.direct` 为真时为真**。运营者显式同时开启这两项配置，即视为对“暴露本机公网 / 内网地址并经第三方 DERP 引导”的同意，无需再逐会话勾选（此为 r4「never 禁用直连」的修订）。只开 `never` 而不开 `[direct] enabled`，或对端未声明直连能力时，`granted.direct` 为假，不发 `DirectOffer`、不启动 helper。该模式须显式开启，托盘可显示时给出醒目警告（说明：持码人可在无人确认的情况下接入；若直连已启用，还将获知本机地址）。**已知风险**（不是实现缺陷，见“never 模式的已知隐私风险”）：持码人可以连上来拿到地址后立即断开、并反复来访；被“断开此控制端”的持码人在控制码仍然有效时也可以再连回来。本条不变量不依赖任何尚未决定的缓解选项。放宽这两项配置的生效规则见“配置的读取与生效”。
 - **I22** 被控端在指示条 / 托盘可显示时，会话期间的常驻指示不能被远端画面关闭或遮盖，显示控制端设备名、当前路径（中转 / 直连）与已授予权限，并可一键停止共享或收回权限；指示条只能收回权限；确认窗 / 续期提示 / 配置确认不能被远端注入输入代点（见“防注入”）。**例外**：登录屏 / 锁屏等没有托盘与指示条时，本机无法显示指示、SAS 与一键停止（never 模式下会话与直连仍可按 I21 进行）；此时只能由控制端断开，或等本机出现可显示的会话 / 运营者在本机用其他途径换码或改配置。**显示层行为无法自动化，验收归入手动项。**
 - **I23**（实现位置）确认闸门状态机（`ask`：等 `Hello` → 询问 → 放行 / 拒绝、授权前缓存、授权记忆；`never`：跳过询问、按 I21 赋予 `granted`；权限集）下沉到 `airhand-link`，桌面与 Android 共用；Android 现有实现迁移为共用逻辑，避免两份逻辑走样。
+- **I24** 控制端的首个直连 QUIC 包不得因被控端闸门尚未打开而丢失。方案 (a)：被控端闸门打开后经中转发 `DirectGateOpen`；控制端须在本端闸门已打开且收到该提示之后才发出首个直连 QUIC 包。方案 (b)：被控端 helper 在闸门关闭时按第 6 步的界限短时缓存入站包，控制端可以在开闸前发出首包。两种方案都必须通过 `first_quic_initial_not_lost_to_host_gate`（升级期间因闸门关闭而丢弃的直连 QUIC 包数为 0，且不出现因 Initial 丢失而走 PTO 的重传）。方案 (a) 另有“等待 / 发送 DirectGateOpen”用例；方案 (b) 不用这两条。不得只靠调小 PTO / `initial_rtt`。
+- **I25** helper 写入隧道，以及候选 (ii) 下往 Rust 方向的管道写，必须有写超时（默认 500 ms）；超时或写操作卡住即视为直连失效，回退中转，结束当前 helper 进程并拉起新进程后开新 `epoch`，不结束会话。该次回退计入“30 秒、最多 3 次”重试。该看门狗独立于码率上限，限速不能替代它。Rust 侧 K 判定仍作兜底。
+- **I26** 直连期间编码器目标码率不得超过上限 C（默认 C = 100 Mbps，且 C ≤ 产品上限 100 Mbps）；达到 C 不触发回退。回退到中转后解除直连上限 C，改回产品 / 中转既有上限与既有 ABR。
 
 ## 验收测试清单
 
 测试命名采用 Rust `#[test]` / `#[tokio::test]` 函数名与 Go `Test…` 名；文件为**将要创建**的路径，实现阶段按“先红后绿”提交。
-验证面均为**本机自动化**（回环 + 假 helper / 可注入路径源）；真实 NAT / 跨公网表现只能在**线上手动验证**。托盘 / 被控端会话逻辑位于 `client/src-tauri`，相关测试放在该 crate，不放在 `airhand-link`。
+验证面均为**本机自动化**（回环 + 假 helper / 可注入路径源）；真实 NAT / 跨公网表现只能在**线上手动验证**。确认闸门状态机下沉到 `airhand-link` 之后（I23），会话 / 直连 / 停止共享 / never 路径等逻辑用例放在 `crates/airhand-link/tests/direct.rs`；仍属于桌面托盘、确认窗、指示条、配置文件的用例放在 `client/src-tauri/tests/`。
 
-- [ ] I4：`crates/airhand-proto/src/framing.rs` →「`version_handshake_wire_is_stable`」（既有，必须仍通过）；`crates/airhand-proto/src/lib.rs` →「`protocol_version_is_10`」；`crates/airhand-proto/src/session.rs` →「`direct_messages_wire_is_stable`」。
+- [ ] I4：既有「`version_handshake_wire_is_stable`」必须仍通过；新增协议用例统一放在 `crates/airhand-proto/tests/wire.rs`：「`protocol_version_is_10`」「`direct_messages_wire_is_stable`」（含 `DirectGateOpen`）。既有 `framing.rs` 内联用例保持不动。
 - [ ] I1：`crates/airhand-link/tests/direct.rs` →「`disabled_by_default_never_spawns_helper`」；预期：假 helper 工厂 0 次调用、无任何 `Direct*` 消息、无到 tailcat/DERP 的连接尝试。
-- [ ] 配置：`client/src-tauri/src/config.rs` 单测 →「`direct_config_defaults_off`」「`direct_config_rejects_non_https_derpmap`」「`direct_config_has_no_helper_path_option`」。
+- [ ] 配置：`client/src-tauri/tests/direct_config.rs` →「`direct_config_defaults_off`」「`direct_config_rejects_non_https_derpmap`」「`direct_config_has_no_helper_path_option`」「`direct_config_bitrate_cap_default_is_100mbps`」「`direct_config_rejects_bitrate_cap_over_100mbps`」。
 - [ ] 升级：`crates/airhand-link/tests/direct.rs` →「`session_upgrades_to_direct_when_both_sides_enable`」；预期：升级后画面包经直连流到达、中转流字节计数不再增长。「`peer_without_direct_enabled_stays_on_relay`」。
 - [ ] I8：「`unknown_offer_kind_is_declined`」。
 - [ ] I12 / I16：「`no_offer_before_host_hello`」「`request_before_host_hello_is_dropped`」「`no_offer_before_approval`」「`direct_request_without_direct_grant_is_declined`」「`helper_not_spawned_before_approval`」（假 helper 工厂：取得直连同意前 0 次调用，且控制端 helper 无网络活动）「`declined_session_never_spawns_helper`」「`ask_mode_no_offer_without_direct_checkbox`」「`controller_helper_no_network_before_offer`」。
@@ -295,10 +311,13 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 - [ ] 手动：Windows 登录屏 / UAC 安全桌面下确认窗口能否显示与点击（不能则按超时拒绝）；macOS / Linux 的置顶指示与托盘行为。
 - [ ] I13：「`late_request_after_host_timeout_is_ignored`」「`host_fence_then_commit_is_first_direct_message`」（被控端先在中转发 `DirectSwitch`，再在直连发 `DirectCommit` 作为第一条）「`commit_lost_controller_falls_back_within_bound`」「`fallback_message_forces_peer_to_fall_back`」「`asymmetric_direct_failure_recovers_within_bound`」。
 - [ ] I2 / 存活：「`static_screen_does_not_trigger_fallback`」（无画面无声音数十秒，Ping/Pong 正常 ⇒ 不回退）「`missing_pong_triggers_fallback`」「`direct_failure_falls_back_to_relay`」「`helper_crash_does_not_end_session`」「`direct_stream_failure_does_not_end_session`」「`relay_loss_ends_session_even_when_direct`」「`direct_write_failure_requeues_on_relay`」。
-- [ ] I3（Rust 侧）：「`upgrade_timeout_keeps_relay`」「`no_switch_before_both_gates_open`」。I3（Go 侧，helper 本身）：`p2p/gate_test.go` →「`TestGateDropsWhenPathNotDirect`」（可注入路径源）「`TestControllerGateIgnoresSlowButDirectPath`」（RTT 大于 250 ms 且 ≤ 400 ms 的直连不被误判，与阈值表对齐）「`TestHostGateClosedWhenCurAddrEmpty`」「`TestHostGateWindowIncludesStatusPollInterval`」；另附**手动 / 可选 CI**：用本地自建 `derper` 验证真实 DERP 退化行为与窗口时长。
+- [ ] I25：「`helper_write_stall_triggers_fallback`」（可注入的假写路径在超过 `write_timeout_ms` 后仍阻塞 ⇒ 上报直连失效，Rust 侧回退中转、结束 helper 进程并拉起新进程后开新 `epoch`、会话继续，不发结束会话的 `Bye`；该次回退计入最多 3 次重试）；Go「`TestWriteTimeoutReportsPathFailure`」（隧道 `Write` / `WriteTo` 以及候选 (ii) 往 Rust 的管道写，超过默认 500 ms 即失败并上报）。
+- [ ] I3（Rust 侧）：「`upgrade_timeout_keeps_relay`」「`no_switch_before_both_gates_open`」。I3（Go 侧，helper 本身）：`p2p/gate_test.go` →「`TestGateDropsWhenPathNotDirect`」（可注入路径源，断言出站与入站在关闭时都被丢弃或按方案 (b) 缓存）「`TestControllerGateIgnoresSlowButDirectPath`」（RTT 大于 250 ms 且 ≤ 400 ms 的直连不被误判，与阈值表对齐）「`TestHostGateClosedWhenCurAddrEmpty`」「`TestHostGateClosesOnRxSilence`」（首个入站之后连续 1000 ms 无入站，闸门关闭且时限 ≤ 2 s）「`TestHostGateRxSilenceNotArmedBeforeFirstInbound`」（开闸后、首个入站到达前，静默条件不得关闸）「`TestHostGateSilenceCloseIsStickyInEpoch`」（静默关闭后本 `epoch` 不再打开、不再发 `DirectGateOpen`）「`TestHostGateWindowZeroPacketsOnSelfHostedDerp`」（进程内自建 derper，不依赖外网；关闭时刻早于信任期过期时窗口内数据包为 0；只看 `CurAddr` 不得作为通过条件）「`TestHostGateWindowIncludesStatusPollInterval`」「`TestClientPingMustNotBeUsedForPath`」「`TestKDrivenGateStillSilentBeforeCommit`」（若实现 K 驱动，升级阶段仍须保留静默或其它不依赖 Ping 的关闭条件，关闭 ≤ 2 s）「`host_gate_not_closed_during_fence_wait_on_static_screen`」（Rust 侧：栅栏等待期间静止桌面不得因静默关闸；直连 `keep_alive_interval` ≤ 250 ms）「`TestSchemeBSilenceStartsAtCacheFlush`」（仅方案 (b)：静默从开闸并交付缓存起算）。另附**手动 / 真机**（机器待项目负责人指定；托管 DERP 须另行许可）：复核窗口时长与包数。
+- [ ] I24：两种方案共用「`first_quic_initial_not_lost_to_host_gate`」（注入被控端闸门晚于控制端打开的时间差，升级期间因闸门关闭而丢弃的直连 QUIC 包数为 0，且不出现因 Initial 丢失而走 PTO 的重传）。方案 (a) 另有：「`controller_waits_for_direct_gate_open_before_first_quic`」（未收到 `DirectGateOpen` 且本端闸门未开时，控制端 0 个直连 QUIC 包）「`host_sends_direct_gate_open_when_gate_opens`」「`late_or_mismatched_direct_gate_open_is_ignored`」。方案 (b) 另有：「`host_inbound_cache_delivers_initial_before_gate_open`」「`host_inbound_cache_is_bounded_and_cleared_on_epoch_end`」。
 - [ ] I5：「`direct_token_is_one_time`」「`direct_token_wrong_session_rejected`」「`direct_token_expired_rejected`」「`direct_token_wrong_epoch_rejected`」；证书固定：「`direct_cert_pin_mismatch_aborts_upgrade`」。
 - [ ] I6：「`input_order_preserved_across_switch`」「`fence_timeout_drops_buffer_and_releases_keys`」「`late_direct_input_after_fallback_is_discarded`」「`keys_released_after_fallback`」「`settings_resynced_after_fallback`」「`host_initiated_fallback_discards_inflight_direct_input`」「`bye_on_relay_processed_after_fence`」「`expired_input_not_replayed_on_relay_after_fallback`」「`commit_after_own_fallback_is_ignored`」「`controller_resends_cached_settings_audio_display_after_fallback`」「`duplicate_frames_across_lanes_are_dropped`」「`stale_lane_frames_before_keyframe_are_dropped`」「`audio_not_replayed_after_switch`」。
-- [ ] I11：「`direct_quic_never_sends_datagram_over_1232`」（行为测试：假 helper 记录并丢弃超限数据报，断言观测到的最大数据报 ≤ 1232）。
+- [ ] I11：「`direct_quic_never_sends_datagram_over_1232`」（行为测试：假 helper 记录并丢弃超限数据报，断言观测到的最大数据报 ≤ 1232；不得指望库对超限写入返回错误）。
+- [ ] I26 直连码率上限：「`direct_session_caps_bitrate_instead_of_falling_back`」（**注入较低的 C，例如 30 Mbps**，目标码率高于该 C 时被限制在 C，且不发 `DirectFallback`；不得只在默认 C=100 Mbps 下断言，因为产品上限本来就是 100 Mbps，会变成空断言）「`fallback_to_relay_lifts_direct_bitrate_cap`」（同样在注入的较低 C 下，回退中转后解除该上限）「`direct_config_bitrate_cap_default_is_100mbps`」「`direct_config_rejects_bitrate_cap_over_100mbps`」。
 - [ ] I7：「`direct_secrets_are_redacted_in_debug_and_logs`」（`Secret<T>`）；Go「`TestTailcatLogfDiscardedByDefault`」。
 - [ ] I9 / I14：Go `p2p/helper_test.go` →「`TestServesExactlyOneUDPPort`」「`TestNoTCPServiceAndNoRST`」（SYN 超时而非 RST）「`TestOnlyAllowedClientKeyConnects`」「`TestEmptyOrInvalidAllowlistRefusesToStart`」「`TestMultipleServersInOneProcessAreIndependent`」（不通过则改为每 epoch 一进程）；Rust：「`empty_client_key_refuses_start`」（I14 单列，不并入 I9）；若采用候选 (i) →「`direct_listener_binds_loopback_only`」「`direct_listener_accepts_single_connection`」「`direct_listener_uses_exclusive_addr_on_windows`」；若采用 (ii) →「`direct_path_opens_no_local_port`」。
 - [ ] helper 协议：Go「`TestControlProtocolNeverEchoesAddressToArgvOrStderr`」「`TestDatagramPipeIsSeparateFromControlStdio`」（候选 (ii)）。
@@ -314,14 +333,14 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 | 阶段 | 内容 | 门禁 / 证据 |
 |---|---|---|
 | 调研 | 上游机制、tailcat 核实 | 已完成：见本文与 feature map |
-| 规格 | 本文 + feature map，走分支 + PR | PR #1（Draft） |
-| 设计评审 | 需求与架构评审（独立于实现），分级 findings，修订后复审至无严重问题 | [`tailcat-p2p-review.md`](tailcat-p2p-review.md)（各轮报告全文在 [`review/`](review/)） |
+| 规格 | 本文 + feature map，走分支 + PR | r5 已随 PR #1 合入本 fork 的 `main`（2026-11-10，merge `b24a671`）。**r6 仍在 `spec/tailcat-p2p` 上追加，须另开 Draft PR**；不写 `main`、不合并、不改仓库设置 |
+| 设计评审 | 需求与架构评审（独立于实现），分级 findings，修订后复审至无严重问题 | [`tailcat-p2p-review.md`](tailcat-p2p-review.md)（各轮报告全文在 [`review/`](review/)）；r6 对应第 6 轮 |
 | 项目负责人批准 (A) | 本变更属重大改动；spec 与评审都不代替批准。(A)：**仅批准 Phase 0 spike**，范围限定在独立 spike 分支，**不得合并，spike 代码不得直接复用进 Phase 1**（Phase 1 按先红后绿重写） | **已批准（2026-11-10 项目负责人批复）**，阈值同批确认；结论记录在 PR 评论 |
-| 工作流脚本 / CI 移植（独立 PR） | 把 workflow v2 的检查（隐私扫描、署名 trailer、spec-requires-tests）移植进本 fork，**单独一个 PR，在 Phase 1 之前完成**；本 PR 不含 | 独立 PR（后续） |
-| Phase 0 spike | 实测并产出数据，见下表清单与 go/no-go 阈值 | 结果写入规格 r6 |
-| 复审 | **Phase 0 结果 → 规格 r6 → 再做一轮设计复审**直到无 S1 | 追加到评审文档 |
-| 项目负责人批准 (B) | 批准 Phase 1 全量实现；“降级为仅低码率档”属范围变更，须在 (B) 中单独确认 | PR 评论记录批准结论 |
-| 先红后绿 | 先提交行为断言失败的测试，再最小实现 | 实现 PR（另开分支） |
+| 工作流脚本 / CI 移植（独立 PR） | 把 workflow v2 的检查（隐私扫描、署名 trailer、spec-requires-tests）移植进本 fork，**单独一个 PR，在 Phase 1 之前完成** | **已完成**：PR #2 已合入本 fork 的 `main`（事实记录）。本 r6 工作不改 `ci/workflow-v2` 分支与仓库设置 |
+| Phase 0 spike | 实测并产出数据，见下表清单与 go/no-go 阈值 | 云 VM 结果已写入本文 r6 与下节对照表。spike 分支 PR #3 **保持 Draft**，代码不进入 Phase 1 |
+| 复审 | **Phase 0 结果 → 规格 r6 → 再做一轮设计复审**直到无 S1 | 第 6 轮，见 [`review/tailcat-p2p-round6.md`](review/tailcat-p2p-round6.md) |
+| 项目负责人批准 (B) | 批准 Phase 1 全量实现；“降级为仅低码率档”属范围变更，须在 (B) 中单独确认 | **尚未批准**。**(B) 的前提**：r6 复审无 S1；**真机复核按下文「批准 (B) 前真机复核判据」通过**（机器待项目负责人指定，本规格与执行者不做任何安排、不预订设备；托管 DERP 须另行许可）。结论记在 PR 评论 |
+| 先红后绿 | 先提交行为断言失败的测试，再最小实现；**不做豁免**（项目负责人对本仓库 workflow v2 的要求严于原文里“可对单个 PR 豁免”的条款，以本决定为准） | 先红验收测试清单见下文。测试代码由另行安排的工作编写（本规格不附测试代码）。含本规格变更的 Draft PR 在先红测试并入之前，`spec-requires-tests` 为红是**预期状态**，不是豁免 |
 | 验收 | 本地全部套件真实通过数 + 手动线上验证记录 | PR 描述 `## 验收清单` / `## 风险分级` |
 | 合并 | 仅在本 fork，不向上游提 PR；需批准 | — |
 
@@ -337,7 +356,7 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 8. helper 体积与第三方许可清单；macOS 嵌套签名 / 公证可行性。
 9. 中转 RTT 下栅栏等待上限、Commit 等待 T、直连 Ping 间隔与存活检测 K 的校准（K 的形式见 §2；直连通道的写超时按通道区分）。
 10. 控制端在发出 / 收到 `DirectOffer` 之前，为取 `Client.PublicKey` 而创建 helper 时，是否已启动 netmon、拉取 DERP 图或产生其他网络活动（规格要求无网络活动）。
-11. 在最终选定通道上测 R，估计余量系数 k，给出建议 C，并在码率 C（及可达时接近 100 Mbps）下加测 helper CPU；记录 Windows 受限令牌结论对 never + 直连的影响。
+11. 在最终选定通道上测 R，按 **k = 0.5**（真机复核判据；云 VM 上的推导曾写 k ≈ 0.5）给出建议 C，并在码率 C（及可达时接近 100 Mbps）下加测 helper CPU；记录 Windows 受限令牌结论对 never + 直连的影响。Phase 0 云 VM 未完成 100 Mbps × 5 min 与 C 码率 CPU，这两项列入真机复核。
 
 ### go/no-go 阈值（2026-11-10 项目负责人已批准；数值须在 Phase 0 报告里逐项对照）
 
@@ -345,28 +364,157 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 |---|---|
 | helper 额外 CPU（被控端，1080p60、约 20 Mbps 单会话；参考硬件：近三年主流桌面 / 笔记本，在 spike 报告中写明型号级别。高码率 C 下的 CPU 见上节，另测） | ≤ 单核 30% |
 | 局域网直连额外往返延迟（相对不经 helper 的同路径） | ≤ 3 ms |
-| 单会话持续吞吐（5 分钟，在 QUIC 层统计） | ≥ 60 Mbps，QUIC 层丢包 < 0.1%；产品允许的最高码率为 100 Mbps（`QualitySettings.bitrate_kbps` 上限 `100_000`）。直连码率上限策略见下节（r5 已定策略，上限 C 的数值待 Phase 0 的 R 填入） |
+| 单会话持续吞吐（5 分钟，在 QUIC 层统计） | ≥ 60 Mbps，QUIC 层丢包 < 0.1%；产品允许的最高码率为 100 Mbps（`QualitySettings.bitrate_kbps` 上限 `100_000`）。直连码率上限 C 见下节（r6 已按公式填入，须真机复核） |
 | 路径判定误判（直连稳定且 RTT ≤ 400 ms，30 分钟；与 Go 用例覆盖的 RTT 范围对齐） | 0 次 |
 | 存活检测误回退（直连稳定；静止桌面 + Wi-Fi 场景，30 分钟） | 0 次 |
-| I3 窗口（自建 `derper`，路径被人为切断后） | 闸门关闭 ≤ 2 s；经 DERP 发出的数据报数量如实记录（上限值在首轮数据后与项目负责人确认） |
+| I3 窗口（自建 `derper`，路径被人为切断后） | 闸门关闭 ≤ 2 s；自建 DERP 上窗口内数据包上限为 **0**（Phase 0 在加入入站静默后实测；只看 `CurAddr` 的 0–10 已否决）。托管 DERP 须真机复核 |
 | 升级完成时间（p50；起点：控制端发出 `DirectRequest`；参考硬件：近三年主流桌面 / 笔记本，在 spike 报告中写明型号级别） | ≤ 12 s（含 DERP 引导与打洞） |
 | Windows 受限令牌 / AppContainer | 至少一种能绑定 UDP 并正常运行；否则走退路（Windows SYSTEM 被控端禁用直连） |
 | 任一不达标（Windows 一行除外，Windows 一行有自己的退路，不触发整体放弃） | 降级为“仅低码率档可用”或放弃；该决定属范围变更，须项目负责人单独确认 |
 
-### 直连会话码率上限策略（r5；关闭第 3 轮 S2-3 的策略部分）
+### 直连会话码率上限策略（r5 定策略，r6 填入 C）
 
 - 产品最高码率仍为 100 Mbps，与中转相同；直连**不**单独提高上限。
-- **策略：限制码率，不因码率达到上限而回退中转。** 回退仍只由路径判定、存活检测、用户收回“直连”权限或主动断开触发。直连路径沿用现有自适应码率（拥塞下调、恢复上调），但其编码目标码率（`QualitySettings.bitrate_kbps`）不得超过直连上限 C。
-- R 与 C 不是同一层的量：R 是 Phase 0 在**最终选定的数据报通道（(i) 或 (ii)）**上测得的 5 分钟 QUIC 层持续吞吐；C 约束的是编码器目标码率。C 必须为声音、包头与重传留出余量，即 C ≤ k×R，系数 k（k < 1）由 Phase 0 根据实测开销给出，不得把 R 直接当成 C。回退到中转后，解除直连上限 C，改回产品 / 中转既有上限（100 Mbps）与既有 ABR。
-- 在 Phase 0 给出 R、k 与建议 C 之后写入 r6：
-  - 若按上式可得的 C ≥ 100 Mbps：C = 100 Mbps（与产品上限相同，无额外限制）。
-  - 若 60 Mbps ≤ C < 100 Mbps：取不超过该值的产品可用码率档，且不低于 60 Mbps；用户选择高于 C 的码率时被限制在 C，并在诊断 / 画质界面提示，不回退。
-  - 若可得的 C < 60 Mbps，或 R 本身 < 60 Mbps：不在本策略内自动定 C；触发已批准的 go/no-go（降级为仅低码率档或放弃），须项目负责人单独确认。
-- Phase 0 还须在目标码率为 C（以及，若 R 支持，接近 100 Mbps）的条件下加测 helper 额外 CPU，对照已批准的 CPU 阈值（阈值本身仍在约 20 Mbps 参考场景下定义，见上表；高码率下的 CPU 如实记录，超标时按 go/no-go 处理）。
-- 本策略不在项目负责人 13:08 的四项决定之内，批准 (B) 时一并确认。验收：「`direct_session_caps_bitrate_instead_of_falling_back`」（在可注入的码率控制下，目标码率高于 C 时被限制在 C，且不发 `DirectFallback`）；「`fallback_to_relay_lifts_direct_bitrate_cap`」。
+- **策略：限制码率，不因码率达到上限而回退中转。** 回退仍只由路径判定、存活检测、写超时（I25）、用户收回“直连”权限或主动断开触发。直连路径沿用现有自适应码率（拥塞下调、恢复上调），但其编码目标码率（`QualitySettings.bitrate_kbps`）不得超过直连上限 C。
+- R 与 C 不是同一层的量：R 是在**最终选定的数据报通道（(i) 或 (ii)，二者尚未因 Windows 结论选定）**上测得的 QUIC 层持续吞吐；C 约束的是编码器目标码率。C 必须为声音、包头与重传留出余量，即 **C ≤ k×R**（k < 1），不得把 R 直接当成 C。回退到中转后，解除直连上限 C，改回产品 / 中转既有上限（100 Mbps）与既有 ABR。
+- **r6 取值：C = 100 Mbps**（`bitrate_cap_kbps = 100000`），与产品上限相同，直连不再另加更低的编码上限。依据（均来自 Phase 0 **云 VM**，**不是**参考硬件）：
+  - 5 分钟持续吞吐只测到了达标门槛：**60 Mbps × 5 min**，(i)/(ii) 均为 0 丢包。这是已证实的 5 分钟 R 下限，**不是**最大 R；不得把 60 Mbps 当成 R 的上限。
+  - 短测 **200 Mbps × 30 s**，(i)/(ii) 各 2 次，平均均达 200.0 Mbps，每秒最低 ≥ 199.6，丢包 0–0.03%，有余量。把这段短测吞吐当作暂用的 R 下界时，取 **k ≈ 0.5** 可得 C ≤ 100 Mbps，与产品上限相接。
+  - **400 Mbps × 30 s** 开始丢包（(i) 一组达 1.48%），不作为 R。
+  - 不限速打满先到约 500–900 Mbps 然后卡死（I25），不能当作可用 R。
+  - 20 Mbps 下 helper 额外 CPU 为 8–9%（阈值 ≤ 30%，仅作量级参考）。60 Mbps × 5 min 时被控端 helper CPU 约 20–21%。200 Mbps × 30 s 时被控端 helper CPU 约 40–51%（高码率 CPU 如实记录；阈值本身仍在约 20 Mbps 参考场景下定义）。
+- **必须用真机复核后才能作为批准 (B) 的依据**。C = 100 Mbps 在云 VM 上是暂定值：5 分钟只证实了 60 Mbps，200 Mbps 只跑了 30 s，并不满足“5 分钟持续 R、再取 k = 0.5”的完整推导。Phase 0 清单第 11 项要求的“C 码率下 helper CPU”也未在 100 Mbps 下测量（只测了 60 与 200 Mbps）。判据见下表；机器待项目负责人指定，本规格不做任何安排。不达标不得在本规格内自动降档，须提交项目负责人另定。
+- 本策略与 C 的数值均须在批准 (B) 时一并确认。验收见 I26 用例；机制用例须注入较低的 C，不能只靠默认 100 Mbps。
 
-> 工作流适配说明：`docs/workflow-v2.md` 与 `AGENTS.md` 来自另一个仓库（passkey 演示），其中 `tests/*.mjs`、CI 检查名（`spec-requires-tests`、`agent-trailer`、`privacy-scan`）是那个仓库的实现。
-> 本 fork 目前没有这些脚本与 CI（上游也没有 `.github/`；移植正在独立 PR 中进行）。本规格把“验收映射到测试用例名”改写为 Rust / Go 用例名。项目负责人已决定：把检查脚本与 CI 移植进本 fork，作为独立 PR，在 Phase 1 之前完成。
+### 批准 (B) 前真机复核判据（只写判据，不安排机器与时间）
+
+机器待项目负责人指定。被测对象默认是 spike 分支（PR #3 保持 Draft、不合并）。是否允许在 spike 上补做 I24 / I25 / 入站静默修正，属于已批准 (A) 的范围问题，须项目负责人确认；本规格不安排该补测。I24 / I25 的行为验收仍归 Phase 1（(B) 之后）。托管 DERP 复核会联系第三方服务，**须项目负责人另行许可**后才能做。
+
+| 项 | 通过条件 | 不通过时 |
+|---|---|---|
+| 码率 / k | **固定 k = 0.5**。在参考硬件、最终选定通道上，5 分钟 QUIC 层持续吞吐 **R ≥ 200 Mbps**，丢包 < 0.1%，从而 C = 100 Mbps 满足 C ≤ k×R | 提交项目负责人另定 C；不在规格内自动降档 |
+| 约 20 Mbps 下的 CPU | 已批准阈值：helper 额外 CPU ≤ 单核 30%，须在参考硬件上达标 | 按已批准 go/no-go 处理（降级或放弃，须项目负责人确认） |
+| C 码率下的 CPU | 在目标 C = 100 Mbps 下如实记录 helper 额外 CPU。**100 Mbps 下是否可接受，由项目负责人在 (B) 时根据真机记录判断**，规格不另设自动阈值 | 记录数字，交 (B) 判断 |
+| I3 自建 DERP | 闸门关闭 ≤ 2 s；窗口内数据包为 0（关闭时刻须早于 magicsock 信任期过期） | **视为 (B) 前提不满足**；须先修规格或实现后重测 |
+| I3 托管 DERP | 期望窗口内数据包为 0（与自建相同的静默 / 等效条件）；该项须项目负责人许可 | 不是 0 时提交项目负责人决定允许的上限，不在规格内擅自放宽 I3 |
+| 路径 / 存活 | 真实 NAT / 公网时延 / 真实 Wi-Fi 下，误判与误回退仍为 0；升级 p50 ≤ 12 s | 提交项目负责人按已批准 go/no-go 处理 |
+| 写超时误触发 | 在 C 与 200 Mbps 限速下，写超时看门狗误触发次数为 0（或如实记录并交 (B) 判断）。若项目负责人不允许在 spike 上补做 I25，该行标为**未测**，移交 Phase 1 验收，并在 (B) 中注明 | 记录数字或“未测”，交 (B) 判断 |
+| 码率所用通道 | 若候选通道 (i)/(ii) 尚未选定，两种候选在参考硬件上都须达到 R ≥ 200 Mbps × 5 min；或先选定通道再测 | 未选定且只有一种达标时，不得把另一种当作已通过 |
+| Windows / macOS | 受限令牌或 AppContainer 至少一种能绑定 UDP 并运行；macOS 签名 / 公证可行性如实记录 | Windows 不可行则走已有退路（SYSTEM 被控端禁用直连），不触发整体放弃 |
+
+> 工作流适配说明：`docs/workflow-v2.md` 与 `AGENTS.md` 来自另一个仓库（passkey 演示）。检查脚本与 CI 已由独立 PR #2 合入本 fork 的 `main`（`spec-requires-tests`、`agent-trailer`、`privacy-scan`）。本规格把验收映射为 Rust / Go / 前端用例名；先红测试的文件位置必须符合 `scripts/check-spec-tests.mjs` 认可的类型。本 r6 工作不改 `ci/workflow-v2` 分支。更改 `docs/specs/*.md`（`review/` 下的评审报告除外）的 PR 必须同时包含先失败测试，无豁免。
+
+### Phase 0 结果对照（云 VM；来源 PR #3 / `065c6f7`，保持 Draft）
+
+数据全部来自云 VM（4 vCPU，型号未公开的 Intel Xeon，约 15 GB，Linux 6.12；自建 DERP + 命名空间；仿真 WAN / Wi-Fi），**不是**“近三年主流桌面 / 笔记本”参考硬件。真实 NAT、公网时延、托管 DERP、Windows、macOS、真实 Wi-Fi **未测**，批准 (B) 前须在项目负责人指定的真机上复核。
+
+| 指标 | 云 VM 实测 | 结论（仅限该环境） |
+|---|---|---|
+| helper 额外 CPU（约 20 Mbps） | 被控端 8.0% (i) / 9.0% (ii)；控制端 7.2% / 7.2% | 达 VM 阈值；须真机复核 |
+| 局域网额外往返延迟 | (i) p50 +0.23–0.46 ms； (ii) 复测 p99 +0.57–0.95 ms | 达标；（ii）首测 p99 +3.83 ms 属 VM 噪声 |
+| 60 Mbps × 5 min | (i)/(ii) 均为 60.0 Mbps，0 丢包 | 达标 |
+| 200 Mbps × 30 s | 平均 200.0 Mbps，丢包 0–0.03% | 有余量；非 5 分钟 |
+| 400 Mbps × 30 s | 开始丢包（(i) 一组 1.48%） | 不作为 R |
+| 路径误判 / 存活误回退（30 min） | 闸门离开与 K 超时均为 0（仿真 Wi-Fi） | 达标；真实 Wi-Fi 未测 |
+| I3 被控端闸门 | 只看 `CurAddr`：4.72 s，窗口内 0–10 包（否决）；加 1000 ms 入站静默：1.02 s，0 包 | 修正方案达标；托管 DERP 未测 |
+| I3 控制端闸门 | 1.51 s（6/6） | 达标 |
+| 升级 p50 | 真实中转 + 同意：DirectRequest→Commit p50 0.39 s、p90 1.36 s（180/180）；未修 I24 时呈约 0.44 s / 1.40 s 两档 | 低于 12 s；I24 为 Phase 1 前提 |
+| 同意步骤开销 | 6–9 ms；never Hello→Commit p50 约 0.48 s | 可忽略量级 |
+| 多 `Server` | 同进程 3 个，互相独立、无 goroutine 泄漏 | 设计仍每会话一进程 |
+| `Client.Ping` / 超限 UDP / quinn 0.11 名称 | 内部超时约 10 s；超 1232 写入返回 nil 并静默丢弃；`initial_mtu(1232)` 等名称已确认 | 已写入 I11 与 §2 |
+| helper 体积与许可 | linux/amd64 strip 后约 19 MB 量级；无 GPL / LGPL / MPL | 已核实许可大类 |
+| 候选通道 (i)/(ii) | 吞吐与 CPU 相当；(ii) 不开本机端口，饱和卡死更易复现 | **暂不选定**，等 Windows 真机结论 |
+| 控制端 Offer 前是否已有网络活动 | 规格要求无；列为验收「`controller_helper_no_network_before_offer`」 | 以该用例为准，不把 spike 细节当作已关闭 |
+| Windows 受限令牌 / AppContainer / 防火墙；macOS 签名公证 | 仅交叉编译成功 | **未测**；机器待项目负责人指定 |
+
+建议写入配置的超时（见 §2 / 配置表）：`upgrade_timeout_secs = 15`（下限 12）、栅栏 `max(1 s, 2 × 中转 srtt)`、T `max(2 s, 4 × 直连 RTT)`、Ping 250 ms、存活检测 K `max(1.5 s, 4×间隔 + 2×RTT)`（误回退判定的实现值可用 2 s；驱动闸门的 K 不得取 2 s）、`rx_silence_ms = 1000`、写超时 500 ms、Status 轮询 100 ms。
+
+### never 模式的已知隐私风险
+
+`approve = "never"` 且 `[direct] enabled` 时，**持码人可以连上来拿到被控端公网 / 内网 / VPN 地址后立即断开，并反复来访**。被“断开此控制端”的持码人在控制码仍然有效时也可以再连回来并再次获得直连。地址收集在画面上不可见；never 模式没有确认窗，也就没有“猜中码会惊动本机用户”这层间接防护。默认使用 Tailscale 托管 DERP 时，引导过程还会向第三方暴露被控端公网 IP 与连接时间。
+
+这是 r5 决定（never 允许直连、显式配置视为同意、拒绝不使控制码失效）下的**已知风险**，不是实现缺陷，也不构成单独的不变量。运营者现有的关闭手段仍是：停止共享（换码）、关闭 `approve = "never"`，或关闭 `[direct] enabled`（后者只阻止直连）。
+
+### never 模式隐私缓解选项（待项目负责人决定）
+
+下列选项**只作为候选项写入，标为「待项目负责人决定」**。本规格**不把其中任何一项写成默认设计**，也**不让任何不变量依赖“已启用某项缓解”**。决定之前**不实现**这些选项。决定之前的现行行为就是 r5 已批准的语义（持码人被“断开此控制端”后可以再连；登录屏 / 锁屏在 never + `[direct] enabled` 下仍可直连，I22 例外），这是已经批准的现状，**不是**在替选项预设“关闭”默认值。若某项被采纳，须另行修订相应不变量、用例与 feature map 后再实现。
+
+| 选项 | 利 | 弊 | 一旦采纳会改动的规格点 |
+|---|---|---|---|
+| 审计日志（本地记录 never 模式下的直连会话时间、控制端设备名、是否短连接；按 I7 脱敏，不写地址 / 密钥 / 控制码） | 事后可追查谁在何时接入、是否在收集地址；崩溃 / 写超时也可入账 | 不能阻止收集地址本身；日志仍含会话元数据，有泄露与磁盘占用；保留期限与查阅入口都要另定 | 主要是文档与实现要求；现有不变量不必改，但须补日志脱敏用例，并与 I7 对齐 |
+| 对 never 模式下新会话 / `DirectRequest` 限速 | 降低反复短连接收集地址、猜码的速率 | 合法频繁重连可能被误伤；挡不住第一次得手；阈值与计数键（来源 IP / 设备标识）须另定，设备标识可伪造 | 可能扩展 I17；须新增限速用例；不改变 I21 的同意定义 |
+| 定期更换控制码 | 缩小码泄露后的可用窗口，缩短被踢后反复回来的时间 | 无人值守的合法控制端会被打断，须重新获码；周期过短伤可用性，过长缓解有限；与已决定的“停止共享才换码、断开此控制端不换码”如何协调须另定 | 须修订 I18（何时换码）与配置项；补定期换码用例；与开放问题 12 的已决定语义协调 |
+| 拒绝被踢掉的控制端重连（拒绝表 / 仅已保存设备） | 关闭“断开此控制端后持码人再连回来拿地址”的窗口 | 改变 r5 已写明的 never 语义（持码人可再连）；作用域（本次运行 / 持久）与伪造设备标识都要另定；可能与“拒绝不使控制码失效”冲突 | 须修订 I18 / I21 与用例 `never_mode_kicked_device_can_return_until_code_changed`、F23 |
+| 登录屏 / 锁屏无法显示指示条时禁止直连 | 避免在本机无法一键停止、无法显示 SAS / 路径指示时仍暴露地址 | 改变无人值守（尤其 Windows 登录屏）直连的可用性；运营者可能正是要在登录屏使用 never + 直连 | 须修订 I21 / I22 例外与用例 `never_direct_at_lock_screen_has_no_local_indicator`，以及 Windows 登录屏一节 |
+
+Phase 0 报告还提过两项未列入上表的想法（可行性未证实，同样不实现、不设默认）：只通告公网映射地址；托盘显示最近一次直连的时间与控制端设备名。
+
+### 先红验收测试清单
+
+本表供另行安排的测试工作按「先红后绿」编写**先失败**的验收测试，以便含本规格变更的 PR 通过已合入的 `spec-requires-tests` 门禁（**无豁免**）。文件位置只使用 PR #2 `scripts/check-spec-tests.mjs` 认可的测试文件类型：
+
+- `tests/*.mjs`
+- `(crates/[^/]+|server|web|client/src-tauri|android/native|p2p)/(tests|examples)/[^/]+.rs`
+- `client/tests/*.test.ts`
+- 任意路径下的 `*_test.go`
+- `android/app/src/test/**/*.kt`
+- 或在已有 `.rs` 中新增 inline `#[test]` / `#[tokio::test]` / `#[cfg(test)]`（本表仍优先给出独立测试文件，避免把位置写到不被认可的目录）
+
+本规格**不附测试代码**。完整行为仍以上文「验收测试清单」为准；下表是优先落地、且覆盖 r6 五项前提的先红子集，文件位置与上文清单已统一（协议用例放 `crates/airhand-proto/tests/wire.rs`，配置用例放 `client/src-tauri/tests/direct_config.rs`；会话 / 直连状态机在 I23 下沉后放 `crates/airhand-link/tests/direct.rs`，仍须留在桌面托盘 / 确认窗侧的用例放 `client/src-tauri/tests/`）。手动 / 真机项不写入本表（不能通过该门禁）。缓解选项决定之前不实现，也不为它们编写默认开启或默认关闭的断言。
+
+**Phase 1 按方案 (a) 编写先红用例**；下表中方案 (b) 专属用例仅在改用 (b) 并修订规格后替换编写，不纳入本轮必写集合。
+
+**“先红”的表达方式**（避免与已合入的 CI 冲突）：
+- Rust 用例必须通过桩 API / 最小类型使所在 crate **编译通过**，在运行时断言失败；不得使用 `#[ignore]`，也不得引用尚不存在、会导致整个 crate 无法编译的符号（否则既有测试与 `clippy --all-targets -D warnings` 会一起失败）。Draft PR 上预期**只有本清单列出的先红用例失败**；为确认其余测试仍通过，编写测试的工作应在 PR 说明中附上 `cargo test --workspace --no-fail-fast` 与（若已有 `p2p/`）`go test ./...` 的结果。不要求为此改 CI。
+- 若新增 `p2p/*_test.go`，必须同时给出能让 `go test` / CI 的 `go-helper` job 启动的最小骨架：`p2p/go.mod`（及必要的 `go.sum`）、被测包可编译的空实现或桩。不得只丢测试文件。
+- 本 r6 Draft PR 在上述先红测试并入之前，`spec-requires-tests` 为红是预期状态，不是豁免；并入后该检查须变绿，其它检查不得因“未实现的 API”而编译失败。
+
+| 测试名 | 对应不变量 / 功能 | 文件位置建议 | 断言内容 |
+|---|---|---|---|
+| `TestHostGateClosesOnRxSilence` | I3、§2 入站静默 | `p2p/gate_test.go` | 可注入路径源：首个入站之后连续 1000 ms 无入站，被控端闸门关闭，时限 ≤ 2 s；只把 `CurAddr` 置空不得作为唯一通过条件 |
+| `TestHostGateRxSilenceNotArmedBeforeFirstInbound` | I3、I24 | `p2p/gate_test.go` | 开闸后、首个入站到达前，静默条件不得关闸 |
+| `TestHostGateSilenceCloseIsStickyInEpoch` | I3 | `p2p/gate_test.go` | 静默关闭后本 `epoch` 不再打开，也不再发 `DirectGateOpen` |
+| `TestHostGateWindowZeroPacketsOnSelfHostedDerp` | I3 窗口包数上限 | `p2p/gate_test.go` | 进程内自建 derper，不依赖外网；关闭时刻早于信任期过期时窗口内数据包为 0 |
+| `TestHostGateClosedWhenCurAddrEmpty` | I3 | `p2p/gate_test.go` | `CurAddr` 为空时闸门关闭（仍须与静默条件同时存在） |
+| `TestKDrivenGateStillSilentBeforeCommit` | I3、K 等效方案 | `p2p/gate_test.go` | 若实现 K 驱动，升级阶段仍须保留不依赖 Ping 的关闭条件，关闭 ≤ 2 s |
+| `host_gate_not_closed_during_fence_wait_on_static_screen` | I3、I2、I24 | `crates/airhand-link/tests/direct.rs` | 栅栏等待期间、静止桌面、无控制流 Ping 时闸门保持打开；直连 `keep_alive_interval` ≤ 250 ms |
+| `TestSchemeBSilenceStartsAtCacheFlush` | I3、I24 方案 (b) | `p2p/gate_test.go` | 仅在改用方案 (b) 时编写：静默从开闸并交付缓存起算，开闸前到达的缓存包不得立即导致粘性关闭 |
+| `TestHostGateWindowIncludesStatusPollInterval` | I3、§2 | `p2p/gate_test.go` | 窗口计算计入 `Server.Status()` 轮询间隔（默认 100 ms） |
+| `TestGateDropsWhenPathNotDirect` | I3、F5 | `p2p/gate_test.go` | 路径非 direct 时立即丢弃写入隧道的数据报 |
+| `TestControllerGateIgnoresSlowButDirectPath` | I3、§2 | `p2p/gate_test.go` | RTT > 250 ms 且 ≤ 400 ms 的直连不被误判为非 direct |
+| `TestClientPingMustNotBeUsedForPath` | I3、§2 | `p2p/gate_test.go` | 路径判定代码路径不得调用 `Client.Ping` |
+| `first_quic_initial_not_lost_to_host_gate` | I24（Phase 1 按方案 (a) 落地；两方案共用此确定性断言） | `crates/airhand-link/tests/direct.rs` | 注入被控端闸门晚于控制端打开的时间差：升级期间因闸门关闭而丢弃的直连 QUIC 包数为 0，且不出现因 Initial 丢失而走 PTO 的重传 |
+| `controller_waits_for_direct_gate_open_before_first_quic` | I24 方案 (a)、F4 | `crates/airhand-link/tests/direct.rs` | 未收到 `DirectGateOpen` 且本端闸门未开时，控制端发出的直连 QUIC 包数为 0（仅方案 (a)） |
+| `host_sends_direct_gate_open_when_gate_opens` | I24 方案 (a)、F4 | `crates/airhand-link/tests/direct.rs` | 被控端闸门打开后经中转发 `HostMsg::DirectGateOpen { epoch }`，`epoch` 与当前升级一致（仅方案 (a)） |
+| `late_or_mismatched_direct_gate_open_is_ignored` | I13 / I24 方案 (a) | `crates/airhand-link/tests/direct.rs` | 迟到或 `epoch` 不匹配的 `DirectGateOpen` 被忽略 |
+| `host_inbound_cache_delivers_initial_before_gate_open` | I24 方案 (b) | `crates/airhand-link/tests/direct.rs` | 闸门未开时到达的 Initial 被缓存并在开闸后交付（仅方案 (b)） |
+| `host_inbound_cache_is_bounded_and_cleared_on_epoch_end` | I24 方案 (b) | `crates/airhand-link/tests/direct.rs` | 缓存不超过 32 包或 64 KiB、超时丢弃、`epoch` 结束时清空，且只接受已授权对端 |
+| `TestWriteTimeoutReportsPathFailure` | I25 | `p2p/helper_test.go` | 隧道 `Write` / `WriteTo` 以及候选 (ii) 往 Rust 的管道写超过 `write_timeout_ms`（默认 500 ms）即失败并上报，进程不永久阻塞 |
+| `helper_write_stall_triggers_fallback` | I25、I2 | `crates/airhand-link/tests/direct.rs` | 假写路径超时后仍阻塞 ⇒ 回退中转、结束 helper 进程并拉起新进程后开新 `epoch`、会话继续，不发结束会话的 `Bye`；计入最多 3 次重试 |
+| `direct_session_caps_bitrate_instead_of_falling_back` | I26、F10 | `crates/airhand-link/tests/direct.rs` | **注入较低的 C（例如 30 Mbps）**，目标码率高于该 C 时被限制在 C，且不发 `DirectFallback` |
+| `fallback_to_relay_lifts_direct_bitrate_cap` | I26、F10 | `crates/airhand-link/tests/direct.rs` | 同样在注入的较低 C 下，回退中转后解除该上限 |
+| `direct_config_bitrate_cap_default_is_100mbps` | 配置、I26 | `client/src-tauri/tests/direct_config.rs` | `bitrate_cap_kbps` 默认为 `100000`；`enabled` 默认关闭 |
+| `direct_config_rejects_bitrate_cap_over_100mbps` | 配置、I26 | `client/src-tauri/tests/direct_config.rs` | `bitrate_cap_kbps` > 100000 被拒绝 |
+| `direct_config_defaults_off` | F1、I1 | `client/src-tauri/tests/direct_config.rs` | `[direct] enabled` 默认 false |
+| `disabled_by_default_never_spawns_helper` | I1 | `crates/airhand-link/tests/direct.rs` | 未启用时假 helper 工厂 0 次调用，无 `Direct*` 消息 |
+| `direct_messages_wire_is_stable` | I4、F4、I24 | `crates/airhand-proto/tests/wire.rs` | 含 `DirectGateOpen` 在内的直连控制消息线格式稳定 |
+| `protocol_version_is_10` | I4 | `crates/airhand-proto/tests/wire.rs` | `PROTOCOL_VERSION == 10` |
+| `direct_quic_never_sends_datagram_over_1232` | I11 | `crates/airhand-link/tests/direct.rs` | 观测到的最大数据报 ≤ 1232；超限包被丢弃而非依赖库报错 |
+| `no_offer_before_approval` | I12 / I16 | `crates/airhand-link/tests/direct.rs` | 取得直连同意前不发 `DirectOffer`、不启动被控端 helper |
+| `controller_helper_no_network_before_offer` | I16 | `crates/airhand-link/tests/direct.rs` | 控制端在 `DirectOffer` 之前 helper 无网络活动（不拉 DERP 图、不连 DERP） |
+| `approve_never_allows_direct_when_enabled` | I21 | `crates/airhand-link/tests/direct.rs` | `never` + `[direct] enabled` 且对端声明直连时不弹窗即可升级 |
+| `never_mode_kicked_device_can_return_until_code_changed` | I18 / I21 已知风险 | `crates/airhand-link/tests/direct.rs` | 被“断开此控制端”的持码人在换码前可以再连回来；本用例记录已知行为，不把拒绝重连当成默认 |
+| `approve_never_operator_config_counts_as_consent` | I21 | `crates/airhand-link/tests/direct.rs` | 两项显式配置视为同意，可发 `DirectOffer` / 启动 helper |
+| `static_screen_does_not_trigger_fallback` | I2 | `crates/airhand-link/tests/direct.rs` | 无画面无声音数十秒，Ping/Pong 正常 ⇒ 不回退 |
+| `missing_pong_triggers_fallback` | I2、存活检测 | `crates/airhand-link/tests/direct.rs` | 直连上 K 秒收不到 `Pong` ⇒ `DirectFallback`，会话保持中转 |
+| `helper_crash_does_not_end_session` | I2、I10 | `crates/airhand-link/tests/direct.rs` | helper 崩溃只回退，不结束会话 |
+| `no_switch_before_both_gates_open` | I3 | `crates/airhand-link/tests/direct.rs` | 任一侧闸门未开时不切换发送端 |
+| `direct_token_is_one_time` | I5 | `crates/airhand-link/tests/direct.rs` | 令牌只能使用一次 |
+| `TestEmptyOrInvalidAllowlistRefusesToStart` | I14、I9 | `p2p/helper_test.go` | `client_key` 为空或无法解析时拒绝 Start |
+| `stop_sharing_rotates_code_old_code_rejected` | I18 | `crates/airhand-link/tests/direct.rs` | 停止共享换码，旧码立即被拒 |
+| `disconnect_one_controller_keeps_code_and_closes_both_paths` | I18 | `crates/airhand-link/tests/direct.rs` | “断开此控制端”关两条路径、不换码 |
+| `direct_secrets_are_redacted_in_debug_and_logs` | I7 | `crates/airhand-link/tests/direct.rs` | 地址 / 令牌 / 密钥不出现在调试日志明文里 |
+| `verification_string_is_displayed_not_required` | SAS | `crates/airhand-link/tests/direct.rs` | 升级不因用户未比对校验串而阻塞或失败 |
 
 ## r4 处理记录（第 3 轮复审的 S2 / S3 与项目负责人批复）
 
@@ -387,14 +535,39 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 
 **第 5 轮复审（无 S1）后的 r5.1**：已落实其 S2 / S3（never 路径上授权记忆 / 踢出 / 收回的例外、I22 在登录屏 / 锁屏的例外、放宽配置的延后生效与防注入、`granted.direct` 须对端也启用、控制端同意、SAS 显示位置、码率 R/C 换算与回退后解除上限、`ControllerMsg::Bye` 无字段、并发上限措辞、Phase 0 增补项、`HELLO_WAIT`）。未采纳须另行批准的方案：never 模式的“本次运行拒绝表”、以及“无法显示指示条就不升级直连”。
 
-**仍待 Phase 0 实测数据（r6）**：各超时与阈值的取值（升级超时、栅栏上限、T、Ping 间隔、K、M、`Server.Status()` 轮询）、直连上限 C 的确定值（含余量系数 k 与 C 码率下的 CPU）、回环候选 (i) / (ii) 的选择、同进程多 `Server` 是否安全、Windows 受限令牌 / AppContainer 结论及其对 never + 直连的影响、控制端在 Offer 前是否已有网络活动、go/no-go 判定、helper 体积与许可清单。
+**已由 r6 根据 Phase 0 云 VM 数据关闭的项**：超时与阈值（见配置表与 §2）、C = 100 Mbps（含 k ≈ 0.5 的写法与 VM 限制）、同进程多 `Server` 的 VM 结果（设计仍每会话一进程）、helper 体积与许可大类、I3 窗口包数上限（自建 DERP 上为 0）、升级双峰与写超时看门狗（I24 / I25）。
+
+## r6 处理记录（Phase 0 五项前提与第 6 轮复审）
+
+**项目负责人 2026-11-10 14:30（Asia/Taipei）决定，已写入本版**：
+
+1. **被控端闸门加上入站静默条件**（默认 1000 ms 无入站即关）。Phase 0 实测：加上后关闭时限 1.02 s，窗口内经 DERP 的数据包为 0。允许由 Rust 侧存活判定 K 驱动闸门的等效实现，须满足同一 I3（≤ 2 s，自建 DERP 上窗口内 0 包）。
+2. **修复升级耗时两档**（约 0.44 s 与约 1.40 s）：控制端须在收到 `DirectGateOpen`（或等效短时入站缓存）后再发首个 QUIC 包（I24）。不得只靠调小 PTO / `initial_rtt`。
+3. **写超时看门狗**（I25）：helper `Write` / `WriteTo` 默认 500 ms 超时即回退中转、换新 `epoch`、不结束会话。对应不限速打满时卡在 gVisor UDP 写上的问题。限速不能替代该看门狗。
+4. **码率上限 C = 100 Mbps**，按 C ≤ k×R 写入；R 取 Phase 0 QUIC 层吞吐（5 分钟只证实了 60 Mbps 下限；200 Mbps × 30 s 有余量，取 k ≈ 0.5）。数据来自云 VM、不是参考硬件，批准 (B) 前须用真机数据复核。I3 窗口内经 DERP 的数据包上限：自建 DERP 上为 0。
+5. **never 模式的隐私问题写成已知风险**：持码人可以连上来拿到地址后立即断开、反复来访。缓解只作为「待项目负责人决定」的选项，不设默认值，不变量不依赖这些选项。
+6. **真机测试是批准 (B) 的前提**；机器待项目负责人指定，本规格不做任何安排。
+7. 规格内给出「先红验收测试清单」，供另行安排的测试工作编写先失败用例，以通过 `spec-requires-tests` 门禁（无豁免）。本文件不附测试代码。
+
+**针对性复审（r6.1，0 条 S1）后又做的文字修订**：闭合复审新提出的 5 条 S2——方案 (b) 静默从交付缓存起算、缓存存活不超过静默阈值；升级阶段用 QUIC `keep_alive_interval` ≤ 250 ms 而非控制流 Ping；`rx_silence_ms` 下限 1000 ms；Phase 1 按方案 (a) 写先红用例；判据表“不通过时”措辞、写超时未测时的处理、通道未选定时两种都须测、20 Mbps CPU 走 go/no-go。S3 中测试放置口径、粘性只针对已打开过的闸门、`--no-fail-fast` 说明一并写入。未再开一轮复审（本轮已无 S1）。
+
+**第 6 轮复审（2 条 S1）后的 r6.1**：已闭合 S1-1（静默计时从首个入站之后才开始、关闭粘性、闸门双向、I24 按方案 (a)/(b) 分写用例、缓存界限）与 S1-2（增加「批准 (B) 前真机复核判据」表：k = 0.5 即 R ≥ 200 Mbps × 5 min、C 码率 CPU 交 (B) 判断、托管 DERP 期望 0 包且须许可、被测对象为 spike、I24/I25 行为验收归 Phase 1）。并落实 S2/S3：K 驱动在提交前仍须保留静默且驱动闸门的 K 不得取 2 s；I25 重启 helper 进程并计入 3 次重试、看门狗覆盖往 Rust 的写；never 选项写明“决定之前不实现、现行行为是 r5 已批准语义”；先红的编译通过 / 运行时失败写法与 `p2p/` 最小骨架、Draft PR 门禁为红是预期状态；码率机制用例注入较低的 C；I26；配置范围；确定性 I24 用例；两份清单文件位置统一。
+
+**仍待（不阻塞 r6.1 文本，但阻塞批准 (B) 或通道选定）**：
+
+- 真机复核（NAT / 公网 / 托管 DERP / 真实 Wi-Fi / 参考硬件上的 C 与 CPU）；机器待项目负责人指定。
+- 候选通道 (i) / (ii) 的选择（等 Windows 真机结论）。
+- Windows 受限令牌 / AppContainer / 防火墙，以及 macOS 签名公证。
+- never 模式五项隐私缓解选项（见上节，待项目负责人决定）。
+- 控制端在 Offer 前是否已有网络活动：以用例 `controller_helper_no_network_before_offer` 验收，不把 spike 细节当作已关闭。
 
 ## 项目负责人批复记录（2026-11-10）
 
 - **批准**：Phase 0 spike（(A)，独立分支，不合并、代码不复用）；全部建议的 go/no-go 阈值；方案 B（Go helper 子进程）与第三方许可声明；默认使用 Tailscale 托管 DERP 做引导；v10 服务器与全部客户端同步升级；Phase 1 仅桌面。
 - **新增要求**：被控端必须确认（控制码不等于自动接受，尤其在暴露公网 / 内网地址之前）；被控端要有随时可用的主动断开；握手参考现成方案（见“被控端确认与主动断开”）。
-- **工作流脚本 / CI**：移植为独立 PR，在 Phase 1 之前完成（见阶段表）。
+- **工作流脚本 / CI**：移植为独立 PR，在 Phase 1 之前完成（见阶段表）。**事实记录**：PR #2 已合入本 fork 的 `main`；本 r6 工作不改该分支与仓库设置。
 - **开放问题 11–14（2026-11-10 13:08 Asia/Taipei）**：默认每会话确认；`approve = "never"` 免确认且允许直连（显式配置视为同意）；停止共享换码、另配只断开此控制端；周期性续期默认关；校验串只显示、不强制比对。见上“r5 处理记录”。
+- **r6（2026-11-10 14:30 Asia/Taipei）**：写入 Phase 0 五项前提、C 与 I3 包数上限、never 已知风险与待决缓解选项；真机测试列为批准 (B) 的前提（机器待指定）；先红验收测试清单写入规格，测试代码另行编写。
 
 ## 后续阶段（TODO，仅扩展点，本次不实现）
 
@@ -406,16 +579,17 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 ## 风险
 
 - **tailcat 无稳定性承诺**：API / 线格式可能变；对策：固定 `v0.7.0`（commit `15ab9e6`）并记录 `go.sum` 哈希；升级走单独 PR + 回归；两端 helper 版本不一致时握手失败即回退中转。
-- **不能禁止 DERP 承载数据**：窗口期内少量数据报可能经 Tailscale 共享 DERP（有界，见 I3）；共享 DERP 限速、可撤销、可见元数据；默认关闭 + 可自建 DERP。
-- **性能未知**：QUIC 经回环 / 管道 + 用户态 WireGuard + gVisor 的额外 CPU / 延迟 / 吞吐上限（4K、120 fps 码率较高）；Phase 0 先量，不达标则降级或放弃。
-- **1232 字节上限与库行为**：超限时库内是丢弃 / 报错 / 分片未证实；QUIC 载荷被迫 ≤ 1232，开销略增。
+- **不能禁止 DERP 承载数据**：采用入站静默（或等效 K 驱动）后，自建 DERP 上 I3 窗口内数据包上限为 0（Phase 0 实测）。托管 DERP 的窗口期与限速**未测**，须真机复核；共享 DERP 仍可能限速、可撤销、可见元数据。默认关闭 + 可自建 DERP。
+- **性能（云 VM 已测，真机未测）**：60 Mbps × 5 min 达标；200 Mbps × 30 s 有余量；400 Mbps 开始丢包；不限速会卡在 gVisor `WriteTo`（I25）。CPU / 延迟数字来自云 VM，不是参考硬件。C = 100 Mbps 须真机复核。
+- **1232 字节上限与库行为**：Phase 0 证实超限写入返回 nil 并被静默丢弃；不得依赖库报错（I11）。
 - **打洞失败率**：对称 NAT / 严格网络下只能走 DERP；本设计在窗口期之后退回自建中转，因此这类网络上**没有收益但也没有长期损失**。
 - **控制流切换复杂度**：栅栏 + 回退重同步是整个设计中最容易出错的部分；复审与测试重点。
-- **Windows SYSTEM 被控端**：见安全模型的具体方案；Phase 0 前不得假设可行。
+- **Windows SYSTEM 被控端**：Phase 0 未测受限令牌 / AppContainer（只验证交叉编译）。在真机结论出来之前不得假设可行；退路仍是禁用该被控端上的直连。机器待项目负责人指定。
+- **升级首包被丢**：未实施 I24 时升级耗时呈约 0.44 s / 1.40 s 两档。Phase 1 必须先等 `DirectGateOpen`（或等效缓存）。
 - **新增运行时依赖与供应链**：Go 工具链、tailscale.com / gVisor / wireguard-go 体积（待实测）与许可声明；安装包体积增长；杀毒软件对 Go / WireGuard 二进制的误报。
 - **打包与平台**：Windows 防火墙、macOS 嵌套 helper 的签名 / 公证 / hardened runtime / 应用防火墙弹窗、卸载流程（`uninstall.rs`）清理 helper、Linux 各分发形态带上 helper——均为 F12 子项，各自需验收。
 - **确认步骤改变桌面被控端的既有行为**：默认 `approve = "ask"` 后，无人值守 / 登录屏主机在不改配置时无法被连接（确认超时即拒）。登录屏 / 锁屏要保持可连接，须显式设 `approve = "never"`；若还要直连，须同时开启 `[direct] enabled`。Windows SYSTEM agent 在登录屏 / 安全桌面上弹确认窗不在 Phase 1 范围（ask 模式超时拒绝）。同时 `e2e.rs` 等既有测试需随之更新。
-- **无人值守直连的暴露面**：`approve = "never"` 且 `[direct] enabled` 时，持有控制码的人无需本机有人点确认即可接入，并获知被控端公网 / 内网地址、经第三方 DERP 引导。控制码泄露或被猜中的后果比纯中转无人值守更大。被“断开此控制端”的持码人可以再连回来并再次获得直连。对策：该组合必须两项都显式开启，且放宽配置须本机确认、不在有输入权限的在途会话期间生效；托盘可显示时醒目警告；写入 `docs/security.md`；拒绝不会使控制码失效，运营者须用“停止共享 / 更换控制码”作废旧码，或关闭 `never` / `[direct] enabled`。登录屏 / 锁屏期间没有本机指示条与一键停止（I22 例外）。Phase 0 / 实现不把控制码、地址或密钥写入仓库或日志（I7）。
+- **无人值守直连的暴露面（已知风险）**：见“never 模式的已知隐私风险”。持码人可以连上来拿到地址后立即断开、反复来访。现有对策仅限已决定的机制：两项配置都必须显式开启；放宽配置须本机确认、不在有输入权限的在途会话期间生效；托盘可显示时醒目警告；写入 `docs/security.md`；拒绝不会使控制码失效，运营者须用“停止共享 / 更换控制码”作废旧码，或关闭 `never` / `[direct] enabled`。登录屏 / 锁屏期间没有本机指示条与一键停止（I22 例外）。审计日志、限速、定期换码、拒绝被踢控制端重连、登录屏禁止直连等**不是**当前默认对策，见待决选项。实现不把控制码、地址或密钥写入仓库或日志（I7）。
 - **协议版本升级**：v9 ↔ v10 不互通；服务器与所有客户端须同时升级（见“发布与回滚”）。
 - **仍需线上验证**：真实跨网络打洞成功率、码率与延迟、DERP 引导可用性——自动测试无法覆盖。
 
@@ -438,7 +612,14 @@ Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在�
 13. **周期性“是否继续共享”**（同日决定）：默认关闭（`reconfirm_minutes = 0`）。
 14. **校验串（SAS）**（同日决定）：只显示，不强制比对。
 
-当前规格在开放问题上**没有仍待项目负责人确认的条目**。批准 (B) 与直连上限 C 的确定值仍待 Phase 0 数据与 r6 复审。
+### 待项目负责人决定（r6；不设默认值，不变量不依赖这些选项）
+
+15. **never 模式隐私缓解**（2026-11-10 14:30 Asia/Taipei 要求列为选项，不写成默认设计）：审计日志；限速；定期换码；拒绝被踢掉的控制端重连；登录屏无法显示指示条时是否禁止直连。利弊见上节。
+16. **真机测试所用的机器**（批准 (B) 的前提）：待指定。本规格不做任何安排。
+
+另有技术项仍待数据、但不属于“选项默认值”问题：候选通道 (i) / (ii) 等 Windows 真机结论；Windows 受限令牌是否可行；托管 DERP 与参考硬件上的 C / I3 复核。
+
+批准 (B) 尚未作出。C = 100 Mbps 与码率策略须在 (B) 时一并确认。
 
 ## 是否重大改动
 
