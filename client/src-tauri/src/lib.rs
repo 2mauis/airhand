@@ -16,6 +16,7 @@ mod i18n;
 mod clipboard;
 mod config;
 mod devices;
+pub mod direct_config;
 #[cfg(test)]
 mod e2e;
 mod ephemeral;
