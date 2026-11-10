@@ -109,6 +109,17 @@ func (r *Relay) Counters() (data, disco int64) {
 	return m.Kinds["other"], m.Kinds["disco"]
 }
 
+// Conns returns the number of DERP connections accepted so far and the
+// number currently open.
+func (r *Relay) Conns() (accepts, current int64) {
+	var m struct {
+		Accepts int64 `json:"accepts"`
+		Current int64 `json:"gauge_current_connections"`
+	}
+	_ = json.Unmarshal([]byte(r.stats.String()), &m)
+	return m.Accepts, m.Current
+}
+
 func (r *Relay) Close() error {
 	r.cancel()
 	return errors.Join(r.http.Close(), r.srv.Close())

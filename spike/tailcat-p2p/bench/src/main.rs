@@ -5,6 +5,7 @@
 //! stream for the DirectRequest / DirectOffer exchange; the real airhand
 //! relay server (`--relay`) carries the baseline session.
 
+mod consent;
 mod ctrl;
 mod helper;
 mod host;

@@ -121,15 +121,16 @@ def fence():
         print(f"| {ms} | {f(r['p50'],1)} / {f(r['p99'],1)} | {f(g['p50'],1)} | {f(g['p99'],1)} | {f(g['max'],1)} |")
 
 
-def cut():
-    section("Path cut (silent UDP drop host⇄ctrl at t=15 s, restore at t=35 s; 5 Mbps host→ctrl; relay one-way 20 ms)")
-    wan = jsonl("wan-cut-wanemu.log")
-    counters = jsonl("wan-cut-derp-counters.jsonl")
+def cut(prefix="wan-cut", note="host gate = Server.Status() CurAddr only"):
+    section(f"Path cut (silent UDP drop host⇄ctrl at t=15 s; 5 Mbps host→ctrl; relay one-way 20 ms; {note})")
+    wan = jsonl(f"{prefix}-wanemu.log")
+    counters = jsonl(f"{prefix}-derp-counters.jsonl")
     cuts = [w["t_us"] for w in wan if w.get("cmd", "").startswith("cut")]
     restores = [w["t_us"] for w in wan if w.get("cmd", "").startswith("restore")]
-    print("| run | ctrl gate closed after cut (ms) | host gate closed after cut (ms) | DERP data pkts cut→host gate closed | DERP data pkts during whole cut | ctrl gate reopened after restore (ms) | host gate reopened after restore (ms) |")
-    print("|---|---|---|---|---|---|---|")
-    for p in sorted(glob.glob(os.path.join(R, "wan-cut-*-[0-9].json"))):
+    hostlog = jsonl(f"{prefix}-host.jsonl")
+    print("| run | ctrl gate closed after cut (ms) | host gate closed after cut (ms) | DERP data pkts cut→host gate closed |")
+    print("|---|---|---|---|")
+    for p in sorted(glob.glob(os.path.join(R, f"{prefix}-*-[0-9].json"))):
         name = os.path.basename(p)[:-5]
         o = load(name)
         s, e = ts(name + ".start"), ts(name + ".end")
@@ -144,18 +145,22 @@ def cut():
                 if x["t_us"] >= after and pred(x["path"]):
                     return x["t_us"]
             return None
+        host_paths = r.get("host_paths") or [
+            h["event"] for h in hostlog
+            if h.get("src") == "helper" and h["event"].get("ev") == "path"
+            and h["event"].get("role") == "host" and s <= h["event"]["t_us"] <= e]
         cg = first(r.get("ctrl_paths"), c, lambda p: p != "direct")
-        hg = first(r.get("host_paths"), c, lambda p: p != "direct")
+        hg = first(host_paths, c, lambda p: p != "direct")
         cr = first(r.get("ctrl_paths"), rs or c, lambda p: p == "direct") if rs else None
-        hr = first(r.get("host_paths"), rs or c, lambda p: p == "direct") if rs else None
+        hr = first(host_paths, rs or c, lambda p: p == "direct") if rs else None
         d1 = derp_during(counters, c, hg) if hg else None
         d2 = derp_during(counters, c, rs) if rs else None
         ms = lambda a, b: f((a - b) / 1e3, 0) if a and b else "—"
-        print(f"| {name} | {ms(cg, c)} | {ms(hg, c)} | {d1[0] if d1 else '—'} | {d2[0] if d2 else '—'} | {ms(cr, rs)} | {ms(hr, rs)} |")
+        print(f"| {name} | {ms(cg, c)} | {ms(hg, c)} | {d1[0] if d1 else '—'} |")
 
 
 def soak():
-    section("Soak (static desktop: no media, 1 Hz Ping/Pong, K = 2 s)")
+    section("Soak (static desktop: no media, direct Ping every 250 ms, K = 2 s, host rx-silence gate 1000 ms)")
     print("| scenario | secs | pings | ctrl K misses | host K misses | ctrl gate left direct | host gate left direct | ping RTT p50 / p99 / max (ms) |")
     print("|---|---|---|---|---|---|---|---|")
     for name in ["wan-soak-rtt400", "wan-soak-wifi"]:
@@ -166,6 +171,23 @@ def soak():
         r = o["result"]
         p = r["ping_rtt_ms"]
         print(f"| {name} | {r['secs']} | {r['pings']} | {r['ctrl_k_misses']} | {r['host_k_misses']} | {r['ctrl_gate_left_direct']} | {r['host_gate_left_direct']} | {f(p.get('p50'),1)} / {f(p.get('p99'),1)} / {f(p.get('max'),1)} |")
+
+
+def consent():
+    section("Consent step (r4), emulated WAN: relay one-way 20 ms per peer, direct 1 ms; simulated user answers 2 s after Hello")
+    print("| set | runs | failures | approval→commit p50 / p90 / max (ms) | DirectRequest→commit p50 / p90 (ms) | ctrl helper spawn+init p50 (ms) | host helper spawn p50 / serve p50 (ms) | Hello→HostHello rx p50 (ms) | stop/kick→both paths closed p50 / max (ms) |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    for name in ["consent-ask-cold-udp", "consent-ask-prewarm-udp", "consent-never-udp",
+                 "consent-ask-cold-pipe", "consent-ask-prewarm-pipe", "consent-never-pipe"]:
+        o = load(name)
+        if not o:
+            print(f"| {name} | missing |")
+            continue
+        m = o["ms"]
+        g = lambda k, q: f(m.get(k, {}).get(q), 1) if m.get(k) else "—"
+        print(f"| {name} | {o['n']} | {o['failures']} | {g('approval_to_commit','p50')} / {g('approval_to_commit','p90')} / {g('approval_to_commit','max')} "
+              f"| {g('req_to_commit','p50')} / {g('req_to_commit','p90')} | {g('ctrl_helper_ready','p50')} | {g('host_spawn','p50')} / {g('host_serve','p50')} "
+              f"| {g('hello_to_host_hello_rx','p50')} | {g('stop_to_relay_media_stream_end','p50')} / {g('stop_to_relay_media_stream_end','max')} |")
 
 
 if __name__ == "__main__":
@@ -179,4 +201,6 @@ if __name__ == "__main__":
     double_send()
     fence()
     cut()
+    cut("wan-cutsil", "host gate also closes after 1000 ms without inbound datagrams")
     soak()
+    consent()

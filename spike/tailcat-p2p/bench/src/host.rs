@@ -23,10 +23,10 @@ use crate::pipesock::PipeSocket;
 use crate::quic::{self, hex};
 use crate::{Args, Log, clk_tck, cpu_ticks, now_us};
 
-const TUNNEL_PORT: u16 = 4433;
+pub(crate) const TUNNEL_PORT: u16 = 4433;
 
 #[derive(Default)]
-struct Shared {
+pub(crate) struct Shared {
     relay_code: AtomicU64,
     relay_control: Mutex<Option<Tx>>,
 }
@@ -34,12 +34,18 @@ struct Shared {
 pub async fn run(args: Args) -> Result<()> {
     let log = Log::open(args.get("log"))?;
     let shared = Arc::new(Shared::default());
+    let region: Value = match args.get("region") {
+        Some(f) => serde_json::from_str(&std::fs::read_to_string(f)?)?,
+        None => Value::Null,
+    };
+    let poll_ms = args.num("poll-ms", 100u64);
     if let Some(server) = args.get("relay") {
         let sh = shared.clone();
         let server = server.clone();
         let log = log.clone();
+        let region = region.clone();
         tokio::spawn(async move {
-            if let Err(e) = relay_host(&server, sh, log).await {
+            if let Err(e) = relay_host(&server, sh, log, region, poll_ms).await {
                 eprintln!("relay host: {e:#}");
                 std::process::exit(1);
             }
@@ -54,12 +60,7 @@ pub async fn run(args: Args) -> Result<()> {
     let path = args.req("sig")?;
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
-    let region: Value = match args.get("region") {
-        Some(f) => serde_json::from_str(&std::fs::read_to_string(f)?)?,
-        None => Value::Null,
-    };
     let listen = args.get("listen").cloned().unwrap_or("0.0.0.0:0".into());
-    let poll_ms = args.num("poll-ms", 100u64);
     eprintln!("host ready");
     loop {
         let (s, _) = listener.accept().await?;
@@ -83,12 +84,12 @@ fn shared_code(_: &Args, s: &Shared) -> u64 {
 }
 
 #[derive(Clone)]
-struct SessionCtx {
+pub(crate) struct SessionCtx {
     shared: Arc<Shared>,
-    region: Value,
+    pub region: Value,
     listen: String,
-    poll_ms: u64,
-    log: Log,
+    pub poll_ms: u64,
+    pub log: Log,
 }
 
 async fn session(s: UnixStream, ctx: SessionCtx) -> Result<()> {
@@ -281,7 +282,7 @@ async fn control_loop(
     }
 }
 
-async fn relay_host(server: &str, shared: Arc<Shared>, log: Log) -> Result<()> {
+async fn relay_host(server: &str, shared: Arc<Shared>, log: Log, region: Value, poll_ms: u64) -> Result<()> {
     let cfg = LinkConfig::new(server, "", "", "linux")?;
     let mut sig = connect_signal(&cfg, Role::Host)
         .await
@@ -298,20 +299,35 @@ async fn relay_host(server: &str, shared: Arc<Shared>, log: Log) -> Result<()> {
                 let conn = sig.conn.clone();
                 let shared = shared.clone();
                 let log = log.clone();
+                let (region, poll_ms) = (region.clone(), poll_ms);
                 tokio::spawn(async move {
                     let Ok(s) = open_session(&conn, session_id, Role::Host).await else { return };
                     let tx = Tx::new(s.control.0);
-                    *shared.relay_control.lock().await = Some(tx.clone());
-                    let rx = reader(s.control.1);
+                    let mut rx = reader(s.control.1);
                     let ctx = SessionCtx {
                         shared: shared.clone(),
-                        region: Value::Null,
+                        region,
                         listen: String::new(),
-                        poll_ms: 0,
+                        poll_ms,
                         log,
                     };
                     let _audio = s.audio;
-                    control_loop(tx, rx, s.video.0, Some(conn), None, ctx).await;
+                    let Some(first) = rx.recv().await else { return };
+                    if first.1.get("hello").is_some() {
+                        crate::consent::host_session(tx, rx, s.video.0, first.1, ctx).await;
+                        return;
+                    }
+                    let (ftx, frx) = tokio::sync::mpsc::channel(1024);
+                    tokio::spawn(async move {
+                        let _ = ftx.send(first).await;
+                        while let Some(m) = rx.recv().await {
+                            if ftx.send(m).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    *shared.relay_control.lock().await = Some(tx.clone());
+                    control_loop(tx, frx, s.video.0, Some(conn), None, ctx).await;
                     *shared.relay_control.lock().await = None;
                 });
             }

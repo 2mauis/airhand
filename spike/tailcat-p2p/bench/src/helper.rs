@@ -37,6 +37,9 @@ pub struct Helper {
     first: Option<tokio::sync::mpsc::UnboundedReceiver<Value>>,
 }
 
+/// Helper processes spawned by this bench process so far.
+pub static SPAWNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn helper_path() -> std::path::PathBuf {
     std::env::var_os("P2P_HELPER")
         .map(Into::into)
@@ -78,6 +81,7 @@ impl Helper {
             ours = Some((File::from(OwnedFd::from(to_w)), File::from(OwnedFd::from(from_r)), child_in, child_out));
         }
         let mut child = cmd.spawn().context("spawning helper")?;
+        SPAWNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pid = child.id().unwrap_or(0);
         let pipes = ours.map(|(w, r, ci, co)| {
             drop(ci);
@@ -156,7 +160,9 @@ impl Helper {
     /// Host: start a tailcat Server allowing only `client_key`.
     pub async fn serve(&mut self, client_key: &str, port: u16, region: &Value, poll_ms: u64) -> Result<String> {
         let mut errs = self.events.subscribe();
-        self.send(json!({"op": "serve", "client_key": client_key, "port": port, "region": region, "poll_ms": poll_ms}))
+        let rx_silence_ms: u64 = std::env::var("P2P_RX_SILENCE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        self.send(json!({"op": "serve", "client_key": client_key, "port": port, "region": region, "poll_ms": poll_ms,
+            "rx_silence_ms": rx_silence_ms}))
             .await?;
         tokio::select! {
             v = self.next_secret("offer") => {
@@ -223,10 +229,12 @@ impl Helper {
         .await?
     }
 
-    pub async fn close(mut self) {
+    /// Returns true once the process has exited (graceful or killed).
+    pub async fn close(mut self) -> bool {
         let _ = self.send(json!({"op": "close"})).await;
         let _ = tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await;
         let _ = self.child.kill().await;
+        matches!(self.child.try_wait(), Ok(Some(_)))
     }
 }
 

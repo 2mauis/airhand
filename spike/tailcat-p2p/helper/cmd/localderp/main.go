@@ -28,6 +28,8 @@ func main() {
 	fmt.Println(string(b))
 	for range time.Tick(*every) {
 		data, disco := r.Counters()
-		fmt.Fprintf(os.Stderr, "{\"t_us\":%d,\"data\":%d,\"disco\":%d}\n", time.Now().UnixMicro(), data, disco)
+		accepts, conns := r.Conns()
+		fmt.Fprintf(os.Stderr, "{\"t_us\":%d,\"data\":%d,\"disco\":%d,\"accepts\":%d,\"conns\":%d}\n",
+			time.Now().UnixMicro(), data, disco, accepts, conns)
 	}
 }

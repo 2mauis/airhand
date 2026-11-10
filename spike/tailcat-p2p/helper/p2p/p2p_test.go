@@ -347,8 +347,8 @@ func TestGateDropsWhenPathNotDirect(t *testing.T) {
 type chanLocal struct{ in, out chan []byte }
 
 func (l *chanLocal) Recv(b []byte) (int, error) { return copy(b, <-l.in), nil }
-func (l *chanLocal) Send(b []byte) error       { l.out <- append([]byte(nil), b...); return nil }
-func (l *chanLocal) Close() error              { return nil }
+func (l *chanLocal) Send(b []byte) error        { l.out <- append([]byte(nil), b...); return nil }
+func (l *chanLocal) Close() error               { return nil }
 
 type recordConn struct {
 	net.Conn
@@ -356,4 +356,9 @@ type recordConn struct {
 	n  int
 }
 
-func (r *recordConn) Write(b []byte) (int, error) { r.mu.Lock(); r.n++; r.mu.Unlock(); return len(b), nil }
+func (r *recordConn) Write(b []byte) (int, error) {
+	r.mu.Lock()
+	r.n++
+	r.mu.Unlock()
+	return len(b), nil
+}

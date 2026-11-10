@@ -42,14 +42,15 @@ cut)
   setup 20 delay=1
   for i in 1 2 3; do
     for via in udp pipe; do
-      name="wan-cut-$via-$i"
+      name="${CUT:-wan-cut}-$via-$i"
       ( sleep 15; wan cut host ctrl; sleep 20; wan restore host ctrl ) &
       run "$name" --via "$via" --test hold --secs 50 --mbps 5 --ping-ms 50
       wait
     done
   done
-  cp /tmp/wanemu.log "$R/wan-cut-wanemu.log"
-  cp "$OUT/derp-counters.jsonl" "$R/wan-cut-derp-counters.jsonl"
+  cp /tmp/wanemu.log "$R/${CUT:-wan-cut}-wanemu.log"
+  cp "$OUT/derp-counters.jsonl" "$R/${CUT:-wan-cut}-derp-counters.jsonl"
+  cp "$OUT/host.jsonl" "$R/${CUT:-wan-cut}-host.jsonl"
   ;;
 soak)
   EXTRA=1 "$HERE/netns.sh" wan; "$S" start 100; "$S" start2 100
@@ -61,8 +62,8 @@ soak)
   wan link relay ctrl2 delay=20 jitter=15 loss=1
   wan link host2 ctrl2 delay=3 jitter=15 loss=1
   date +%s%6N > "$R/wan-soak.start"
-  "$S" ctrl --via udp --test soak --secs "$SECS" --ping-ms 1000 --k-ms 2000 --log "$R/wan-soak-rtt400.jsonl" > "$R/wan-soak-rtt400.json" &
-  "$S" ctrl2 --via udp --test soak --secs "$SECS" --ping-ms 1000 --k-ms 2000 --log "$R/wan-soak-wifi.jsonl" > "$R/wan-soak-wifi.json" &
+  "$S" ctrl --via udp --test soak --secs "$SECS" --ping-ms "${PING_MS:-250}" --k-ms "${K_MS:-2000}" --log "$R/wan-soak-rtt400.jsonl" > "$R/wan-soak-rtt400.json" &
+  "$S" ctrl2 --via udp --test soak --secs "$SECS" --ping-ms "${PING_MS:-250}" --k-ms "${K_MS:-2000}" --log "$R/wan-soak-wifi.jsonl" > "$R/wan-soak-wifi.json" &
   wait
   date +%s%6N > "$R/wan-soak.end"
   ;;

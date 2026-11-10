@@ -26,38 +26,47 @@ use crate::{Args, Log, clk_tck, cpu_ticks, now_us};
 
 const TUNNEL_PORT: u16 = 4433;
 
-struct Lanes {
-    tx: Tx,
-    rx: mpsc::Receiver<(i64, Value)>,
-    video_bytes: Arc<AtomicU64>,
+pub(crate) struct Lanes {
+    pub tx: Tx,
+    pub rx: mpsc::Receiver<(i64, Value)>,
+    pub video_bytes: Arc<AtomicU64>,
+    /// Arrival time (µs) of the latest video bytes; -1 once the stream ended.
+    pub video_last_us: Arc<std::sync::atomic::AtomicI64>,
+    pub video_end_us: Arc<std::sync::atomic::AtomicI64>,
     _keep: Vec<SendStream>,
 }
 
 impl Lanes {
-    fn new(control: (SendStream, RecvStream), video: (SendStream, RecvStream), audio: SendStream) -> Self {
+    pub fn new(control: (SendStream, RecvStream), video: (SendStream, RecvStream), audio: SendStream) -> Self {
         let video_bytes = Arc::new(AtomicU64::new(0));
-        let vb = video_bytes.clone();
+        let video_last_us = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let video_end_us = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let (vb, vl, ve) = (video_bytes.clone(), video_last_us.clone(), video_end_us.clone());
         let mut vr = video.1;
         tokio::spawn(async move {
             let mut buf = vec![0u8; 256 << 10];
             while let Ok(Some(n)) = vr.read(&mut buf).await {
                 vb.fetch_add(n as u64, Ordering::Relaxed);
+                vl.store(now_us(), Ordering::Relaxed);
             }
+            ve.store(now_us(), Ordering::Relaxed);
         });
         Self {
             tx: Tx::new(control.0),
             rx: reader(control.1),
             video_bytes,
+            video_last_us,
+            video_end_us,
             _keep: vec![video.0, audio],
         }
     }
 
-    async fn request(&mut self, v: Value, want: &str) -> Result<Value> {
+    pub async fn request(&mut self, v: Value, want: &str) -> Result<Value> {
         self.tx.send(&v).await?;
         self.expect(want, Duration::from_secs(10)).await.map(|(_, v)| v)
     }
 
-    async fn expect(&mut self, want: &str, within: Duration) -> Result<(i64, Value)> {
+    pub async fn expect(&mut self, want: &str, within: Duration) -> Result<(i64, Value)> {
         tokio::time::timeout(within, async {
             loop {
                 let (t, v) = self.rx.recv().await.ok_or_else(|| anyhow!("lane closed"))?;
@@ -217,7 +226,7 @@ impl Session {
     }
 }
 
-fn summary(mut v: Vec<f64>) -> Value {
+pub(crate) fn summary(mut v: Vec<f64>) -> Value {
     if v.is_empty() {
         return json!({"n": 0});
     }
@@ -234,6 +243,7 @@ pub async fn run(args: Args) -> Result<()> {
     let lane_name = args.get("lane").cloned().unwrap_or(if via == "relay" { "relay".into() } else { "direct".into() });
     let out = match test.as_str() {
         "upgrade" => upgrade(&args, &via, &log).await?,
+        "consent" => crate::consent::ctrl_test(&args, &via, &log).await?,
         _ => {
             let with_relay = args.get("relay").is_some() && test == "fence";
             let mut s = setup(&args, &via, with_relay, &log).await?;

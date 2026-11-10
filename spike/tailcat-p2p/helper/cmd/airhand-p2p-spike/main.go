@@ -29,6 +29,7 @@ type cmd struct {
 	PeerPort  uint16              `json:"peer_port"`
 	Region    *tailcfg.DERPRegion `json:"region"`
 	PollMs    int                 `json:"poll_ms"`
+	RxSilMs   int                 `json:"rx_silence_ms"`
 	PingMs    int                 `json:"ping_ms"`
 	MinTOms   int                 `json:"min_timeout_ms"`
 	Misses    int                 `json:"misses"`
@@ -95,6 +96,7 @@ func main() {
 				Port:         c.Port,
 				Region:       c.Region,
 				PollInterval: time.Duration(c.PollMs) * time.Millisecond,
+				RxSilence:    time.Duration(c.RxSilMs) * time.Millisecond,
 				Emit:         emit,
 			})
 			if err != nil {

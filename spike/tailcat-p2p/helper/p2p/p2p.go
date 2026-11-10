@@ -48,6 +48,7 @@ type Counters struct {
 	Oversize     atomic.Uint64 // local datagrams dropped for exceeding MaxUDPPayload
 	NoFlow       atomic.Uint64 // local datagrams dropped before the tunnel flow existed
 	TunnelErrors atomic.Uint64
+	LastRxUs     atomic.Int64 // arrival time of the latest tunnel→local datagram
 }
 
 func (c *Counters) Snapshot() Event {
@@ -132,6 +133,7 @@ func Drain(t net.Conn, local Local, c *Counters) error {
 		if err != nil {
 			return err
 		}
+		c.LastRxUs.Store(now())
 		if err := local.Send(buf[:n]); err != nil {
 			return err
 		}
@@ -159,8 +161,12 @@ type HostConfig struct {
 	Port         uint16
 	Region       *tailcfg.DERPRegion
 	PollInterval time.Duration
-	Logf         logger.Logf // nil = discard
-	Emit         Emit
+	// RxSilence, if non-zero, also closes the gate once a flow exists but
+	// nothing has arrived on it for this long. CurAddr alone stays set for
+	// magicsock's UDP trust period (6.5 s) after a silent path loss.
+	RxSilence time.Duration
+	Logf      logger.Logf // nil = discard
+	Emit      Emit
 }
 
 // Host is one epoch's tailcat Server serving exactly one UDP port to exactly
@@ -267,6 +273,8 @@ func (h *Host) watch(ctx context.Context) {
 		switch {
 		case !ok:
 			h.Gate.Set(PathNone, nil)
+		case ps.CurAddr != "" && h.rxSilent():
+			h.Gate.Set(PathNone, Event{"reason": "rx_silence"})
 		case ps.CurAddr != "":
 			h.Gate.Set(PathDirect, nil)
 		case ps.Relay != "":
@@ -275,6 +283,14 @@ func (h *Host) watch(ctx context.Context) {
 			h.Gate.Set(PathNone, nil)
 		}
 	}
+}
+
+func (h *Host) rxSilent() bool {
+	if h.cfg.RxSilence <= 0 || !h.gotFlow.Load() {
+		return false
+	}
+	last := h.Counters.LastRxUs.Load()
+	return last != 0 && time.Duration(now()-last)*time.Microsecond > h.cfg.RxSilence
 }
 
 func (h *Host) Close() error {
