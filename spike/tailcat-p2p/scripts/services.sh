@@ -14,7 +14,7 @@ BENCH=$HERE/bench/target/release/p2p-bench
 SERVER=$ROOT/target/release/airhand-server
 ME=$(id -un)
 
-as_user() { local ns=$1; shift; sudo ip netns exec "$ns" sudo -u "$ME" env P2P_HELPER="$BIN/airhand-p2p-spike" "$@"; }
+as_user() { local ns=$1; shift; sudo ip netns exec "$ns" sudo -u "$ME" env P2P_HELPER="$BIN/airhand-p2p-spike" ${P2P_HELPER_STDERR_DIR:+P2P_HELPER_STDERR_DIR=$P2P_HELPER_STDERR_DIR} "$@"; }
 
 stop() {
   pkill -f "p2p-bench host" 2>/dev/null || true

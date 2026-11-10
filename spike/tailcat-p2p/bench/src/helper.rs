@@ -53,7 +53,12 @@ impl Helper {
             })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(match std::env::var_os("P2P_HELPER_STDERR_DIR") {
+                Some(d) => Stdio::from(std::fs::File::create(
+                    std::path::Path::new(&d).join(format!("helper-{role}-{}.stderr", crate::now_us())),
+                )?),
+                None => Stdio::null(),
+            })
             .kill_on_drop(true);
         let mut ours = None;
         if chan == Chan::Pipe {

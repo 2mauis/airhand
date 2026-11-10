@@ -219,7 +219,10 @@ func (h *Host) handleFlow(c tailcat.ConnPacketConn) {
 		h.cfg.Emit(Event{"ev": "flow", "role": "host", "t_us": now()})
 	}
 	if h.local != nil {
-		_ = Drain(c, h.local, &h.Counters)
+		err := Drain(c, h.local, &h.Counters)
+		if h.cfg.Emit != nil {
+			h.cfg.Emit(Event{"ev": "flow_end", "role": "host", "t_us": now(), "error": fmt.Sprint(err)})
+		}
 	}
 	h.flow.Store(nil)
 	c.Close()
@@ -343,7 +346,12 @@ func (c *Ctrl) Dial(ctx context.Context, addr tailcat.Addr, local Local) error {
 	c.cancel = cancel
 	go c.pathLoop(lctx)
 	if local != nil {
-		go Drain(conn, local, &c.Counters)
+		go func() {
+			err := Drain(conn, local, &c.Counters)
+			if c.cfg.Emit != nil {
+				c.cfg.Emit(Event{"ev": "drain_end", "role": "ctrl", "t_us": now(), "error": fmt.Sprint(err)})
+			}
+		}()
 		go Pump(local, func() net.Conn { return conn }, c.Gate, &c.Counters)
 	}
 	return nil
