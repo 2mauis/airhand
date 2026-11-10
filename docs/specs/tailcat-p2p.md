@@ -1,6 +1,6 @@
 # tailcat 临时点对点直连（Direct P2P transport）
 
-> 状态：**规格 r3.1（已按第 1、2 轮意见修订；第 3 轮复审结论：无 S1，可提交批准 (A)；第 3 轮的 S2/S3 列入下文“r4 待办”），未实现**。本文件只描述设计；不含功能代码。评审记录见 [`tailcat-p2p-review.md`](tailcat-p2p-review.md)（三轮报告全文在 [`review/`](review/)）。
+> 状态：**规格 r4（2026-11-10 项目负责人批复后修订：批准 Phase 0 spike (A) 与全部建议阈值；新增“被控端确认与主动断开”；落实第 3 轮复审中不依赖 spike 数据的 S2/S3；已按第 4 轮复审意见订正，r4.1），未实现**。本文件只描述设计；不含功能代码。本版**仍未含 Phase 0 实测数据**（超时 / 阈值 / 候选通道 / Windows 结论待 spike）；spike 完成后出 r5 再复审、再批准 (B)。评审记录见 [`tailcat-p2p-review.md`](tailcat-p2p-review.md)（四轮报告全文在 [`review/`](review/)）。
 > 基线：上游 `sqlpxc/airhand` `main` @ `a317551`（协议版本 v9，工作区版本 0.2.2，MIT）。
 > 集成对象：`https://github.com/tailscale/tailcat`，**固定到 tag `v0.7.0`（commit `15ab9e6`；`546a07d` 是该附注 tag 对象的哈希，不是 commit）**，`go.mod` 要求 Go 1.27.1，BSD-3-Clause。`main`（调研时 `e00cdde`）上的未发布改动（`AllowClient` 钩子、`perf`、`libtailcat`）**不作为依赖**。
 
@@ -60,12 +60,12 @@ airhand 的传输是 QUIC（UDP）。只用 tailcat CLI 只能得到 TCP 转发�
 ### 1. 会话先走中转，再就地升级到直连（make-before-break，被控端裁决）
 
 1. 连接流程不变：控制端用控制码经中转建立会话，三条流经服务器配对，**画面立即可用**。
-2. 双方在 `Hello` 里声明是否启用直连能力。仅当**双方都启用**时才进入升级流程；否则与未启用时完全一致。
+2. 双方在 `Hello` 里声明是否启用直连能力。仅当**双方都启用**、**且被控端用户在确认窗口里允许了直连**（见“被控端确认与主动断开”）时才进入升级流程；否则与未启用时完全一致。**确认之前不交换任何地址、不启动 helper、不联系 tailcat / DERP。**
 3. **公钥先行**（`v0.7.0` 的 `AllowedClients` 为空时**放行所有客户端**，`AddAllowedClient` 在加入第一个公钥之前同样如此，所以必须在 `Start` 时就给定非空列表）：控制端先创建自己的 helper dial 实例（本 `epoch` 新的客户端密钥），用 `Client.PublicKey()`（拨号前即可取得）取得客户端节点公钥，经控制流发 `ControllerMsg::DirectRequest { epoch, client_key }`。`client_key` 为空或无法解析时，Rust 侧与 helper 都**拒绝 Start**（I14）。
-4. 被控端只在 **`HostHello` 已发出之后**才处理 `DirectRequest`（此前收到的一律丢弃，I12）。**桌面被控端没有“请本机用户同意”这一步**（持码人连上后立刻收到 `Hello`），所以 Phase 1 里该条件即“`HostHello` 之后”；在有同意流程的平台（Android，Phase 1.5）还须在同意之后。被控端为该 `epoch` 在 helper 进程内**新建**一个 tailcat `Server`（新的密钥与 PSK，`AllowedClients = [client_key]`），并生成一次性令牌与该会话的临时自签证书；经控制流回 `HostMsg::DirectOffer { epoch, kind, body, quic_fp, token, ttl }`。
+4. 被控端只在**用户已确认且授予了“直连”权限、`HostHello` 已发出之后**才处理 `DirectRequest`（此前收到的一律丢弃，未授予直连权限的回 `DirectDecline`，I12 / I16）。桌面被控端默认 `approve = "ask"`，新增确认步骤（此前桌面被控端不请求同意）。被控端为该 `epoch` 在 helper 进程内**新建**一个 tailcat `Server`（新的密钥与 PSK，`AllowedClients = [client_key]`），并生成一次性令牌与该会话的临时自签证书；经控制流回 `HostMsg::DirectOffer { epoch, kind, body, quic_fp, token, ttl }`。
 5. 控制端 helper 以 offer 中的地址拨号，并按 §2 的规则检测路径；**仅当路径为 `direct`** 才继续。超时（默认值由 Phase 0 实测后确定，不小于 12 秒，需覆盖 DERP 图拉取与引导）或只有 DERP 则放弃，会话继续走中转，不报错。
 6. 控制端经 helper 的数据报通道用 quinn 连接被控端的**直连 QUIC 监听**，出示一次性令牌并校验 `quic_fp`；被控端校验令牌 / 会话 / `epoch` / 有效期通过后，等待控制端在**直连连接**上开三条流（`SessionHeader` 与中转上相同）。
-7. **提交（commit）由被控端裁决，顺序固定**：三条直连流就绪后，被控端 **先在中转控制流上发 `DirectSwitch { epoch }`（被控端→控制端方向的栅栏）**，**再**把 `DirectCommit { epoch }` 作为**直连控制流的第一条消息**发出。被控端若在自身超时前没有收到完整的三条流，则放弃该 `epoch`（迟到的 `DirectRequest` / 连接一律忽略，I13）。**控制端打开三条流后设 T（默认 2 秒，Phase 0 校准）超时：收不到 `DirectCommit` 就经中转发 `DirectFallback { epoch }`**；被控端对已提交的 `epoch` 也必须接受它。
+7. **提交（commit）由被控端裁决，顺序固定**：三条直连流就绪后，被控端 **先在中转控制流上发 `DirectSwitch { epoch }`（被控端→控制端方向的栅栏）**，**再**把 `DirectCommit { epoch }` 作为**直连控制流的第一条消息**发出。被控端若在自身超时前没有收到完整的三条流，则放弃该 `epoch`（迟到的 `DirectRequest` / 连接一律忽略，I13）。**控制端打开三条流后设 T（默认 2 秒，Phase 0 校准）超时，以“读到 `DirectCommit`（不论它是否因栅栏而暂存在缓存里）”为准：收不到就经中转发 `DirectFallback { epoch }`**；被控端对已提交的 `epoch` 也必须接受它。
 8. **切换规则**：
    - **画面 / 声音**：被控端提交后把发送端切到直连流并立即发一个关键帧；接收端**始终同时读取中转流与直连流**，新通道的首个关键帧到达后丢弃旧通道的画面包（按帧序号），声音丢弃序号 ≤ 已交付序号的包（24 字节媒体头没有 epoch 字段，所以规则以“来自哪条通道 + 序号”表达）。
    - **控制流（升级方向，栅栏）**：控制消息没有序号、跨流无顺序保证。每个发送端在**旧通道（中转）**上发出的**最后一条**消息是 `DirectSwitch { epoch }`，之后才在直连上发新消息；接收端读到该栅栏之前只处理旧通道，新通道的消息先缓存，读到栅栏后再处理缓存。控制端在收到 `DirectCommit` 后用同样方式切换自己的发送端。`Ack` / `Ping` / `Pong` 与顺序无关，缓存期间照常处理（避免在途窗口停住）。**栅栏等待上限**不写死 500 ms，由 Phase 0 按中转 RTT 校准（可配置或自适应）；**超时时丢弃缓存的直连控制消息并执行与回退相同的流程**（丢失由状态重同步补偿），不照常处理（会乱序）。
@@ -78,15 +78,18 @@ airhand 的传输是 QUIC（UDP）。只用 tailcat CLI 只能得到 TCP 转发�
 - 控制端（`Client` 没有 `Status`，只能用 `DiscoPing`）：pong 经 DERP 返回 ⇒ 立即判非 direct；连续 M 次（默认 2）在 `max(750 ms, 3×RTT)` 内没有收到 direct pong ⇒ 判非 direct（避免跨洲 RTT 被误判）。
 - 被控端：轮询 `Server.Status()` 中该对端的当前地址 / 中继字段，当前地址为空 ⇒ 判非 direct。
 - 升级前双方的闸门**各自**关闭，直到本端检测为 direct 才打开；直连 QUIC 握手在升级超时内可重试，容忍两端判定时间差。
+- 被控端 `Server.Status()` 的轮询间隔（默认 ≤ 250 ms）与 `CurAddr` 失效延迟都计入 I3 窗口，窗口上限 = 轮询间隔 + 判定延迟（Phase 0 实测）。
 - 窗口期（从路径退化到闸门关闭）内仍可能有少量数据报经共享 DERP 发出；严格为零的前提只能是**自建 DERP**。magicsock 在直连信任期内是否会双发 DERP、何时开始双发，列为 Phase 0 实测项（未证实）。
 
-**存活检测（不依赖画面）**：桌面被控端只在画面变化时编码、无声音不发包，静止桌面没有帧也没有 Ack，因此**不能**用画面包或 Ack 判存活。改用直连控制流上的 Ping/Pong：控制端本来就每秒发一次 `Ping`，被控端回 `Pong`；控制端在直连上 K 秒（默认 2，须小于现有的 2 秒命令队列过期与写入失败判定，Phase 0 校准）收不到 `Pong` ⇒ 经中转发 `DirectFallback`；被控端在直连上 K 秒收不到 `Ping` ⇒ 回退。该规则同时覆盖两个方向的非对称故障。直连 QUIC 连接关闭 / 空闲同样视为失效。
+**存活检测（不依赖画面）**：桌面被控端只在画面变化时编码、无声音不发包，静止桌面没有帧也没有 Ack，因此**不能**用画面包或 Ack 判存活。改用直连控制流上的 Ping/Pong：直连期间控制端以比现有 1 秒更短的间隔（默认 250 ms，Phase 0 校准；`Ping` 是现有消息，不改协议）发 `Ping`，被控端回 `Pong`；控制端在直连上 K 秒收不到 `Pong` ⇒ 经中转发 `DirectFallback`；被控端在直连上 K 秒收不到 `Ping` ⇒ 回退。K 取 `max(1.5 s, N×间隔 + 2×RTT)` 一类形式（N、系数由 Phase 0 校准），**不再要求小于 2 秒的命令队列过期**：直连通道的写超时 / 队列过期按通道区分，直连通道上的任何超时、写失败都只转为回退，不影响中转通道的既有判定（被控端对中转的写卡住判定现状为 10 秒，措辞以源码为准）。K 中的 RTT：控制端取自 Ping/Pong 往返；被控端用本会话直连 QUIC 连接自身的 RTT 估计（`Flow` 的 srtt 在通道切换后 `min_rtt` 约 10 秒才更新，切换 / 回退时重置 `min_rtt`，Phase 0 观察是否造成码率抖动）。该规则同时覆盖两个方向的非对称故障。直连 QUIC 连接关闭 / 空闲同样视为失效。
 
 **回退（反向栅栏）**：
-- 失效侧立即把自己的发送端切回中转流并请求关键帧，并且它在**中转**控制流上发出的**第一条**消息必须是 `DirectFallback { epoch }`。
+- 失效侧立即把自己的发送端切回中转流并请求关键帧，并且它在**中转**控制流上发出的**第一条**消息必须是 `DirectFallback { epoch }`。**发起方也丢弃该 `epoch` 此后收到的所有直连控制消息**（含已缓存的）；直连上未确认的输入丢失，靠 `release_all()` 与状态重同步补偿（不改为“带确认的回退”，避免多一轮往返）。
 - 对端无论从哪里得知（收到 `DirectFallback`、或自己检测到故障）都**立即回退**；收到 `DirectFallback` 的一方此后**丢弃**该 `epoch` 的所有直连控制消息（含已缓存的），只处理中转上的消息。
-- **状态重同步**：被控端在本地调用 `release_all()` 释放按键；控制端清空本地记录的按键 / 鼠标按钮状态（不需要再发 `ReleaseAll` 输入事件）；控制端重发当前的 `Settings`、`Audio` 启停与选中的显示器；剪贴板以最新状态为准。
-- **写入失败不结束会话**：直连通道的写入失败 / 卡住（含现有 2 秒命令队列过期、写任务失败判定）一律转为回退并把排队消息改投中转；**直连通道失败只触发回退，绝不结束会话**；仅中转连接断开才结束会话（与 I10 一致）。helper 进程退出 / 崩溃视同直连失效，由 Rust 侧监督，不自动无限重启。
+- **栅栏之后中转上仍须处理的消息**：`Bye`（I10）、对端的 `DirectFallback`（幂等）、对向未完成的 `DirectSwitch`（该 `epoch` 已放弃，忽略）。回退后迟到的 `DirectCommit` 一律忽略。
+- **“改投中转”的范围**：只限**尚未写出且未过期**的消息；已过期的输入**不补发**；正在直连上写的那一条视为丢失。
+- **状态重同步**：被控端在本地调用 `release_all()` 释放按键；控制端的 `airhand-link` **按会话缓存最近一次 `Settings` / `Audio` / `SelectDisplay`，回退后重发**（`Settings` 与 `Audio` 的重发是幂等的；缓存的 `SelectDisplay` 在收到被控端的 `HostMsg::Displays { current }` 时同步更新，避免旧序号把画面切回去，被控端已 `follow_display` 切换的以被控端为准）（不依赖“清空本地按键状态”，也不新增 `ReleaseAll` 输入事件）；剪贴板以最新状态为准。
+- **写入失败不结束会话**：直连通道的写入失败 / 卡住一律转为回退并把符合上条范围的排队消息改投中转；**直连通道失败只触发回退，绝不结束会话**；仅中转连接断开才结束会话（与 I10 一致）。helper 进程退出 / 崩溃视同直连失效，由 Rust 侧监督，不自动无限重启。
 - 每次重新升级都使用**新的 `epoch`、新的 tailcat 密钥 / 地址 / 令牌**（旧的立即销毁）；回退后每隔 30 秒、最多 3 次重试。
 - 并发与进程模型：**每个会话一个 helper 进程；每个 `epoch` 在进程内新建 `Server`（控制端新建 `Client` 与密钥）并 `Close` 旧的**。同一进程内多个 `Server` 是否安全（例如进程级全局设置）**未证实**，Phase 0 验证；不安全则改为每个 `epoch` 一个进程。并发上限默认 2（可配，不超过 `AIRHAND_MAX_SESSIONS`），超出的会话保持中转。
 
@@ -101,7 +104,8 @@ airhand 的传输是 QUIC（UDP）。只用 tailcat CLI 只能得到 TCP 转发�
   - `HostMsg::DirectCommit { epoch }`（直连控制流上的第一条消息；之前先在中转上发 `DirectSwitch`）
   - `HostMsg::DirectSwitch { epoch }` / `ControllerMsg::DirectSwitch { epoch }`（升级方向：旧通道上的最后一条消息）
   - `HostMsg::DirectFallback { epoch }` / `ControllerMsg::DirectFallback { epoch }`（回退方向：中转上的第一条消息）
-- 前向兼容的实际情况（已对照源码）：控制流上**任何**解码错误都会结束会话，postcard 对未知枚举变体会报错，所以“预留扩展”**不**提供前向兼容；`DirectOffer` 因此用 `kind: u8` + 不透明 `body`，接收端遇到不认识的 `kind` 回 `DirectDecline`，不依赖解码器容忍未知变体。Kotlin / TypeScript 不解析 postcard，只处理 Rust 转出的 JSON 事件与媒体包，本特性 Phase 1 不改它们的行为；但 `android/native`、`web/` 的 Rust 代码要为新字段 / 新变体通过编译。
+  - 确认与断开（r4）：沿用现有 `HostMsg::AwaitingApproval`、`ByeReason::{Declined, Unanswered, Kicked, CodeChanged}`；`HostHello` 新增 `granted: Permissions { input, clipboard, audio, direct }`；新增 `HostMsg::PermissionsChanged { granted }`、`ControllerMsg::Bye { reason }`、`ByeReason::Busy`（均追加在枚举末尾）。
+- 前向兼容的实际情况（已对照源码）：控制流上**任何**解码错误都会结束会话，postcard 对未知枚举变体会报错，所以“预留扩展”**不**提供前向兼容；`DirectOffer` 因此用 `kind: u8` + 不透明 `body`，接收端遇到不认识的 `kind` 回 `DirectDecline`，不依赖解码器容忍未知变体。Kotlin / TypeScript 不解析 postcard，只处理 Rust 转出的 JSON 事件与媒体包；**r4 起桌面前端（`client/` 的 TypeScript）需要新增确认窗、指示条、`PermissionsChanged`、路径显示与 SAS 的界面**（列入 F21 / F23 / F26），Android / 网页控制端不改行为但须容忍新的事件与 `Problem` 类型（例如 `Busy`，也可复用现有 `Problem::HostBusy`），并有“旧前端忽略未知事件”的用例；但 `android/native`、`web/` 的 Rust 代码要为新字段 / 新变体通过编译。
 - 媒体包头（24 字节）与 `tests/protocol.json` 样例**不变**。
 - 新增依赖：直连临时证书需要 `rcgen`（目前仅 `server` / `web` 依赖），加到需要的 crate。
 
@@ -120,8 +124,10 @@ airhand 的传输是 QUIC（UDP）。只用 tailcat CLI 只能得到 TCP 转发�
 | `enabled` | `false` | 总开关；关闭时**不会启动 helper、不会联系任何 tailcat / DERP 主机** |
 | `derp_map_url` | tailcat 默认 | 必须 `https://`；可指向自建 DERP 图；自建 DERP 时主机名可嵌入地址，不再访问 Tailscale 托管服务 |
 | `upgrade_timeout_secs` | 由 Phase 0 实测定，≥ 12 | 等待直连路径的时间 |
-| 其它阈值 | 由 Phase 0 实测定 | 栅栏等待上限、Commit 等待 T、存活检测 K、路径判定的 M / RTT 系数（均须小于 2 秒的现有命令队列过期） |
+| 其它阈值 | 由 Phase 0 实测定 | 栅栏等待上限、Commit 等待 T、Ping 间隔与存活检测 K、路径判定的 M / RTT 系数、`Server.Status()` 轮询间隔 |
 | `max_sessions` | `2` | 同时升级的会话数上限 |
+
+被控端确认相关的 `[host] approve` / `approval_timeout_secs` / `reconfirm_minutes` / `max_pending_approvals` 见“被控端确认与主动断开”（这些**不属于** `[direct]`，且 `approve = "ask"` 对中转会话同样生效）。
 
 helper 可执行文件的路径**不可配置**：固定为主程序同目录下的文件，启动前校验构建时记录的哈希（或签名），不一致则不启用直连。该校验只防误放 / 损坏文件；在用户可写的安装位置（如 AppImage、用户目录安装）防不了同一用户下的攻击者（对方本来就能替换主程序），文档如实说明。
 
@@ -132,11 +138,88 @@ helper 可执行文件的路径**不可配置**：固定为主程序同目录下
 - **双重限定**：helper 的 `AllowedClients` 只含控制端上报的那一个节点公钥；直连 QUIC 还要出示一次性令牌，并按被控端为该会话生成的临时自签证书指纹做固定校验（沿用现有证书固定逻辑）。
 - **最小暴露面（必须显式配置，不能依赖默认值）**：被控端 helper 的 tailcat `Server` 设置 `ServedTCPPorts` 为**空但非 nil**、`ServedUDPPorts` 只含一个端口，`OnTCP` / `OnTCPForward` / `OnUDPForward` / `AllowProxy` 全部为 nil，`AllowedClients` 在 `Start` 前给定；会话 / `epoch` 结束时 `Close`。该端口的数据报只转发到 Rust 侧的直连监听。
 - **本机暴露面**：见方案 B 中“数据报通道”的两个候选；选 (i) 时必须叠加 4 元组锁定、单连接、独立 ALPN 与令牌；选 (ii) 不开任何本机端口。
-- **同意与可见性**：直连会话与中转会话共用同样的“托盘显示谁在控制 / 一键断开 / 更换控制码”路径（Android 的“请求同意”在 Phase 1.5，同样适用）；**桌面被控端本来就没有请求同意这一步**，`DirectOffer` 在 `HostHello` 之后发送（I12）。
-- **IP 暴露（新增）**：magicsock 会通告公网地址与本机所有网卡地址（含局域网、VPN），升级后对端能获知被控端 / 控制端的公网与内网地址；现状下对端拿不到这些。**持控制码者在桌面被控端上会立即（无需任何同意）获知这些地址**，与“持码即可完全控制”的现有信任模型一致，但须如实写明。因此默认关闭，首次启用时提示并写入 `docs/security.md`。
+- **同意与可见性**：见下一节“被控端确认与主动断开”。桌面被控端新增确认步骤（默认 `approve = "ask"`），`DirectOffer` 只在确认且授予“直连”权限之后发送（I12 / I16）；直连会话与中转会话共用同样的托盘 / 常驻指示 / 一键断开路径。
+- **IP 暴露（新增）**：magicsock 会通告公网地址与本机所有网卡地址（含局域网、VPN），升级后对端能获知被控端 / 控制端的公网与内网地址；现状下对端拿不到这些。**r4 起：必须由被控端用户在确认窗口里明确勾选“允许直连（对方将获知本机公网 / 内网地址）”才会暴露这些地址**，持码人本人不能单方面触发；`approve = "never"`（无人值守旧行为）时直连整体禁用（I21）。因此默认关闭，首次启用时提示并写入 `docs/security.md`。
 - **日志**：helper 默认把 tailcat / magicsock 的 `Logf` 设为丢弃（其内部日志含节点公钥简写与对端 IP，而 Windows 日志写入 `OutputDebugString`，本机其他用户可读）；诊断模式须脱敏。
 - **Windows SYSTEM 被控端（Phase 0 必须验证的具体方案）**：被控端 agent 以 SYSTEM 在控制台会话运行（含登录界面，没有用户令牌可借）。helper 由被控端以**受限令牌**启动：以服务自身 SYSTEM 令牌为基础 `CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`，把用户 SID 与 Administrators 设为 **deny-only**（注意：令牌的用户 SID 仍是 SYSTEM，只是带 deny-only 属性），特权仅保留 `SeChangeNotifyPrivilege`，**低完整性级别**，并套 **Job 对象**（`KILL_ON_JOB_CLOSE`、禁止创建子进程、内存上限）；helper 不读写磁盘、不加载保存的密钥。Phase 0 须证实：该令牌下 netmon / magicsock 能绑定 UDP 并枚举网卡；默认 DACL 只授予 SYSTEM / Administrators 时进程能否打开自己新建的对象、Go 运行时是否正常（Chromium 沙箱需专门处理）；是否需要 restricting SIDs 及其对 Winsock 的影响；**AppContainer** 作为对照备选（默认禁止回环，配合候选 (ii) 的独立管道）；Windows 防火墙对该进程的行为（是否弹窗 / 是否需要安装器加规则）。**退路：若证实不可行，Windows SYSTEM agent 作为被控端时禁用直连；控制端不受影响。**
 - 隐私：启用时两端会向 tailcat 的 DERP 与 DERP 图服务暴露自己的公网 IP 与连接时间；默认关闭，且可改用自建 DERP。
+
+## 被控端确认与主动断开（2026-11-10 项目负责人批复：被控端必须确认，被控端要有随时主动断开能力）
+
+> 决定（项目负责人 2026-11-10 批复）：**控制码不等于自动接受**——被控端用户必须先确认，才会交换任何地址 / 升级直连；被控端要有随时可用的主动断开。握手参考现成方案。
+
+### 现成方案调研（来源均为官方文档 / 源码；许可单列）
+
+| 方案 | 许可 | 被控端确认 | 断开 / 持续提示 | 对本设计的启示 |
+|---|---|---|---|---|
+| **RustDesk**（同品类、开源；[源码 `src/server/connection.rs`](https://github.com/rustdesk/rustdesk/blob/master/src/server/connection.rs)、[文档 `approve-mode`](https://rustdesk.com/docs/en/self-host/client-configuration/advanced-settings/)） | **AGPL-3.0** | `approve-mode` = `password` / `click` / `password-click`（默认 `password-click`；源码 `ApproveMode::Both`：口令与点击二选一——有效口令存在时可凭口令接入，否则需点击；核对的源码为 master @ `95cca3f66`）；`click` 时连接先处于“未授权”，由连接管理窗口点“接受”才发 `LoginResponse`（含主机信息与显示器信息），之前不发画面 | 连接管理窗口可“断开”（`Close`）并可逐连接切换权限（键鼠 / 剪贴板 / 音频 / 文件 / 重启等）；未授权连接有宽限期上限（`LOGIN_GRACE` = 180 s，超时即关闭）、未授权连接总数上限（64）与单地址上限（16）、授权前消息大小上限（`MAX_UNAUTHORIZED_MESSAGE` = 128 KiB）；可选无操作自动断开 | 同品类基线：授权前不发主机信息 / 画面；超时即关；授权前资源与消息大小受限；逐连接权限开关与随时断开 |
+| **Chrome Remote Desktop（远程协助）**（[官方帮助](https://support.google.com/chrome/answer/1649523)；Chromium 的 `remoting/` 为 BSD-3-Clause，服务本身为专有） | 客户端部分 BSD-3-Clause，服务专有 | 一次性 12 位访问码（5 分钟过期、只能用一次）；对方输入后，被控端弹出**显示对方身份**的对话框，点“共享”才开始 | 共享期间常驻提示条，随时“停止共享”；每 30 分钟弹出“是否继续共享”，该提示的默认按钮是“停止共享”，避免回车误延长 | 一次性码、显示请求者身份的确认、常驻指示 + 一键停止、周期性续期（默认按钮为停止） |
+| **AnyDesk**（[官方文档：接受窗口](https://support.anydesk.com/docs/accepting-the-connection)、[交互式访问](https://support.anydesk.com/docs/interactive-access)） | 专有 | 接受窗口显示请求者身份与可勾选的权限 / 权限配置文件，点“接受”或“拒绝”；可设“始终 / 仅窗口打开时 / 从不显示请求”（“从不”则只能走无人值守密码） | 接受窗口在会话期间始终显示，随时“断开”；全部权限关闭即只读 | 请求者身份 + 权限勾选的接受窗口；会话期间常驻的断开入口；无人值守是单独、需显式开启的模式 |
+| **magic-wormhole**（[文档](https://github.com/magic-wormhole/magic-wormhole)） | MIT | 无“被控端确认”概念；用 SPAKE2（PAKE）让**服务器不知道的**短码派生共享密钥，码一次性使用，中间人只有一次猜测机会；可选 `--verify` 让双方比对校验串 | — | PAKE 对 airhand 不适用（见下“未采纳项”）；但“一次性码”与“双方比对校验串（SAS）”的思路可借用 |
+
+**许可注意**：RustDesk 是 AGPL-3.0，而本 fork 是 MIT：**只参考其设计思路与文档化行为，不复制、不改写其源码**；实现以 airhand 自身协议与代码为准。
+
+### 选定基线：RustDesk 的 `click` 确认模型，落在 airhand 已有的 Android 确认机制上
+
+理由：RustDesk 与 airhand 同品类（开源、中转 / 打洞 + 控制码 / 密码、被控端常驻）；其“授权前不发主机信息 / 画面、逐连接确认、连接管理窗口随时断开、未授权阶段资源受限”正是本需求要的。而且 airhand **已有同构机制**：`HostMsg::AwaitingApproval`、`ByeReason::Declined` / `Unanswered`、Android 被控端 60 秒超时（`android/native/src/host/session.rs` 的 `APPROVAL_TIMEOUT`）、`Problem::Declined` / `Unanswered` 为致命（控制端不自动重连）。所以 Phase 1 是把这套机制**扩展到桌面被控端**（现状：桌面被控端不请求同意，`e2e.rs` 里甚至断言不会出现 `AwaitingApproval`），并让它成为直连升级的前置条件，而不是另造协议。
+
+**沿用**：被控端确认模型与超时即拒；授权前不发 `Hello` / 画面；确认窗口显示请求者身份与权限勾选（AnyDesk / RustDesk）；会话期间常驻指示与一键断开；一次性语义（CRD）；周期性续期提示（CRD，可选，默认按钮为“停止”）。
+**差异**：
+1. RustDesk 在登录**之前**就做打洞与地址交换；本设计**确认之前不交换任何地址**，也不启动 helper、不联系 tailcat / DERP（见 I16）。
+2. 确认发生在**中转的会话控制流**上（会话三条流已配对，但只有 `AwaitingApproval`），而不是在直连上。
+3. 权限勾选只做 Phase 1 最小集：输入控制、剪贴板、声音、**允许直连**（含“对方将获知本机公网 / 内网地址”的明示）。
+4. 无人值守（RustDesk 的 `password` 模式、AnyDesk 的 Unattended Access）**不是**本特性的默认；见下 `approve = "never"`：此模式下**直连整体禁用**。
+
+### 握手（确认发生在升级之前，且以确认结果为准）
+
+1. 控制端用控制码经中转建立会话，打开三条流，发 `ControllerMsg::Hello`（现有）。此时**不发 `DirectRequest`，不启动 / 联网 helper**。控制端会紧接着发 `Settings` 等消息；被控端在等待确认期间的处理见 I15（记下最新值、确认后生效，与 Android 一致）。
+2. 桌面被控端（`approve = "ask"`，新默认）收到后：**不发 `HostMsg::Hello`、不发画面**，先发 `HostMsg::AwaitingApproval`，并在本机弹出**确认窗口**（现有 `Peer` 只有设备名与来源 IP：显示控制端**自报**的设备名（明确标注“自报，不可信”）与**经中转看到的**来源 IP；`Peer` 没有 OS 字段，不显示 OS），带勾选项：输入控制（默认开）、剪贴板（默认关）、声音（默认关）、**允许直连（默认关；说明：对方将获知本机公网 / 内网地址，并经第三方 DERP 引导）**，以及按钮“允许”“拒绝”。“允许直连”勾选**仅当本端 `[direct] enabled` 且 `ControllerHello.direct` 为真时才显示**（S3-7）。**当存在已授权且带“输入控制”的在途会话时，不显示“允许直连”勾选与“允许”按钮，新请求按拒绝处理**（防止远端用注入输入替用户点确认，见下“防注入”）。
+3. **超时默认拒绝**：`approval_timeout_secs` 默认 60（与 Android 现状一致），超时发 `Bye(Unanswered)`；点拒绝发 `Bye(Declined)`；这两种原因对控制端是**终止性**的（代码里的 `Problem::is_final()`，注意不是 `is_fatal()`：后者只对 `Incompatible` 为真；控制端不自动重连，现有行为；但这只是客户端自觉遵守，恶意客户端可无视，所以仍需下面的滥用防护）。排队中的请求，60 秒计时从**入队时**开始；控制端在等待期间离开时，确认窗 / 排队项立即撤下（`prompt_withdrawn_when_controller_leaves`）。等待期间被控端照常回 `Pong`（现有）。
+4. 点“允许”后：被控端发 `HostMsg::Hello`（新增字段：本次授予的权限集），开始画面。**授权记忆（桌面为新设计）**：现有语义只在 Android 上（`trusted` 只记设备、不记权限，任何 `HostCmd` 都清空）。桌面端按设备保存**当前**权限集，同一次运行内同设备断线重连可沿用（设备标识是控制端自报、经中转明文转发，中转本来就能重放，沿用即承认这一点）。**清除规则**：任何被控端主动断开（停止共享、断开此控制端、KickAll）、权限被收回到全无、会话结束超过 N 分钟（默认 10，可配）都清除该设备记忆；**“直连”权限不随记忆复用**，每次新会话都要重新确认；沿用的是收回后的权限而非最初授予的。
+5. **仅当授予了“直连”权限**：控制端在收到授权后的 `Hello` 后才创建 helper dial 实例并发 `DirectRequest`；被控端对未授予直连权限的 `DirectRequest` 一律丢弃并回 `DirectDecline`（I12 / I16）。helper 的任何网络活动（拉 DERP 图、连 DERP）都在**确认之后、`DirectOffer` 到达之后**才发生。
+6. **权限可随时收回**：被控端窗口随时取消某项勾选，立即生效并通知控制端（`HostMsg::PermissionsChanged`）：关输入 ⇒ 被控端丢弃后续输入；关直连 ⇒ 立即回退中转并销毁 helper / tailcat 实例（不换码）。
+7. **校验串（SAS，可选借用 magic-wormhole 的 `--verify` 思路）**：升级时双方各自从 `(epoch, tailcat 地址, quic_fp, token, client_key)` 的 transcript 哈希派生一个短校验串，同时显示在被控端确认 / 指示窗口与控制端界面；用户可口头比对，**不一致就点断开**。它能发现“主动作恶的中转替换 Offer”，但不是强制步骤（默认只显示，不阻塞）。只显示哈希截断后的短串，计算过程与中间值不进日志、不进 `Debug` 输出（I7）。
+
+### 主动断开（被控端与控制端都随时可用）
+
+- **被控端的常驻指示**：会话期间显示常驻的、不可被远端画面遮盖 / 关闭的指示（托盘 + 置顶小条，类似 CRD 的共享提示条与 AnyDesk 常驻窗口），写明控制端设备名、当前路径（中转 / 直连）、已授予的权限，并提供两个一键按钮：
+  - **“停止共享”（默认主按钮）**：结束**所有**会话，**同时关闭中转与直连两条路径**（经中转发 `Bye(CodeChanged)`，即现有 `HostCmd::NewCode` 的实际行为与控制端文案；销毁每个会话的 tailcat `Server`、令牌与直连连接；结束 helper 进程），并**更换控制码使旧码立即失效**（`NewCode` 语义 + 直连清理）。
+  - “断开此控制端（保留控制码）”：只结束选中的会话（两条路径，发 `Bye(Kicked)`），控制码不变——供固定控制码的常驻主机。**现有代码没有按会话踢人的命令**（`KickAll` 是对所有会话广播），需新增 `HostCmd::Kick { session_id }`，Windows 上对应新增 `ToAgent` 消息；现有托盘的“断开所有控制端”（`KickAll`）保留。被断开的设备记忆同时清除（上文清除规则），不能免确认回来。
+  - **指示条只能收回、不能扩大权限**；要增加权限只能在**新会话的确认窗**里勾选。
+- **控制端的主动断开**：新增 `ControllerMsg::Bye`（经中转控制流发送，I10），随后关闭直连连接并结束 helper；被控端收到后清理该会话的全部直连资源。`ControllerMsg::Bye` 定为**无字段**（避免把站在被控端角度的 `ByeReason` 套给控制端）。界面上的“断开”沿用现有 `Command::Disconnect`（现状：先发 `Input(ReleaseAll)`、等 150 ms、再结束任务，**不发任何 Bye**），顺序改为：`ReleaseAll`（当前通道）→ 经中转发 `Bye` → 关闭直连 → 结束 helper；被控端收到 `Bye` 时本地调用 `release_all()`。
+- **周期性续期（可选，默认关）**：`reconfirm_minutes`（0 = 关）；开启后每 N 分钟在被控端弹出“是否继续共享”，**默认按钮为“停止共享”**，超时无应答视为停止（参照 CRD）。
+- 断开必须在界限内完成（默认 2 秒内两条路径都不再收发媒体，由 Phase 0 / 实现阶段校准）；断开后任何迟到的直连连接 / 令牌一律拒绝（I5、I13）。
+
+- **取消安全**：会话任务可能在任意 await 处被取消（例如 `NewCode` 返回时丢弃 `JoinSet`）。helper 清理必须放在 `Drop` 一类取消安全路径上：helper 用 `kill_on_drop`，并在 stdin 读到 EOF 时自行退出；Windows 用已有的 Job `KILL_ON_JOB_CLOSE`，Linux 用 `PR_SET_PDEATHSIG`（`aborted_session_task_kills_helper`）。
+
+### 防注入（确认不能被远端代点）
+
+控制端拿到“输入控制”后能向被控端注入键鼠，**不能让它替用户点自己的确认窗 / 续期提示 / 指示条**。措施：（1）指示条只能收回权限（上节）；（2）确认窗与续期提示在有已授权且带输入权限的在途会话期间，不显示“允许直连”与“允许”（新请求按拒绝处理）；（3）Windows 上确认窗可过滤注入输入（低层钩子的 `LLMHF_INJECTED` / `LLKHF_INJECTED`，行为需在 Phase 0 / 实现阶段验证）；macOS / Linux 能否区分注入输入**未证实**，做不到就只靠（2）。
+
+### Windows 安装版的确认窗位置与授权通道
+
+Windows 安装版的被控端是控制台会话里的 SYSTEM agent，界面在托盘进程，二者经命名管道通信（`winsvc/`；管道允许同会话交互用户进程连接，`ToAgent` 现仅有 `KickAll` / `NewCode` / `SetAutostart` / `SaveDevices`）。r4 定：确认窗放在托盘进程；新增 `ToAgent::Approve { session_id, granted }` / `ToAgent::Decline { session_id }`；agent 在收到前校验管道客户端进程为本安装目录下的 `airhand.exe`（如实说明：同用户攻击者不在防护范围内，其本来就能控制该用户会话）。**登录屏 / 锁屏时没有托盘，现架构下没有可显示确认窗的路径 ⇒ 确认超时拒绝**（结论，不再是“未证实”）；是否能在 agent 内于安全桌面弹窗，列为可选的后续验证项，不在 Phase 1 范围。
+
+### 配置
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `[host] approve` | `"ask"` | `ask`：每个新控制端会话都要被控端确认（超时即拒）；`never`：**旧的无人值守行为**（不弹确认），需显式开启，托盘显示醒目警告，**且该模式下直连整体禁用**（I21） |
+| `[host] approval_timeout_secs` | `60` | 与 Android 现状一致 |
+| `[host] reconfirm_minutes` | `0` | 周期性“是否继续共享”，0 = 关 |
+| `[host] max_pending_approvals` | `2`（服务器按被控端每次的会话槽位默认 4，客户端拿不到服务器的上限；该值须小于槽位数，避免待确认的会话挤掉已授权的会话） | 同时等待确认的会话数上限；超出的立即回 `Bye(Busy)`（`ByeReason` 末尾新增 `Busy`）；同一时刻只弹一个确认窗口，其余排队 |
+
+### 滥用与资源（参照 RustDesk 的未授权连接限制）
+
+- 控制码是 6 位数字且猜码会引发弹窗；RustDesk 同样限制未授权连接的总数 / 单地址数。airhand：被控端**本地**按来源 IP 限速并设**全局**弹窗速率上限（设备标识可被随意更换，不能只按设备；服务器不改，**不能**“计入服务器猜码限速”——服务器只在控制码不存在时按 IP 记失败，带重连凭证的请求不限速），超限后**立即**发 `Bye(Declined)` 并关闭会话、不弹窗（不得“不回应等超时”，那会长时间占用会话槽位）。注意：**拒绝不会让控制码失效**，被拒的控制端仍持有重连凭证，能阻止持码人的办法是“停止共享 / 更换控制码”（写入 `docs/security.md`）。
+- 授权前阶段（`AwaitingApproval`）见 I15：只处理 `Hello` / `Ping` / `Bye`，`Settings` / `Audio` / `SelectDisplay` 只记下最新值、确认后生效，其余一律丢弃；授权前消息大小设上限（参照 RustDesk 的 128 KiB 预授权上限，airhand 具体值实现时定）。
+- 确认窗口里显示的对端自报文字（设备名等）必须做长度限制与控制字符 / 双向字符清理，且标注“自报”。
+
+### 未采纳项（及理由）
+
+- **PAKE（SPAKE2）绑定控制码**：magic-wormhole 的前提是短码**不为服务器所知**；airhand 的控制码是服务器分配并保存的标识，中转本来就知道它，因此对中转无法提供 PAKE 的保护。若将来要对恶意中转提供密码学保证，需要“服务器不知道的第二段口令”（例如 6 位公开码 + 控制端额外输入的口令词），这属于单独的特性与评审（列为后续扩展点）。
+- **RustDesk 的 `password-click`（口令与点击二选一）**：本设计要求**每次都点击确认**（控制码相当于“口令”，不能替代点击），所以不采用“有口令即免点击”的分支；无人值守需显式设 `approve = "never"`（此时无直连）。
+- **在登录屏 / UAC 安全桌面上的无人值守确认**：见风险。
 
 ## 非目标
 
@@ -145,6 +228,7 @@ helper 可执行文件的路径**不可配置**：固定为主程序同目录下
 - **不实现 Tailscale 与 ZeroTier**（只在“后续阶段”写扩展点）；不接入任何 Tailscale 控制面 / 账号 / tailnet。
 - 不使用 tailcat 的 ssh / files / exec / exit-node / socks 功能；不提供“把 airhand 当通用隧道”的能力。
 - 不实现多路径聚合 / 同时多条直连；不做额外端口映射逻辑（magicsock 自带的除外）。
+- 无人值守的直连、“已信任设备”记忆、PAKE / 服务器不知道的第二口令（见“未采纳项”）不在本特性内。
 - 不上游提交；不发布；不写 `main`。
 
 ## 不变量
@@ -160,9 +244,18 @@ helper 可执行文件的路径**不可配置**：固定为主程序同目录下
 - **I9** helper 只服务一个 UDP 端口、无 TCP 服务；对其他端口 / TCP 不回 RST（探测超时）；回环通道的暴露面按所选候选 (i)/(ii) 的约束。
 - **I10** 托盘显示 / 断开 / 更换控制码对直连会话的语义与中转会话相同；升级过程中被踢 / 更换控制码，两条通道一并结束；`Bye` 一律经中转发送。
 - **I11** 直连 QUIC 单个数据报载荷 ≤ 1232 字节（直连专用 `Endpoint` 与 `direct_transport_config()`：`initial_mtu` ≤ 1232、`min_mtu` 1200、关闭 MTU 探测、`EndpointConfig` 最大 UDP 载荷 1232；中转用的 `transport_config()` 不变）。具体 quinn API 名称在 Phase 0 对照 0.11 源码确认。
-- **I12** `DirectOffer` 只在 `HostHello` 已发之后发送；此前收到的 `DirectRequest` 丢弃。在有“请求同意”流程的平台（Android，Phase 1.5）还须在同意之后。
+- **I12** `DirectOffer` 只在被控端用户**已确认并授予“直连”权限**、且 `HostHello` 已发之后发送；此前收到的、以及未授予直连权限时收到的 `DirectRequest` 一律丢弃（后者回 `DirectDecline`）。
 - **I13** 提交由被控端裁决；迟到的 `DirectRequest` / 接受 / 连接（`epoch` 已过期或放弃）一律忽略；任一端经中转收到对端的 `DirectFallback` 立即回退；控制端等不到 `DirectCommit` 超时即回退。
 - **I14** `client_key` 为空或无法解析时，Rust 侧与 helper 都拒绝 Start（不得起一个放行所有客户端的 `Server`）；helper **不调用** `AddAllowedClient`（运行时追加会重新引入“列表为空即放行”的窗口）。
+- **I15** 桌面被控端 `approve = "ask"`（默认）时，每个新控制端会话在用户确认前：**不发 `HostMsg::Hello`、不发画面 / 声音**，只发 `AwaitingApproval`；只**处理** `ControllerMsg::Hello`（取设备标识与直连能力位）/ `Ping` / `Bye`；`Settings` / `Audio` / `SelectDisplay` **只记下最新值，确认后生效**（与 Android 一致，避免回归）；输入、剪贴板、`Ack`、`Direct*` 一律丢弃。**超时（默认 60 秒）即拒绝**（`Bye(Unanswered)`），点拒绝为 `Bye(Declined)`；二者对控制端是终止性的（`Problem::is_final()`，不自动重连）。
+- **I16** 确认之前：不交换任何地址 / 令牌 / 密钥，被控端不启动 helper，控制端 helper 不联网（不拉 DERP 图、不连 DERP）；未授予“直连”权限的会话永不启动 helper。
+- **I17** 确认窗口显示的对端自报文字（设备名等）有长度上限并清理控制 / 双向字符，且标注“自报”；同时等待确认的会话数有上限；同一来源被拒绝 / 无应答超限后静默拒绝，不再弹窗。
+- **I18** **停止共享**：结束所有会话的**中转与直连两条路径**（`Bye(Kicked)` 经中转；销毁每个会话的 tailcat `Server`、令牌、直连连接；结束 helper 进程）并**更换控制码使旧码立即失效**；之后迟到的直连连接 / 令牌 / 旧码一律拒绝。被控端“断开此控制端”结束选中会话的两条路径，不换码。
+- **I19** 控制端主动断开：经中转发 `ControllerMsg::Bye`，随后关闭直连连接并结束 helper；被控端收到后清理该会话的全部直连资源。两端的断开入口在会话期间始终可用（含升级进行中与直连状态）。
+- **I20** 权限由被控端强制执行（每项在两个方向上都要有执行点）：关闭“输入控制”后丢弃后续输入；关闭“剪贴板”后既不应用控制端发来的内容、也不再向控制端推送（桌面端现状这两处都不受条件限制，需新增）；关闭“声音”后取消订阅；收回“直连”权限立即回退中转并销毁 helper / tailcat 实例（不换码）；权限变化经 `HostMsg::PermissionsChanged` 通知控制端。
+- **I21** `approve = "never"` ⇒ 直连整体禁用（不发 `DirectOffer`，不启动 helper）；该模式需显式开启，托盘显示醒目警告；此模式下 `HostHello.granted` 取值：输入 / 剪贴板 / 声音沿用现有行为（全部为真），`direct` 为假。
+- **I22** 被控端会话期间的常驻指示不能被远端画面关闭或遮盖，显示控制端设备名、当前路径（中转 / 直连）与已授予权限；指示条只能收回权限；确认窗 / 续期提示不能被远端注入输入代点（见“防注入”）。**显示层行为无法自动化，验收归入手动项。**
+- **I23**（实现位置）确认闸门状态机（等 `Hello` → 询问 → 放行 / 拒绝、授权前缓存、授权记忆、权限集）下沉到 `airhand-link`，桌面与 Android 共用；Android 现有实现迁移为共用逻辑，避免两份逻辑走样。
 
 ## 验收测试清单
 
@@ -174,19 +267,29 @@ helper 可执行文件的路径**不可配置**：固定为主程序同目录下
 - [ ] 配置：`client/src-tauri/src/config.rs` 单测 →「`direct_config_defaults_off`」「`direct_config_rejects_non_https_derpmap`」「`direct_config_has_no_helper_path_option`」。
 - [ ] 升级：`crates/airhand-link/tests/direct.rs` →「`session_upgrades_to_direct_when_both_sides_enable`」；预期：升级后画面包经直连流到达、中转流字节计数不再增长。「`peer_without_direct_enabled_stays_on_relay`」。
 - [ ] I8：「`unknown_offer_kind_is_declined`」。
-- [ ] I12：「`no_offer_before_host_hello`」「`request_before_host_hello_is_dropped`」。
+- [ ] I12 / I16：「`no_offer_before_host_hello`」「`request_before_host_hello_is_dropped`」「`no_offer_before_approval`」「`direct_request_without_direct_grant_is_declined`」「`helper_not_spawned_before_approval`」（假 helper 工厂：确认前 0 次调用，且控制端 helper 无网络活动）「`declined_session_never_spawns_helper`」。
+- [ ] I15（确认 / 拒绝 / 超时）：`client/src-tauri` 内「`ask_mode_sends_awaiting_approval_and_no_hello`」「`no_frames_or_audio_before_approval`」「`non_ping_messages_dropped_while_awaiting`」「`approve_then_hello_with_granted_permissions`」「`decline_sends_bye_declined`」「`approval_timeout_sends_bye_unanswered`」（注入时钟，默认 60 秒）「`pong_still_answered_while_awaiting_approval`」「`declined_and_unanswered_are_fatal_no_auto_reconnect`」（`airhand-link`）「`same_device_reconnect_reuses_grant_in_same_run`」；并更新 `client/src-tauri/src/e2e.rs` 里“桌面被控端不会请本机用户同意”的断言（改为按 `approve` 模式断言）。
+- [ ] I15 补充：「`pre_approval_settings_applied_after_approval`」「`pre_approval_input_clipboard_direct_dropped`」「`controller_never_requests_without_direct_grant`」「`approved_without_direct_never_spawns_helper_either_side`」「`prompt_hides_direct_option_when_direct_not_enabled`」「`prompt_withdrawn_when_controller_leaves`」「`queued_request_timer_starts_at_enqueue`」。授权记忆：「`kicked_device_must_reapprove`」「`reused_grant_reflects_revocations`」「`direct_grant_not_reused_on_reconnect`」「`grant_memory_cleared_on_host_initiated_disconnect`」。
+- [ ] 防注入 / Windows：「`indicator_cannot_grant_permissions`」「`prompt_hides_direct_option_while_remote_input_active`」；手动：「`injected_input_cannot_approve_prompt`」（Windows，低层钩子过滤）；「`tray_ipc_approve_requires_installed_airhand_exe`」「`no_tray_at_lock_screen_times_out_to_reject`」。
+- [ ] I17（滥用与资源）：「`approval_prompt_text_is_sanitized_and_length_limited`」「`pending_approvals_over_cap_get_busy`」「`repeated_declines_from_same_source_are_silently_rejected`」「`unauthorized_message_over_limit_closes_session`」「`over_rate_limit_replies_declined_immediately`」「`declined_does_not_invalidate_code`」。
+- [ ] I18（停止共享）：「`stop_sharing_ends_relay_and_direct_paths`」「`stop_sharing_rotates_code_old_code_rejected`」「`stop_sharing_destroys_tailcat_server_token_and_helper`」「`late_direct_connection_after_stop_is_refused`」「`disconnect_one_controller_keeps_code_and_closes_both_paths`」「`stop_sharing_during_upgrade_ends_both_paths`」「`disconnect_completes_within_bound`」「`aborted_session_task_kills_helper`」「`kick_session_command_ends_only_that_session`」「`stop_sharing_sends_code_changed`」。
+- [ ] I19（控制端主动断开）：「`controller_bye_closes_direct_and_kills_helper`」「`controller_bye_sent_on_relay`」「`controller_disconnect_during_upgrade_cleans_up`」。
+- [ ] I20 / I21 / I22：「`revoking_input_permission_drops_input`」「`revoking_direct_permission_falls_back_and_destroys_helper`」「`permissions_changed_notifies_controller`」「`revoking_clipboard_stops_both_directions`」「`revoking_audio_unsubscribes`」「`approve_never_disables_direct`」「`approve_never_shows_warning_state`」「`session_indicator_shows_path_and_permissions`」「`reconfirm_prompt_defaults_to_stop_and_times_out_to_stop`」（`reconfirm_minutes > 0`）。
+- [ ] 协议兼容：「`old_frontend_ignores_unknown_events`」「`approval_new_variants_wire_is_stable`」。
+- [ ] SAS（可选显示）：「`verification_string_matches_on_both_ends`」「`verification_string_changes_if_offer_is_substituted`」「`verification_string_not_logged`」。
+- [ ] 手动：Windows 登录屏 / UAC 安全桌面下确认窗口能否显示与点击（不能则按超时拒绝）；macOS / Linux 的置顶指示与托盘行为。
 - [ ] I13：「`late_request_after_host_timeout_is_ignored`」「`host_fence_then_commit_is_first_direct_message`」（被控端先在中转发 `DirectSwitch`，再在直连发 `DirectCommit` 作为第一条）「`commit_lost_controller_falls_back_within_bound`」「`fallback_message_forces_peer_to_fall_back`」「`asymmetric_direct_failure_recovers_within_bound`」。
 - [ ] I2 / 存活：「`static_screen_does_not_trigger_fallback`」（无画面无声音数十秒，Ping/Pong 正常 ⇒ 不回退）「`missing_pong_triggers_fallback`」「`direct_failure_falls_back_to_relay`」「`helper_crash_does_not_end_session`」「`direct_stream_failure_does_not_end_session`」「`relay_loss_ends_session_even_when_direct`」「`direct_write_failure_requeues_on_relay`」。
-- [ ] I3（Rust 侧）：「`upgrade_timeout_keeps_relay`」「`no_switch_before_both_gates_open`」。I3（Go 侧，helper 本身）：`p2p/gate_test.go` →「`TestGateDropsWhenPathNotDirect`」（可注入路径源）「`TestControllerGateIgnoresSlowButDirectPath`」（RTT 大于 250 ms 的直连不被误判）「`TestHostGateClosedWhenCurAddrEmpty`」；另附**手动 / 可选 CI**：用本地自建 `derper` 验证真实 DERP 退化行为与窗口时长。
+- [ ] I3（Rust 侧）：「`upgrade_timeout_keeps_relay`」「`no_switch_before_both_gates_open`」。I3（Go 侧，helper 本身）：`p2p/gate_test.go` →「`TestGateDropsWhenPathNotDirect`」（可注入路径源）「`TestControllerGateIgnoresSlowButDirectPath`」（RTT 大于 250 ms 且 ≤ 400 ms 的直连不被误判，与阈值表对齐）「`TestHostGateClosedWhenCurAddrEmpty`」「`TestHostGateWindowIncludesStatusPollInterval`」；另附**手动 / 可选 CI**：用本地自建 `derper` 验证真实 DERP 退化行为与窗口时长。
 - [ ] I5：「`direct_token_is_one_time`」「`direct_token_wrong_session_rejected`」「`direct_token_expired_rejected`」「`direct_token_wrong_epoch_rejected`」；证书固定：「`direct_cert_pin_mismatch_aborts_upgrade`」。
-- [ ] I6：「`input_order_preserved_across_switch`」「`fence_timeout_drops_buffer_and_releases_keys`」「`late_direct_input_after_fallback_is_discarded`」「`keys_released_after_fallback`」「`settings_resynced_after_fallback`」「`bye_always_sent_on_relay`」「`duplicate_frames_across_lanes_are_dropped`」「`stale_lane_frames_before_keyframe_are_dropped`」「`audio_not_replayed_after_switch`」。
+- [ ] I6：「`input_order_preserved_across_switch`」「`fence_timeout_drops_buffer_and_releases_keys`」「`late_direct_input_after_fallback_is_discarded`」「`keys_released_after_fallback`」「`settings_resynced_after_fallback`」「`host_initiated_fallback_discards_inflight_direct_input`」「`bye_on_relay_processed_after_fence`」「`expired_input_not_replayed_on_relay_after_fallback`」「`commit_after_own_fallback_is_ignored`」「`controller_resends_cached_settings_audio_display_after_fallback`」「`duplicate_frames_across_lanes_are_dropped`」「`stale_lane_frames_before_keyframe_are_dropped`」「`audio_not_replayed_after_switch`」。
 - [ ] I11：「`direct_quic_never_sends_datagram_over_1232`」（行为测试：假 helper 记录并丢弃超限数据报，断言观测到的最大数据报 ≤ 1232）。
 - [ ] I7：「`direct_secrets_are_redacted_in_debug_and_logs`」（`Secret<T>`）；Go「`TestTailcatLogfDiscardedByDefault`」。
-- [ ] I9 / I14：Go `p2p/helper_test.go` →「`TestServesExactlyOneUDPPort`」「`TestNoTCPServiceAndNoRST`」（SYN 超时而非 RST）「`TestOnlyAllowedClientKeyConnects`」「`TestEmptyOrInvalidAllowlistRefusesToStart`」「`TestMultipleServersInOneProcessAreIndependent`」（不通过则改为每 epoch 一进程）；Rust：「`empty_client_key_refuses_start`」；若采用候选 (i) →「`direct_listener_binds_loopback_only`」「`direct_listener_accepts_single_connection`」；若采用 (ii) →「`direct_path_opens_no_local_port`」。
+- [ ] I9 / I14：Go `p2p/helper_test.go` →「`TestServesExactlyOneUDPPort`」「`TestNoTCPServiceAndNoRST`」（SYN 超时而非 RST）「`TestOnlyAllowedClientKeyConnects`」「`TestEmptyOrInvalidAllowlistRefusesToStart`」「`TestMultipleServersInOneProcessAreIndependent`」（不通过则改为每 epoch 一进程）；Rust：「`empty_client_key_refuses_start`」（I14 单列，不并入 I9）；若采用候选 (i) →「`direct_listener_binds_loopback_only`」「`direct_listener_accepts_single_connection`」「`direct_listener_uses_exclusive_addr_on_windows`」；若采用 (ii) →「`direct_path_opens_no_local_port`」。
 - [ ] helper 协议：Go「`TestControlProtocolNeverEchoesAddressToArgvOrStderr`」「`TestDatagramPipeIsSeparateFromControlStdio`」（候选 (ii)）。
 - [ ] 并发：「`two_concurrent_sessions_upgrade_independently`」「`session_over_cap_stays_on_relay`」。
-- [ ] I10（`client/src-tauri` 内）：「`kick_all_ends_direct_and_relay_lanes`」「`new_code_ends_direct_session`」「`kick_during_upgrade_ends_both_paths`」。（“同意”相关用例属于 Android，Phase 1.5。）
-- [ ] Windows（Windows CI / 真机）：「`helper_token_is_restricted_on_windows`」：断言用户 SID 与 Administrators 为 deny-only、特权只剩 `SeChangeNotifyPrivilege`、完整性级别 Low、位于带 `KILL_ON_JOB_CLOSE` 与进程数限制的 Job 内（若采用 restricting SIDs 则断言其存在）。
+- [ ] I10（`client/src-tauri` 内）：「`kick_all_ends_direct_and_relay_lanes`」「`new_code_ends_direct_session`」「`kick_during_upgrade_ends_both_paths`」「`bye_always_sent_on_relay`」。
+- [ ] Windows（手动 / 真机，**以 SYSTEM 服务身份**运行，不计入自动通过数）：「`helper_token_is_restricted_on_windows`」「`helper_under_restricted_token_completes_direct_session`」（功能验证：受限令牌下能完成一次直连会话）「`restricted_helper_cannot_open_parent_or_write_install_dir`」（反向验证）：断言用户 SID 与 Administrators 为 deny-only、特权只剩 `SeChangeNotifyPrivilege`、完整性级别 Low、位于带 `KILL_ON_JOB_CLOSE` 与进程数限制的 Job 内（若采用 restricting SIDs 则断言其存在）。
 - [ ] 完整性：「`helper_hash_mismatch_disables_direct`」（只验证防误放 / 损坏，不声称防同用户攻击）。
 - [ ] 回归：`server/` 源码无 diff（`git diff --stat` 校验）；`cargo test`（根工作区）、`cargo test`（`web/`）、`npm test`（`client/`）、`cargo test`（`android/native`）全部仍通过。
 - [ ] 手动（不计入自动通过数，须单独记录）：两台不同网络的真机开启后确认路径为 direct；记录升级耗时、码率、延迟、CPU；对称 NAT 下确认回退；Windows 防火墙行为；macOS 嵌套 helper 签名 / 公证 / 防火墙弹窗；杀毒软件误报情况；Linux 各分发形态（deb / AppImage 等）带上 helper 且卸载干净。
@@ -197,10 +300,11 @@ helper 可执行文件的路径**不可配置**：固定为主程序同目录下
 |---|---|---|
 | 调研 | 上游机制、tailcat 核实 | 已完成：见本文与 feature map |
 | 规格 | 本文 + feature map，走分支 + PR | PR #1（Draft） |
-| 设计评审 | 需求与架构评审（独立于实现），分级 findings，修订后复审至无严重问题 | [`tailcat-p2p-review.md`](tailcat-p2p-review.md)（三轮报告全文在 [`review/`](review/)） |
-| 项目负责人批准 (A) | 本变更属重大改动；spec 与评审都不代替批准。(A)：**仅批准 Phase 0 spike**，范围限定在独立 spike 分支，**不得合并，spike 代码不得直接复用进 Phase 1**（Phase 1 按先红后绿重写） | PR 评论记录批准结论 |
-| Phase 0 spike | 实测并产出数据，见下表清单与 go/no-go 阈值 | 结果写入规格 r4 |
-| 复审 | **Phase 0 结果 → 规格 r4 → 再做一轮设计复审**直到无 S1 | 追加到评审文档 |
+| 设计评审 | 需求与架构评审（独立于实现），分级 findings，修订后复审至无严重问题 | [`tailcat-p2p-review.md`](tailcat-p2p-review.md)（四轮报告全文在 [`review/`](review/)） |
+| 项目负责人批准 (A) | 本变更属重大改动；spec 与评审都不代替批准。(A)：**仅批准 Phase 0 spike**，范围限定在独立 spike 分支，**不得合并，spike 代码不得直接复用进 Phase 1**（Phase 1 按先红后绿重写） | **已批准（2026-11-10 项目负责人批复）**，阈值同批确认；结论记录在 PR 评论 |
+| 工作流脚本 / CI 移植（独立 PR） | 把 workflow v2 的检查（隐私扫描、署名 trailer、spec-requires-tests）移植进本 fork，**单独一个 PR，在 Phase 1 之前完成**；本 PR 不含 | 独立 PR（后续） |
+| Phase 0 spike | 实测并产出数据，见下表清单与 go/no-go 阈值 | 结果写入规格 r5 |
+| 复审 | **Phase 0 结果 → 规格 r5 → 再做一轮设计复审**直到无 S1 | 追加到评审文档 |
 | 项目负责人批准 (B) | 批准 Phase 1 全量实现；“降级为仅低码率档”属范围变更，须在 (B) 中单独确认 | PR 评论记录批准结论 |
 | 先红后绿 | 先提交行为断言失败的测试，再最小实现 | 实现 PR（另开分支） |
 | 验收 | 本地全部套件真实通过数 + 手动线上验证记录 | PR 描述 `## 验收清单` / `## 风险分级` |
@@ -216,15 +320,15 @@ helper 可执行文件的路径**不可配置**：固定为主程序同目录下
 6. 同一进程内多个 `Server` 是否安全（进程级全局设置）。
 7. Windows：受限令牌（含默认 DACL、restricting SIDs、Go 运行时）与 AppContainer 对照；UDP 绑定 / 网卡枚举；防火墙行为。
 8. helper 体积与第三方许可清单；macOS 嵌套签名 / 公证可行性。
-9. 中转 RTT 下栅栏等待上限、Commit 等待 T、存活检测 K 的校准（均须小于现有 2 秒命令队列过期）。
+9. 中转 RTT 下栅栏等待上限、Commit 等待 T、直连 Ping 间隔与存活检测 K 的校准（K 的形式见 §2；直连通道的写超时按通道区分）。
 
-### 建议的 go/no-go 阈值（供项目负责人在批准 (A) 前确认或调整）
+### go/no-go 阈值（2026-11-10 项目负责人已批准；数值须在 Phase 0 报告里逐项对照）
 
 | 指标 | 阈值 |
 |---|---|
-| helper 额外 CPU（被控端，1080p60、约 20 Mbps 单会话；参考硬件同上） | ≤ 单核 30% |
+| helper 额外 CPU（被控端，1080p60、约 20 Mbps 单会话；参考硬件见下“升级完成时间”一行） | ≤ 单核 30% |
 | 局域网直连额外往返延迟（相对不经 helper 的同路径） | ≤ 3 ms |
-| 单会话持续吞吐（5 分钟，在 QUIC 层统计） | ≥ 60 Mbps，QUIC 层丢包 < 0.1%；产品允许的最高码率为 100 Mbps，直连会话的码率上限策略（限制码率 / 回退）在 r4 定 |
+| 单会话持续吞吐（5 分钟，在 QUIC 层统计） | ≥ 60 Mbps，QUIC 层丢包 < 0.1%；产品允许的最高码率为 100 Mbps，直连会话的码率上限策略（限制码率 / 回退）**待 Phase 0 数据，r5 定** |
 | 路径判定误判（直连稳定且 RTT ≤ 400 ms，30 分钟；与 Go 用例覆盖的 RTT 范围对齐） | 0 次 |
 | 存活检测误回退（直连稳定；静止桌面 + Wi-Fi 场景，30 分钟） | 0 次 |
 | I3 窗口（自建 `derper`，路径被人为切断后） | 闸门关闭 ≤ 2 s；经 DERP 发出的数据报数量如实记录（上限值在首轮数据后与项目负责人确认） |
@@ -235,13 +339,17 @@ helper 可执行文件的路径**不可配置**：固定为主程序同目录下
 > 工作流适配说明：`docs/workflow-v2.md` 与 `AGENTS.md` 来自另一个仓库（passkey 演示），其中 `tests/*.mjs`、CI 检查名（`spec-requires-tests`、`agent-trailer`、`privacy-scan`）是那个仓库的实现。
 > 本 fork 目前没有这些脚本与 CI（上游也没有 `.github/`）。本规格把“验收映射到测试用例名”改写为 Rust / Go 用例名；是否把检查脚本与 CI 移植进本 fork，作为开放问题交项目负责人决定。
 
-## r4 待办（第 3 轮复审的 S2 / S3，Phase 0 之后、批准 (B) 之前落实）
+## r4 处理记录（第 3 轮复审的 S2 / S3 与项目负责人批复）
 
-评审结论：无 S1，可提交批准 (A)。下列条目**不阻断 (A)**，但批准 (B) 前必须关闭（详见 [第 3 轮报告](review/tailcat-p2p-round3.md)）：
+**已在 r4 落实（不依赖 spike 数据）**：S2-1（回退发起方丢弃、栅栏后仍处理的中转消息、“改投中转”范围、新增用例）；S2-2（去掉“< 2 秒”约束、直连 Ping 间隔与 K 的形式、按通道区分写超时、10 秒措辞）；S3-1（`Server.Status()` 轮询计入 I3 窗口）；S3-2（Commit 计时与回退后迟到 Commit）；S3-3（控制端缓存并重发 `Settings` / `Audio` / `SelectDisplay`）；S3-4（Windows 验收改为手动 / 真机 / SYSTEM，补功能与反向验证）；S3-6（选 (i) 的 Windows 独占地址用例）；S3-7（用例归属整理）；以及项目负责人批复新增的“被控端确认与主动断开”（I15–I22）。
 
-1. **S2-1 回退发起方**：写明发起方也丢弃该 epoch 后续的直连控制消息（丢失靠 `release_all()` 与状态重同步补偿），或改为带确认的回退；列出栅栏之后仍须处理的中转消息（`Bye`、`DirectFallback`、对向 `DirectSwitch`）；“改投中转”只限未写出且未过期的消息，过期输入不补发，正在写的一条视为丢失；补用例 `host_initiated_fallback_discards_inflight_direct_input`、`bye_on_relay_processed_after_fence`、`expired_input_not_replayed_on_relay_after_fallback`。
-2. **S2-2 存活超时**：去掉“须小于 2 秒”的约束（直连通道的写超时 / 队列过期按通道区分，一律转为回退）；直连期间使用比 1 秒更短的 Ping 间隔（`Ping` 是现有消息，不改协议），K 取 `max(1.5 s, N×间隔 + 2×RTT)` 一类形式，由 Phase 0 校准；被控端写卡住判定是 10 秒而非 2 秒，措辞写准确。
-3. **S3-1** 被控端 `Server.Status()` 轮询间隔（≤ 250 ms）与 `CurAddr` 失效延迟计入 I3 窗口；**S3-2** Commit 计时以“读到 `DirectCommit`（不论是否在缓存中）”为准，回退后迟到的 Commit 一律忽略（`commit_after_own_fallback_is_ignored`）；**S3-3** 删除“控制端清空本地按键状态”，改为 `airhand-link` 控制端按会话缓存最近一次 `Settings` / `Audio` / `SelectDisplay` 并在回退后重发；**S3-4** Windows 验收改为“手动 / 真机，以 SYSTEM 服务身份运行”，补功能验证 `helper_under_restricted_token_completes_direct_session` 与反向验证 `restricted_helper_cannot_open_parent_or_write_install_dir`；**S3-6** 选 (i) 时补 `direct_listener_uses_exclusive_addr_on_windows`；**S3-7** 验收映射整理（`bye_always_sent_on_relay` 归 I10，I14 单列）。
+**仍待 Phase 0 实测数据（r5）**：各超时与阈值的取值（升级超时、栅栏上限、T、Ping 间隔、K、M、`Server.Status()` 轮询）、回环候选 (i) / (ii) 的选择、同进程多 `Server` 是否安全、Windows 受限令牌 / AppContainer 结论、go/no-go 判定、helper 体积与许可清单。
+
+## 项目负责人批复记录（2026-11-10）
+
+- **批准**：Phase 0 spike（(A)，独立分支，不合并、代码不复用）；全部建议的 go/no-go 阈值；方案 B（Go helper 子进程）与第三方许可声明；默认使用 Tailscale 托管 DERP 做引导；v10 服务器与全部客户端同步升级；Phase 1 仅桌面。
+- **新增要求**：被控端必须确认（控制码不等于自动接受，尤其在暴露公网 / 内网地址之前）；被控端要有随时可用的主动断开；握手参考现成方案（见“被控端确认与主动断开”）。
+- **工作流脚本 / CI**：移植为独立 PR，在 Phase 1 之前完成（见阶段表）。
 
 ## 后续阶段（TODO，仅扩展点，本次不实现）
 
@@ -261,21 +369,31 @@ helper 可执行文件的路径**不可配置**：固定为主程序同目录下
 - **Windows SYSTEM 被控端**：见安全模型的具体方案；Phase 0 前不得假设可行。
 - **新增运行时依赖与供应链**：Go 工具链、tailscale.com / gVisor / wireguard-go 体积（待实测）与许可声明；安装包体积增长；杀毒软件对 Go / WireGuard 二进制的误报。
 - **打包与平台**：Windows 防火墙、macOS 嵌套 helper 的签名 / 公证 / hardened runtime / 应用防火墙弹窗、卸载流程（`uninstall.rs`）清理 helper、Linux 各分发形态带上 helper——均为 F12 子项，各自需验收。
+- **确认步骤改变桌面被控端的既有行为**：默认 `approve = "ask"` 后，无人值守 / 登录屏主机默认无法被连接（确认超时即拒）；Windows SYSTEM agent 能否在登录屏 / 安全桌面上显示并接收确认窗口的点击未证实（手动验证；不行则只能依赖 `approve = "never"`，且该模式下无直连）。同时 `e2e.rs` 等既有测试需随之更新。
 - **协议版本升级**：v9 ↔ v10 不互通；服务器与所有客户端须同时升级（见“发布与回滚”）。
 - **仍需线上验证**：真实跨网络打洞成功率、码率与延迟、DERP 引导可用性——自动测试无法覆盖。
 
-## 开放问题（需项目负责人 / 评审结论）
+## 开放问题
 
-1. 集成形态：确认方案 B（自带 Go helper 子进程）。备选 A、C、D 已否决；C′ 留给 Android。是否接受新增 Go 构建与第三方许可声明？
-2. DERP 策略：默认使用 Tailscale 托管的限速 DERP 做引导（以及路径退化窗口期内有界地承载少量数据）是否可接受？还是要求先自建 `derper`？
-3. 控制流是否迁移：本设计迁移并用栅栏保证顺序；若觉得复杂度过高，可退为“只迁移画面与声音”（输入延迟不受益）。
-4. 批准节奏：是否接受“分两段批准”（先批准 Phase 0 spike，不合并；Phase 0 结果 → 规格 r4 → 复审 → 再批准 Phase 1 全量）？go/no-go 阈值是否按上表或另行调整？
-5. Phase 1 范围：仅桌面（Windows / macOS / Linux）；网页控制台与 Android 是否确认后置？
-6. 本 fork 是否移植 workflow v2 的检查脚本与 CI（隐私扫描、署名 trailer、spec-requires-tests），还是沿用人工 + 一次性扫描？
-7. fork 保持 MIT；helper 引入的第三方许可（BSD-3 / MIT / Apache-2.0 等）是否接受？是否在 README 加声明？
-8. 发布：服务器镜像与全部客户端须同步升级到 v10，是否接受？
-9. 直连是否追加 mTLS（让控制端出示临时客户端证书指纹）：本设计暂不采纳——已有 `AllowedClients`（单公钥）+ 一次性令牌 + 证书指纹固定三层，客户端证书会增加 `rcgen` / rustls 配置复杂度；如评审认为必要可在 r4 加入。
-10. 本特性对桌面被控端没有“请求同意”环节：持码人会立即获知被控端公网与内网地址（见安全模型）；是否接受，或要求直连默认仅对“已保存的设备”开放？
+### 已决定（2026-11-10 项目负责人批复）
+
+1. 集成形态方案 B（自带 Go helper 子进程）与第三方许可声明——**已批准**。
+2. DERP 策略：默认使用 Tailscale 托管 DERP 做引导（以及路径退化窗口期内有界地承载少量数据，见 I3）——**已批准**（自建 `derper` 仍为可选配置）。
+3. 控制流迁移（栅栏方案）——**随整体批准，按本规格实施**；复杂度由 Phase 0 与复审把关。
+4. 批准节奏（分两段）与 go/no-go 阈值——**已批准**，阈值按上表。
+5. Phase 1 范围仅桌面——**已批准**。
+6. 工作流脚本 / CI——**移植，作为独立 PR 在 Phase 1 之前完成**。
+7. fork 保持 MIT；helper 第三方许可（BSD-3 / MIT / Apache-2.0 等）与 README 声明——**已批准**。
+8. v10 服务器与全部客户端同步升级——**已批准**。
+9. mTLS：不采纳（保持三层限定）；评审未要求。
+10. 桌面被控端请求同意：**不再接受“无确认”**——r4 改为默认 `approve = "ask"`，确认之前不交换地址（I15 / I16）。
+
+### 仍待项目负责人确认（r4 新增，非阻断 (A)；对 Phase 1 范围有影响）
+
+11. **默认确认范围**：`approve = "ask"` 对桌面被控端的**所有**新会话（含纯中转）生效，会改变现有“持码即连”的行为，并使无人值守（登录屏 / 无人坐在机前）主机在不改配置时无法被连接（超时即拒）。是否接受？无人值守机器需显式设 `approve = "never"`（此模式下无直连）。
+12. **“停止共享”默认更换控制码**，另提供“断开此控制端（保留控制码）”给固定控制码的常驻主机——是否接受这两个按钮的分工？
+13. **周期性“是否继续共享”**（参照 CRD）默认关闭（`reconfirm_minutes = 0`），是否要默认开启（如 30 分钟）？
+14. **校验串（SAS）** 仅显示、不强制比对——是否接受？
 
 ## 是否重大改动
 
