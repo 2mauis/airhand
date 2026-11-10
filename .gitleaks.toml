@@ -1,0 +1,9 @@
+# gitleaks 配置：默认规则（移植自 2mauis 的 passkey-demo 项目 workflow v2，MIT；去掉了其中 Cloudflare Turnstile 测试值的放行项）
+[extend]
+useDefault = true
+
+[allowlist]
+description = "锁文件里的校验和不是密钥"
+paths = ['''package-lock\.json''', '''Cargo\.lock''', '''go\.sum''']
+# 上游测试里的固定样例值（00112233… 递增序列，不是密钥）：android/native/src/host/mod.rs 的单元测试
+regexes = ['''0011223344556677[0-9a-f]{16}''']
