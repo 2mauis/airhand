@@ -1,0 +1,150 @@
+# airhand 自身的构建 / 测试 / 静态检查（本仓库新增，不是 passkey 的内容；写法沿用 workflow v2 的约定：动作按提交 SHA 固定、权限最小、不使用任何 secret、不含部署步骤）。
+# 仓库有四个互相独立的 Cargo 工作区：根（proto / link / server）、web、client/src-tauri、android/native。
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+jobs:
+  fmt:
+    name: fmt (${{ matrix.ws }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { ws: root, dir: . }
+          - { ws: web, dir: web }
+          - { ws: client, dir: client/src-tauri }
+          - { ws: android-native, dir: android/native }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: 安装 stable 工具链（rustfmt）
+        run: rustup toolchain install stable --profile minimal --component rustfmt --no-self-update && rustup default stable
+      - run: cargo fmt --all --check
+        working-directory: ${{ matrix.dir }}
+  clippy:
+    name: clippy (${{ matrix.ws }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { ws: root, dir: . }
+          - { ws: web, dir: web }
+          - { ws: client, dir: client/src-tauri }
+          - { ws: android-native, dir: android/native }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: 安装 stable 工具链（clippy）
+        run: rustup toolchain install stable --profile minimal --component clippy --no-self-update && rustup default stable
+      - name: 桌面客户端的系统依赖与前端产物（见 docs/building.md）
+        if: matrix.ws == 'client'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.ws == 'client'
+        with: { node-version: "22" }
+      - name: 构建前端（Tauri 编译需要 frontendDist）
+        if: matrix.ws == 'client'
+        working-directory: client
+        run: npm ci && npm run build
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ matrix.dir }}/target
+          key: clippy-${{ matrix.ws }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.dir)) }}
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        working-directory: ${{ matrix.dir }}
+  test:
+    name: test (${{ matrix.ws }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { ws: root, dir: . }
+          - { ws: web, dir: web }
+          - { ws: client, dir: client/src-tauri }
+          - { ws: android-native, dir: android/native }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: 安装 stable 工具链
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - name: 桌面客户端的系统依赖与前端产物（见 docs/building.md）
+        if: matrix.ws == 'client'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.ws == 'client'
+        with: { node-version: "22" }
+      - name: 构建前端（Tauri 编译需要 frontendDist）
+        if: matrix.ws == 'client'
+        working-directory: client
+        run: npm ci && npm run build
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ matrix.dir }}/target
+          key: test-${{ matrix.ws }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.dir)) }}
+      - run: cargo build --workspace --locked
+        working-directory: ${{ matrix.dir }}
+      - run: cargo test --workspace --locked
+        working-directory: ${{ matrix.dir }}
+  client-frontend:
+    name: client-frontend (typecheck + test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: "22" }
+      - run: npm ci
+        working-directory: client
+      - run: npm run typecheck
+        working-directory: client
+      - run: npm test
+        working-directory: client
+  go-helper:
+    name: go-helper (p2p/)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: 检测 p2p/ 模块
+        id: detect
+        run: |
+          if [ -f p2p/go.mod ]; then echo "present=1" >> "$GITHUB_OUTPUT"; else echo "present=0" >> "$GITHUB_OUTPUT"; echo "::notice::p2p/go.mod 不存在（tailcat helper 尚未实现）：本 job 未执行任何 Go 检查"; fi
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.detect.outputs.present == '1'
+        with: { go-version-file: p2p/go.mod }
+      - name: gofmt / vet / test
+        if: steps.detect.outputs.present == '1'
+        working-directory: p2p
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test ./...
