@@ -1,3 +1,6 @@
 #!/bin/sh
+# 本地便利检查（需 git config core.hooksPath .githooks）；pre-push 与 CI 为准。规则见 docs/specs/commit-signature-v3.md §3.3、§4.2。
 set -eu
-node scripts/agent-trailer.mjs --message-file "$1"
+scripts="$(dirname "$0")/../scripts"
+node "$scripts/agent-trailer.mjs" --message-file "$1"
+node "$scripts/privacy-scan.mjs" --message-file "$1"

@@ -1,0 +1,38 @@
+# 政策文件变更门（docs/specs/commit-signature-v3.md §2.1(b)、§9）：红灯 = 本 PR 触及政策文件（权限或安全边界变更），需要项目负责人明确批准。
+# pull_request_target 运行 base 分支上的本文件，PR 改不了当次运行的定义。为此：不 checkout、不执行 PR 的任何代码、不使用任何 action、
+# 不使用 secrets；PR 控制的字符串不插值进 run:，只经 env 传入；只用 runner 自带的 gh 读改动文件名。
+name: policy-gate
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  policy-gate:
+    name: policy-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 比对改动文件名（红灯 = 触及政策文件，需项目负责人明确批准）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          total=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .changed_files)
+          [[ "$total" =~ ^[0-9]+$ ]]
+          if (( total >= 3000 )); then echo "::error::policy-gate 改动文件数达到 API 上限（3000），无法完整比对，按触及处理"; exit 1; fi
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed.txt"
+          n=0
+          while IFS= read -r f; do
+            # case 模式里的 * 也匹配 /，所以 .github/** 覆盖 .github/ 下任意深度（工作流、本地 action 等）
+            case "$f" in
+              scripts/allowed-author-hashes.json|scripts/commit-email-policy.mjs|scripts/agent-trailer.mjs|scripts/privacy-scan.mjs|scripts/check-spec-tests.mjs|tests/workflow-scripts.mjs|.gitleaks.toml|.github/**|.githooks/*)
+                n=$((n + 1)); printf '触及政策文件：%s\n' "$(printf '%s' "$f" | tr -c 'A-Za-z0-9._/-' '?')" >&2 ;;
+            esac
+          done < "$RUNNER_TEMP/changed.txt"
+          if (( n > 0 )); then echo "::error::policy-gate：本 PR 触及 ${n} 个政策文件（权限或安全边界变更），需要项目负责人明确批准"; exit 1; fi
+          echo "policy-gate：未触及政策文件"

@@ -1,0 +1,38 @@
+#!/bin/sh
+# 推送前检查提交元数据、提交信息与附注标签（需 git config core.hooksPath .githooks）。规则见 docs/specs/commit-signature-v3.md §4.3(4)。
+# 范围：git rev-list <local_sha> --not --remotes=<正在推送的远程>（不用 remote_sha；只排除这一个远程的跟踪分支）。
+# 推送目标不是已配置的远程名（例如直接写 URL）或该远程没有任何跟踪分支时，范围无法确定，只检查 tip。
+# 已知局限：远程跟踪分支只与上次 fetch 一样新；附注标签只有这一道检查（CI 不对标签推送运行）。
+set -u
+remote="$1"
+scripts="$(dirname "$0")/../scripts"
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+fail() { echo "pre-push: $1（检查失败，推送已中止）" >&2; exit 1; }
+
+known=0
+if git remote | grep -qxF -- "$remote" && [ -n "$(git for-each-ref --count=1 "refs/remotes/$remote/")" ]; then known=1; fi
+
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+  : > "$tmp/commits"
+  : > "$tmp/objects"
+  type=$(git cat-file -t "$local_sha") || fail "无法读取 $local_ref"
+  [ "$type" = tag ] && printf '%s\n' "$local_sha" >> "$tmp/objects"
+  peeled=$(git rev-parse --verify -q "$local_sha^{}") || fail "无法解析 $local_ref"
+  ptype=$(git cat-file -t "$peeled") || fail "无法读取 $local_ref"
+  if [ "$ptype" = commit ]; then
+    if [ "$known" = 1 ]; then
+      git rev-list "$peeled" --not --remotes="$remote" > "$tmp/commits" || fail "git rev-list 失败"
+    else
+      echo "pre-push: 范围无法确定（推送目标没有远程跟踪分支），只检查 tip，CI 为准" >&2
+      git rev-list -n 1 "$peeled" > "$tmp/commits" || fail "git rev-list 失败"
+    fi
+  fi
+  cat "$tmp/commits" >> "$tmp/objects"
+  echo "pre-push: 检查 $local_ref：$(wc -l < "$tmp/commits" | tr -d ' ') 个提交" >&2
+  node "$scripts/agent-trailer.mjs" --shas-stdin < "$tmp/commits" >&2 || status=1
+  node "$scripts/privacy-scan.mjs" --shas-stdin < "$tmp/objects" >&2 || status=1
+done
+exit "$status"
