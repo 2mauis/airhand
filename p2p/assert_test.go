@@ -3,6 +3,8 @@ package p2p
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,6 +28,28 @@ func expectf(t testing.TB, cond bool, format string, args ...any) {
 func assertNoErr(t testing.TB, err error, what string) {
 	t.Helper()
 	assertf(t, err == nil, "%s: %v", what, err)
+}
+
+// record 写一条只记录、不作断言的观测值（soak、随机丢包与 OQ-26 变体）：输出 "RECORD: <用例>: …"，
+// 设置了 P2P_RECORD_DIR 时同时追加到该目录下的 <用例>.txt。
+func record(t testing.TB, format string, args ...any) {
+	t.Helper()
+	line := fmt.Sprintf(format, args...)
+	t.Logf("RECORD: %s: %s", t.Name(), line)
+	dir := os.Getenv("P2P_RECORD_DIR")
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	name := strings.NewReplacer("/", "__", " ", "_").Replace(t.Name())
+	f, err := os.OpenFile(filepath.Join(dir, name+".txt"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s: %s\n", t.Name(), line)
 }
 
 // TestMain 按 P2P_TEST_NOOP 选择空操作极性（#99）；未设置时为常规作业的 strict。
