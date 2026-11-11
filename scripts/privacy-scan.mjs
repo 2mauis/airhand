@@ -14,7 +14,7 @@
 // 退出码：0 无命中；1 有命中；2 检查本身失败（仅对象扫描模式）。
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
-import { isAllowedAuthorEmail, isAllowedCommitterEmail, isAllowedTaggerEmail, loadAllowedHashes, readCommentPrefix, cleanMessage, DEFAULT_ALLOW_FILE } from './commit-email-policy.mjs';
+import { isAllowedAuthorEmail, isAllowedCommitterEmail, isAllowedTaggerEmail, loadAllowedHashes, readCommentPrefix, cleanMessageBytes, analyzeCoauthors, rebuildCoauthorLine, DEFAULT_ALLOW_FILE } from './commit-email-policy.mjs';
 
 const ALLOW_EMAIL = /(@users\.noreply\.github\.com|@example\.(com|org|net)|@localhost|^git@github\.com)$/i;
 const DOC_IP = /^(192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|127\.|0\.0\.0\.0$|255\.255\.255\.)/;
@@ -126,8 +126,23 @@ function scanTag(hits, id12, text, offset, ctx, hashes) {
   const type = headers.find((h) => h.key === 'type')?.lines[0];
   return type === 'tag' ? next : null;
 }
-function scanCommit(hits, id12, text, hashes) {
-  const { headers, body, bodyLine } = parseObject(text);
+// 提交信息（spec §4.4）：对该解码下的原文逐行扫描，只把 analyzeCoauthors 判为 ok / email 的行（按原文行号）换成按名字组重建的行；
+// email 行另记 coauthor-email。malformed 行与其他行整行照常扫描。行号是提交信息内的 1 起行号
+function scanMessage(hits, prefix, lines, coauthors, enc) {
+  const byLine = new Map(coauthors.map((v) => [v.line, v]));
+  lines.forEach((l, i) => {
+    const v = byLine.get(i + 1);
+    let line = l;
+    if (v && (v.status === 'ok' || v.status === 'email')) {
+      if (v.status === 'email') hits.add(`${prefix}:${i + 1} coauthor-email`);
+      line = rebuildCoauthorLine(enc === 'utf8' ? v.nameUtf8 : v.nameLatin1);
+    }
+    for (const r of ruleIds(line)) hits.add(`${prefix}:${i + 1} ${r}`);
+  });
+}
+const DECODINGS = ['utf8', 'latin1'];
+function scanCommit(hits, id12, text, hashes, coauthors, enc) {
+  const { headers, body } = parseObject(text);
   for (const role of ['author', 'committer']) if (headers.filter((h) => h.key === role).length !== 1) hits.add(`${id12}:${role} commit-ident-malformed`);
   for (const h of headers) {
     if ((h.key === 'tree' || h.key === 'parent') && singleHex(h)) continue;
@@ -138,15 +153,17 @@ function scanCommit(hits, id12, text, hashes) {
     else if (h.key === 'mergetag') scanTag(hits, id12, h.lines.join('\n'), h.line - 1, MERGETAG_CTX, hashes);
     else scanLines(hits, id12, 'header', [`${h.key} ${h.lines[0]}`, ...h.lines.slice(1)], h.line);
   }
-  scanLines(hits, id12, 'message', body, bodyLine);
+  scanMessage(hits, `${id12}:message`, body, coauthors, enc);
 }
-// 同一对象按 utf8 与 latin1 各解码一遍（非 UTF-8 的 encoding 头不漏匹配），命中取并集；返回标签链的下一层对象
+// 同一对象按 utf8 与 latin1 各解码一遍（非 UTF-8 的 encoding 头不漏匹配），命中取并集；返回标签链的下一层对象。
+// 共同作者分析对提交信息的原始字节（第一个空行之后）只做一次，两种解码共用同一份结论
 function scanObject(hits, id, type, hashes) {
   const buf = gitRaw(['cat-file', type, id]).stdout;
-  let next = null;
-  for (const enc of ['utf8', 'latin1']) {
+  let next = null, coauthors = [];
+  if (type === 'commit') { const end = buf.indexOf('\n\n'); if (end >= 0) coauthors = analyzeCoauthors(buf.subarray(end + 2), hashes); }
+  for (const enc of DECODINGS) {
     const text = buf.toString(enc);
-    if (type === 'commit') scanCommit(hits, id.slice(0, 12), text, hashes);
+    if (type === 'commit') scanCommit(hits, id.slice(0, 12), text, hashes, coauthors, enc);
     else next = scanTag(hits, id.slice(0, 12), text, 0, TAG_CTX, hashes);
   }
   return next;
@@ -165,8 +182,9 @@ function objectModes(argv) {
   const hits = new Set();
   let count = 0;
   if (o.mode === '--message-file') {
-    const text = cleanMessage(readFileSync(o.value, 'utf8'), readCommentPrefix());
-    for (const h of scanText(text, 'HEAD:message', { honorAllow: false })) hits.add(h);
+    const buf = cleanMessageBytes(readFileSync(o.value), readCommentPrefix());
+    const coauthors = analyzeCoauthors(buf, hashes);
+    for (const enc of DECODINGS) scanMessage(hits, 'HEAD:message', buf.toString(enc).split('\n'), coauthors, enc);
     count = 1;
   } else {
     let queue;
