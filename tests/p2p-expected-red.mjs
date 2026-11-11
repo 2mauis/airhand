@@ -9,7 +9,7 @@
 //   - 每个失败都必须是断言失败：Rust 的 panic 信息以 `assertion ` 或 `ASSERT:` 开头，Go 的输出含 `ASSERT:` 或
 //     `Error Trace:`；含“未实现”字样、构建 / 初始化失败、非断言 panic、无标记的超时一律判“错误原因的红”；
 //   - 桩源码里没有 todo!() / unimplemented!()。
-// 每次评估之前先跑 #139 的十一个合成场景自检（--self-test 只跑自检）。
+// 每次评估之前先跑 #139 的十一个合成场景自检（另加 (12)：ANSI 颜色码的对照与反例）（--self-test 只跑自检）。
 //
 // 用法：
 //   node tests/p2p-expected-red.mjs [--list FILE] [--registry FILE] [--rust [WS=]LOG]... [--go [MOD=]JSON]...
@@ -101,8 +101,14 @@ function defaultSourceHas(id) {
 
 // ---------- 测试输出解析 ----------
 
+// CI 里 CARGO_TERM_COLOR=always 会让 cargo 的 `Running …` 等行带 ANSI 颜色码；解析之前先去掉（只去 SGR：ESC [ … m）。
+// go test -json 的输出字段里若夹带颜色码，JSON 里是 \u001b 转义，所以解析后的 Output 也要去一遍。
+const ANSI_SGR = /\x1b\[[0-9;]*m/g;
+export const stripAnsi = (t) => String(t ?? '').replace(ANSI_SGR, '');
+
 // cargo test 的文本输出 → Map<id, {status, message}>；resolveRust(rel, bin) 把“Running <rel> (deps/<bin>-hash)”映射到仓库内路径
 export function parseCargo(text, resolveRust = (rel) => rel) {
+  text = stripAnsi(text);
   const results = new Map(); const fatal = [];
   let file = null; let block = null; const slow = new Set();
   const flush = () => {
@@ -145,10 +151,12 @@ function panicMessage(lines, name) {
 
 // go test -json → Map<id, {status, message}>；resolveGo(pkg, test) 返回定义该测试的 _test.go 的仓库内路径
 export function parseGoJson(text, resolveGo = (pkg, test) => `${pkg}/?_test.go`) {
+  text = stripAnsi(text);
   const results = new Map(); const fatal = []; const out = new Map(); const pkgFail = new Set(); const pkgOut = new Map();
   for (const raw of text.split('\n')) {
     if (!raw.trim()) continue;
     let ev; try { ev = JSON.parse(raw); } catch { fatal.push(`go test -json 输出里有非 JSON 行：${raw.slice(0, 120)}`); continue; }
+    if (typeof ev.Output === 'string') ev.Output = stripAnsi(ev.Output);
     const top = ev.Test?.split('/')[0];
     if (ev.Action === 'output') {
       if (top) { const k = `${ev.Package}\0${top}`; out.set(k, (out.get(k) ?? '') + ev.Output); }
@@ -276,6 +284,25 @@ export function selfTest() {
   });
   run('(11) 等待无上限、空操作下超时 → 报错', { log: cargoLog('test a has been running for over 60 seconds'), list: [rid('a')], ok: false, mention: '超时' });
   run('(11) 等待设上限、超时后 ASSERT: 失败 → 对的红', { log: mk(red('a', 'ASSERT: 2 s 内没有等到 DirectGateOpen')), list: [rid('a')], ok: true });
+  // (12) CARGO_TERM_COLOR=always：`Running …` 与 `test … FAILED` 行带 ANSI 颜色码（模仿 CI 的原始日志）
+  const C = (code, t) => `\x1b[${code}m${t}\x1b[0m`;
+  const colored = (t) => t.replace('     Running ', `     ${C('1;92', 'Running')} `).replace(/ FAILED$/gm, ` ${C('31', 'FAILED')}`).replace(/ \.\.\. ok$/gm, ` ... ${C('32', 'ok')}`);
+  run('(12) 带颜色码的 Running 与 FAILED 行 → 照常判定（失败集合等于名单 → 通过）', { log: colored(mk(red('a', 'ASSERT: 没有升级'), green('b'))), list: [rid('a')], ok: true });
+  run('(12) 带颜色码，多出一条意外失败 → 仍然报错并点名', { log: colored(mk(red('a', 'ASSERT: x'), red('extra', 'ASSERT: y'))), list: [rid('a')], ok: false, mention: 'extra' });
+  {
+    const plain = mk(red('a', 'ASSERT: x'), green('done')); const col = colored(plain);
+    const pr = parseCargo(plain).results; const cr = parseCargo(col).results;
+    const same = col !== plain && pr.size === 2 && JSON.stringify([...pr]) === JSON.stringify([...cr]);
+    cases.push({ name: '(12) 对照：同一份日志有 / 无颜色码，解析结果逐项相同（颜色码确实被去掉）', pass: same, errs: same ? [] : ['有 / 无颜色码的解析结果不同'] });
+  }
+  {
+    // 反例：没有颜色码的日志，结果不变（stripAnsi 不改动普通文本，也不吞掉形如 `[3m` 但前面没有 ESC 的内容）
+    const plain = mk(red('a', 'ASSERT: 数组下标 [31m 越界'), green('b'));
+    const noChange = stripAnsi(plain) === plain;
+    const { results, fatal } = parseCargo(plain); const errs = [...fatal, ...evaluate({ results, list: [rid('a')] })];
+    const pass = noChange && errs.length === 0;
+    cases.push({ name: '(12) 反例：没有颜色码时文本与结果不变（含不带 ESC 的 `[31m` 字面量）', pass, errs: pass ? [] : ['无颜色码日志被改动或判定改变', ...errs] });
+  }
   // Go 侧：Error Trace / ASSERT 放行，panic 与构建失败报错
   const goRun = (name, lines, list, ok, mention) => {
     const { results, fatal } = parseGoJson(lines.map((l) => JSON.stringify(l)).join('\n'), () => 'p2p/gate_test.go');
@@ -285,6 +312,7 @@ export function selfTest() {
   const ev = (Action, Test, Output) => ({ Action, Package: 'airhand/p2p', Test, Output });
   goRun('Go：assertf 的 ASSERT: → 对的红', [ev('output', 'TestA', '    gate_test.go:1: ASSERT: 闸门没有关闭\n'), ev('fail', 'TestA'), ev('fail')], ['go p2p/gate_test.go::TestA'], true);
   goRun('Go：ErrNotImplemented → 报错', [ev('output', 'TestA', '    gate_test.go:1: NewHostGate: p2p: not implemented\n'), ev('fail', 'TestA'), ev('fail')], ['go p2p/gate_test.go::TestA'], false, 'TestA');
+  goRun('Go：Output 里带颜色码（JSON 转义形式）→ 判定不变（对的红）', [ev('output', 'TestA', `    gate_test.go:1: \x1b[31mASSERT: 闸门没有关闭\x1b[0m\n`), ev('fail', 'TestA'), ev('fail')], ['go p2p/gate_test.go::TestA'], true);
   goRun('Go：[build failed] → 报错', [{ Action: 'output', Package: 'airhand/p2p', Output: 'FAIL\tairhand/p2p [build failed]\n' }, ev('fail')], [], false, '用例之外失败');
   return cases;
 }
