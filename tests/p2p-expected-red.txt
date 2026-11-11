@@ -1,0 +1,45 @@
+# tailcat-p2p 预期红名单（docs/specs/tailcat-p2p.md「先红验收测试清单」#139）
+# = 当前应为红的全部用例：A 级尚未实现的部分，加上已并入、尚未实现的 B 级。门禁：node tests/p2p-expected-red.mjs
+# 格式：每行 "<rust|go|node> <仓库内路径>::<用例名>"，按字节序排序；只允许整行 # 注释，不允许行尾注释。
+# 用例变绿时在同一提交里删除对应行；B 级用例并入时同时加入。元用例 #98、#99、#139 与条件用例 #8、#17、#18、#120 不在名单里。
+go p2p/gate_test.go::TestClientPingMustNotBeUsedForPath
+go p2p/gate_test.go::TestControllerGateIgnoresSlowButDirectPath
+go p2p/gate_test.go::TestGateDropsWhenPathNotDirect
+go p2p/gate_test.go::TestHostGateClosedWhenCurAddrEmpty
+go p2p/gate_test.go::TestHostGateClosesOnRxSilence
+go p2p/gate_test.go::TestHostGateRxSilenceNotArmedBeforeFirstInbound
+go p2p/gate_test.go::TestHostGateSilenceCloseIsStickyInEpoch
+go p2p/gate_test.go::TestHostGateWindowIncludesStatusPollInterval
+go p2p/gate_test.go::TestHostGateWindowZeroPacketsOnSelfHostedDerp
+go p2p/gate_test.go::TestKDrivenGateStillSilentBeforeCommit
+go p2p/helper_test.go::TestEmptyOrInvalidAllowlistRefusesToStart
+go p2p/helper_test.go::TestWriteTimeoutReportsPathFailure
+rust client/src-tauri/tests/direct_config.rs::direct_config_bitrate_cap_default_is_100mbps
+rust client/src-tauri/tests/direct_config.rs::direct_config_defaults_off
+rust client/src-tauri/tests/direct_config.rs::direct_config_rejects_bitrate_cap_over_100mbps
+rust crates/airhand-link/tests/direct.rs::approve_never_allows_direct_when_enabled
+rust crates/airhand-link/tests/direct.rs::approve_never_operator_config_counts_as_consent
+rust crates/airhand-link/tests/direct.rs::controller_helper_no_network_before_offer
+rust crates/airhand-link/tests/direct.rs::controller_waits_for_direct_gate_open_before_first_quic
+rust crates/airhand-link/tests/direct.rs::direct_quic_never_sends_datagram_over_1232
+rust crates/airhand-link/tests/direct.rs::direct_secrets_are_redacted_in_debug_and_logs
+rust crates/airhand-link/tests/direct.rs::direct_session_caps_bitrate_instead_of_falling_back
+rust crates/airhand-link/tests/direct.rs::direct_token_is_one_time
+rust crates/airhand-link/tests/direct.rs::disabled_by_default_never_spawns_helper
+rust crates/airhand-link/tests/direct.rs::disconnect_one_controller_keeps_code_and_closes_both_paths
+rust crates/airhand-link/tests/direct.rs::fallback_to_relay_lifts_direct_bitrate_cap
+rust crates/airhand-link/tests/direct.rs::first_quic_initial_not_lost_to_host_gate
+rust crates/airhand-link/tests/direct.rs::helper_crash_does_not_end_session
+rust crates/airhand-link/tests/direct.rs::helper_write_stall_triggers_fallback
+rust crates/airhand-link/tests/direct.rs::host_gate_not_closed_during_fence_wait_on_static_screen
+rust crates/airhand-link/tests/direct.rs::host_sends_direct_gate_open_when_gate_opens
+rust crates/airhand-link/tests/direct.rs::late_or_mismatched_direct_gate_open_is_ignored
+rust crates/airhand-link/tests/direct.rs::missing_pong_triggers_fallback
+rust crates/airhand-link/tests/direct.rs::never_mode_kicked_device_can_return_until_code_changed
+rust crates/airhand-link/tests/direct.rs::no_offer_before_approval
+rust crates/airhand-link/tests/direct.rs::no_switch_before_both_gates_open
+rust crates/airhand-link/tests/direct.rs::static_screen_does_not_trigger_fallback
+rust crates/airhand-link/tests/direct.rs::stop_sharing_rotates_code_old_code_rejected
+rust crates/airhand-link/tests/direct.rs::verification_string_is_displayed_not_required
+rust crates/airhand-proto/tests/wire.rs::direct_messages_wire_is_stable
+rust crates/airhand-proto/tests/wire.rs::protocol_version_is_10

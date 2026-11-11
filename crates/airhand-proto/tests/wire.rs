@@ -10,6 +10,10 @@
 //! `DirectSwitch` 11、`DirectFallback` 12、`Bye` 13。
 //! 实现定稿时若调整顺序或字段，须在同一提交里改这里的字节，并把 `PROTOCOL_VERSION` 维持在 10。
 
+#[macro_use]
+#[path = "../../airhand-link/tests/support/mod.rs"]
+mod support;
+
 use airhand_proto::PROTOCOL_VERSION;
 use airhand_proto::framing::{decode, encode};
 use airhand_proto::session::{ControllerMsg, HostMsg};
@@ -18,26 +22,28 @@ const EPOCH: u8 = 7;
 const CLIENT_KEY: &str = "nodekey:example";
 
 fn host(bytes: &[u8]) -> HostMsg {
-    let msg = decode::<HostMsg>(bytes);
-    assert!(
-        msg.is_ok(),
-        "HostMsg 解不出 {bytes:?}：直连变体尚未加入协议（{:?}）",
-        msg.err()
+    let msg = p2p_ok!(
+        decode::<HostMsg>(bytes),
+        "HostMsg 解不出 {bytes:?}：协议里还没有对应的直连变体"
     );
-    let msg = msg.unwrap();
-    assert_eq!(encode(&msg).unwrap(), bytes, "重新编码后字节变化");
+    p2p_assert_eq!(
+        p2p_ok!(encode(&msg), "重新编码失败"),
+        bytes,
+        "重新编码后字节变化"
+    );
     msg
 }
 
 fn controller(bytes: &[u8]) -> ControllerMsg {
-    let msg = decode::<ControllerMsg>(bytes);
-    assert!(
-        msg.is_ok(),
-        "ControllerMsg 解不出 {bytes:?}：直连变体尚未加入协议（{:?}）",
-        msg.err()
+    let msg = p2p_ok!(
+        decode::<ControllerMsg>(bytes),
+        "ControllerMsg 解不出 {bytes:?}：协议里还没有对应的直连变体"
     );
-    let msg = msg.unwrap();
-    assert_eq!(encode(&msg).unwrap(), bytes, "重新编码后字节变化");
+    p2p_assert_eq!(
+        p2p_ok!(encode(&msg), "重新编码失败"),
+        bytes,
+        "重新编码后字节变化"
+    );
     msg
 }
 
@@ -59,11 +65,11 @@ fn direct_request_bytes() -> Vec<u8> {
 #[test]
 fn direct_messages_wire_is_stable() {
     let offer = format!("{:?}", host(&direct_offer_bytes()));
-    assert!(
+    p2p_assert!(
         offer.starts_with("DirectOffer { epoch: 7, kind: 1, body: [97, 98, 99]"),
         "{offer}"
     );
-    assert!(offer.ends_with("ttl_secs: 30 }"), "{offer}");
+    p2p_assert!(offer.ends_with("ttl_secs: 30 }"), "{offer}");
 
     for (bytes, expected) in [
         ([11, EPOCH], "DirectCommit { epoch: 7 }"),
@@ -71,11 +77,11 @@ fn direct_messages_wire_is_stable() {
         ([13, EPOCH], "DirectFallback { epoch: 7 }"),
         ([14, EPOCH], "DirectGateOpen { epoch: 7 }"),
     ] {
-        assert_eq!(format!("{:?}", host(&bytes)), expected);
+        p2p_assert_eq!(format!("{:?}", host(&bytes)), expected);
     }
 
     let request = format!("{:?}", controller(&direct_request_bytes()));
-    assert_eq!(
+    p2p_assert_eq!(
         request,
         format!("DirectRequest {{ epoch: 7, client_key: {CLIENT_KEY:?} }}")
     );
@@ -83,12 +89,12 @@ fn direct_messages_wire_is_stable() {
         ([11, EPOCH], "DirectSwitch { epoch: 7 }"),
         ([12, EPOCH], "DirectFallback { epoch: 7 }"),
     ] {
-        assert_eq!(format!("{:?}", controller(&bytes)), expected);
+        p2p_assert_eq!(format!("{:?}", controller(&bytes)), expected);
     }
 }
 
 /// 清单 #28（I4）：协议版本升到 10（v9 与 v10 不互通）。
 #[test]
 fn protocol_version_is_10() {
-    assert_eq!(PROTOCOL_VERSION, 10);
+    p2p_assert_eq!(PROTOCOL_VERSION, 10, "PROTOCOL_VERSION 应升到 10");
 }

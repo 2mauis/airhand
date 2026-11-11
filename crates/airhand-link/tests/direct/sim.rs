@@ -2,13 +2,16 @@
 //!
 //! 场景只描述“发生了什么”（控制端连上、用户允许、某一侧闸门打开、helper 崩溃……），[`Trace`] 记录两端
 //! 对外可观察的行为（各通道上发出的消息、helper 的启动 / 结束 / 网络活动、直连 QUIC 包、闸门、码率……）。
-//! Phase 1 把 [`Scenario::run`] 接到 `airhand_link` 的直连实现上；在此之前它一律返回 [`NotWired`]，
-//! 所以每个用例都在第一条断言处失败（先红）。
-// `Trace` 及其记录类型要到 Phase 1 接线后才会被构造，部分构造器也只有个别用例用到。
+//!
+//! [`Scenario::run`] 交给 [`Driver`]：Phase 1 把真实驱动接到 `airhand_link` 的直连实现上；在此之前（以及
+//! Lenient / Strict 两个空操作作业里）用 [`Noop`] 驱动，它不实现任何直连行为，用例因断言不满足而红（先红），
+//! 不靠“未实现”报错。
+// 记录类型的部分字段 / 构造器只有个别用例用到。
 #![allow(dead_code)]
 
-use std::fmt;
 use std::time::Duration;
+
+use crate::support::{NOOP, Polarity};
 
 use airhand_proto::session::ByeReason;
 
@@ -169,17 +172,44 @@ impl Scenario {
         self
     }
 
-    pub fn run(&self) -> Result<Trace, NotWired> {
-        Err(NotWired)
+    pub fn run(&self) -> Trace {
+        driver().run(self)
     }
 }
 
-#[derive(Debug)]
-pub struct NotWired;
+/// 场景驱动：按 [`Scenario`] 推进虚拟时钟并记录 [`Trace`]
+pub trait Driver {
+    fn run(&self, s: &Scenario) -> Trace;
+}
 
-impl fmt::Display for NotWired {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("airhand_link 还没有直连实现（tailcat-p2p Phase 1），场景无法运行")
+/// 本次构建使用的驱动：打开空操作开关时是对应极性的 [`Noop`]；常规作业在 Phase 1 接线之前是严格极性的
+/// [`Noop`]（什么也不发生），接线之后换成真实驱动。
+fn driver() -> Box<dyn Driver> {
+    Box::new(Noop(NOOP.unwrap_or(Polarity::Strict)))
+}
+
+/// 空操作驱动（规格 #98）：不发任何消息、不启动 helper、不升级。
+/// * 宽松：场景里注入的 `GateOpen` 照记为闸门打开，之后永不关闭；
+/// * 严格：闸门恒关，什么都不记录（计数全为 0）。
+pub struct Noop(pub Polarity);
+
+impl Driver for Noop {
+    fn run(&self, s: &Scenario) -> Trace {
+        let mut t = Trace::default();
+        if self.0 == Polarity::Lenient {
+            for (at, e) in &s.events {
+                if let Event::GateOpen { side, controller } = e {
+                    t.gates.push(GateChange {
+                        at: *at,
+                        side: *side,
+                        controller: *controller,
+                        epoch: 0,
+                        open: true,
+                    });
+                }
+            }
+        }
+        t
     }
 }
 

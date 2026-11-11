@@ -63,26 +63,19 @@ func TestWriteTimeoutReportsPathFailure(t *testing.T) {
 			defer close(conn.release)
 			rec := &failureRecorder{}
 			write, err := tc.open(conn, rec)
-			if err != nil {
-				t.Fatalf("创建写端: %v", err)
-			}
+			assertNoErr(t, err, "创建写端")
 			done := make(chan error, 1)
 			start := time.Now()
 			go func() { done <- write() }()
 			select {
 			case err := <-done:
-				if !errors.Is(err, ErrWriteTimeout) {
-					t.Fatalf("写卡住时应返回 ErrWriteTimeout，得到 %v", err)
-				}
-				if elapsed := time.Since(start); elapsed < timeout {
-					t.Fatalf("%v 就返回了，早于写超时 %v", elapsed, timeout)
-				}
+				assertf(t, errors.Is(err, ErrWriteTimeout), "写卡住时应返回 ErrWriteTimeout，得到 %v", err)
+				elapsed := time.Since(start)
+				assertf(t, elapsed >= timeout, "%v 就返回了，早于写超时 %v", elapsed, timeout)
 			case <-time.After(timeout + time.Second):
-				t.Fatal("写入超过写超时仍然阻塞")
+				assertf(t, false, "写入超过写超时 %v 仍然阻塞", timeout)
 			}
-			if rec.count() != 1 {
-				t.Fatalf("直连失效上报了 %d 次，应为 1", rec.count())
-			}
+			assertf(t, rec.count() == 1, "直连失效上报了 %d 次，应为 1", rec.count())
 		})
 	}
 }
@@ -91,8 +84,6 @@ func TestWriteTimeoutReportsPathFailure(t *testing.T) {
 func TestEmptyOrInvalidAllowlistRefusesToStart(t *testing.T) {
 	for _, key := range []string{"", " ", "nodekey:", "nodekey:not-hex", "mkey:00", "example"} {
 		_, err := StartServer(ServerConfig{ClientKey: key, WriteTimeout: 500 * time.Millisecond})
-		if !errors.Is(err, ErrInvalidClientKey) {
-			t.Errorf("client_key %q: 应以 ErrInvalidClientKey 拒绝启动，得到 %v", key, err)
-		}
+		expectf(t, errors.Is(err, ErrInvalidClientKey), "client_key %q: 应以 ErrInvalidClientKey 拒绝启动，得到 %v", key, err)
 	}
 }

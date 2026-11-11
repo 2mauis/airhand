@@ -1,9 +1,12 @@
 //! tailcat-p2p 规格「先红验收测试清单」中会话 / 直连状态机的用例（`docs/specs/tailcat-p2p.md`）。
 //!
-//! 每个用例注明清单编号（该表从上往下数，1–44）。场景由 [`sim`] 驱动；直连实现接上之前
-//! `Scenario::run` 返回 `NotWired`，用例在第一条断言处失败。Phase 1 按方案 (a)（`DirectGateOpen`）编写，
+//! 每个用例注明清单编号（该表从上往下数，1–44）。场景由 [`sim`] 驱动；直连实现接上之前是空操作驱动，
+//! 用例因断言不满足而失败（`ASSERT:`，见 `support`）。Phase 1 按方案 (a)（`DirectGateOpen`）编写，
 //! 方案 (b) 的清单 #17 / #18 不在本轮。
 
+#[macro_use]
+#[path = "support/mod.rs"]
+mod support;
 #[path = "direct/sim.rs"]
 mod sim;
 
@@ -14,6 +17,7 @@ use sim::{
     Approve, CodeChoice, ControllerConfig, Event as E, HostConfig, Msg, Path, Scenario, Screen,
     Side, Trace, Upgrade,
 };
+use support::Expect;
 
 const C0: u8 = 0;
 const C1: u8 = 1;
@@ -83,17 +87,14 @@ fn upgraded() -> Scenario {
 }
 
 fn run(s: &Scenario) -> Trace {
-    match s.run() {
-        Ok(t) => t,
-        Err(e) => panic!("{e}"),
-    }
+    s.run()
 }
 
 fn upgrade(t: &Trace, c: u8) -> &Upgrade {
-    t.upgrades
-        .iter()
-        .find(|u| u.controller == c)
-        .unwrap_or_else(|| panic!("控制端 {c} 没有完成直连升级"))
+    p2p_some!(
+        t.upgrades.iter().find(|u| u.controller == c),
+        "控制端 {c} 没有完成直连升级"
+    )
 }
 
 fn fallback_at(t: &Trace, from: Side, c: u8) -> Option<Duration> {
@@ -121,8 +122,8 @@ fn host_gate_not_closed_during_fence_wait_on_static_screen() {
     let t = run(&s);
     let keep_alive = t
         .direct_keep_alive
-        .expect("直连传输配置未设置 keep_alive_interval");
-    assert!(
+        .p2p_expect("直连传输配置未设置 keep_alive_interval");
+    p2p_assert!(
         keep_alive <= ms(250),
         "keep_alive_interval = {keep_alive:?}"
     );
@@ -132,14 +133,14 @@ fn host_gate_not_closed_during_fence_wait_on_static_screen() {
         .iter()
         .find(|g| g.side == Side::Host && g.epoch == up.epoch && g.open)
         .map(|g| g.at)
-        .expect("被控端闸门从未打开");
-    assert!(
+        .p2p_expect("被控端闸门从未打开");
+    p2p_assert!(
         !t.gates
             .iter()
             .any(|g| g.side == Side::Host && g.epoch == up.epoch && !g.open && g.at > opened),
         "栅栏等待期间被控端闸门因静默关闭"
     );
-    assert!(!any_fallback(&t, C0));
+    p2p_assert!(!any_fallback(&t, C0));
 }
 
 /// 清单 #13（I24）：注入被控端闸门晚于控制端打开的时间差，升级期间因闸门关闭而丢弃的直连 QUIC 包为 0，
@@ -172,13 +173,13 @@ fn first_quic_initial_not_lost_to_host_gate() {
         );
     let t = run(&s);
     upgrade(&t, C0);
-    assert!(
+    p2p_assert!(
         t.datagrams.iter().any(|d| d.from == Side::Controller),
         "控制端没有发出任何直连 QUIC 包"
     );
     let dropped = t.datagrams.iter().filter(|d| d.dropped_by_gate).count();
-    assert_eq!(dropped, 0, "升级期间有 {dropped} 个直连 QUIC 包被闸门丢弃");
-    assert_eq!(t.pto_retransmits, 0);
+    p2p_assert_eq!(dropped, 0, "升级期间有 {dropped} 个直连 QUIC 包被闸门丢弃");
+    p2p_assert_eq!(t.pto_retransmits, 0);
 }
 
 /// 清单 #14（I24 方案 (a)、F4）：未收到 `DirectGateOpen` 时，控制端发出的直连 QUIC 包数为 0。
@@ -216,14 +217,14 @@ fn controller_waits_for_direct_gate_open_before_first_quic() {
                 && matches!(s.msg, Msg::DirectGateOpen { .. })
         })
         .and_then(|s| s.delivered)
-        .expect("控制端没有收到 DirectGateOpen");
+        .p2p_expect("控制端没有收到 DirectGateOpen");
     let controller_quic: Vec<_> = t
         .datagrams
         .iter()
         .filter(|d| d.from == Side::Controller)
         .collect();
-    assert!(!controller_quic.is_empty(), "控制端没有发出直连 QUIC 包");
-    assert!(
+    p2p_assert!(!controller_quic.is_empty(), "控制端没有发出直连 QUIC 包");
+    p2p_assert!(
         controller_quic.iter().all(|d| d.at >= gate_open),
         "控制端在收到 DirectGateOpen（{gate_open:?}）之前就发了直连 QUIC 包"
     );
@@ -233,22 +234,22 @@ fn controller_waits_for_direct_gate_open_before_first_quic() {
 #[test]
 fn host_sends_direct_gate_open_when_gate_opens() {
     let t = run(&upgraded());
-    let epoch = t.offer_epoch(C0).expect("没有 DirectOffer");
+    let epoch = t.offer_epoch(C0).p2p_expect("没有 DirectOffer");
     let opened = t
         .gates
         .iter()
         .find(|g| g.side == Side::Host && g.controller == C0 && g.open)
         .map(|g| g.at)
-        .expect("被控端闸门没有打开");
+        .p2p_expect("被控端闸门没有打开");
     let sent = t
         .first(|s| {
             s.from == Side::Host
                 && s.path == Path::Relay
                 && matches!(s.msg, Msg::DirectGateOpen { .. })
         })
-        .expect("被控端没有发 DirectGateOpen");
-    assert_eq!(sent.msg, Msg::DirectGateOpen { epoch });
-    assert!(sent.at >= opened && sent.at - opened <= ms(100));
+        .p2p_expect("被控端没有发 DirectGateOpen");
+    p2p_assert_eq!(sent.msg, Msg::DirectGateOpen { epoch });
+    p2p_assert!(sent.at >= opened && sent.at - opened <= ms(100));
 }
 
 /// 清单 #16（I13 / I24 方案 (a)）：迟到或 `epoch` 不匹配的 `DirectGateOpen` 被忽略。
@@ -300,8 +301,8 @@ fn late_or_mismatched_direct_gate_open_is_ignored() {
         .filter(|d| d.from == Side::Controller)
         .map(|d| d.at)
         .min()
-        .expect("控制端没有发出直连 QUIC 包");
-    assert!(
+        .p2p_expect("控制端没有发出直连 QUIC 包");
+    p2p_assert!(
         first_quic >= ms(4000),
         "控制端因不匹配的 DirectGateOpen 提前发包（{first_quic:?}）"
     );
@@ -320,26 +321,26 @@ fn helper_write_stall_triggers_fallback() {
     );
     let t = run(&s);
     let old = upgrade(&t, C0).epoch;
-    let fb = fallback_at(&t, Side::Host, C0).expect("写卡住后没有回退");
-    assert!(
+    let fb = fallback_at(&t, Side::Host, C0).p2p_expect("写卡住后没有回退");
+    p2p_assert!(
         fb >= ms(8000) && fb <= ms(8000) + ms(500) + ms(250),
         "{fb:?}"
     );
-    assert!(
+    p2p_assert!(
         t.exits(Side::Host, C0).iter().any(|&at| at >= ms(8000)),
         "卡住的 helper 进程没有被结束"
     );
-    assert!(
+    p2p_assert!(
         t.spawns(Side::Host, C0).iter().any(|&at| at > fb),
         "回退后没有拉起新的 helper 进程"
     );
-    assert!(
+    p2p_assert!(
         t.msgs(Side::Host, C0)
             .any(|s| matches!(s.msg, Msg::DirectOffer { epoch } if epoch > old)),
         "没有用新 epoch 重新升级"
     );
-    assert!(!sent_bye(&t, Side::Host, C0) && !t.session_ended(C0));
-    assert_eq!(t.upgrade_retries, vec![(C0, 1)]);
+    p2p_assert!(!sent_bye(&t, Side::Host, C0) && !t.session_ended(C0));
+    p2p_assert_eq!(t.upgrade_retries, vec![(C0, 1)]);
 }
 
 /// 清单 #21（I26、F10）：注入较低的 C（30 Mbps），目标码率高于 C 时被限制在 C，且不发 `DirectFallback`。
@@ -359,13 +360,13 @@ fn direct_session_caps_bitrate_instead_of_falling_back() {
         .iter()
         .filter(|b| b.path == Path::Direct && b.at >= ms(8000))
         .collect();
-    assert!(!direct.is_empty(), "直连期间没有应用目标码率");
-    assert!(direct.iter().all(|b| b.kbps <= 30_000));
-    assert!(
+    p2p_assert!(!direct.is_empty(), "直连期间没有应用目标码率");
+    p2p_assert!(direct.iter().all(|b| b.kbps <= 30_000));
+    p2p_assert!(
         direct.iter().any(|b| b.kbps == 30_000),
         "目标码率没有被限制在 C"
     );
-    assert!(!any_fallback(&t, C0), "码率达到上限不应回退中转");
+    p2p_assert!(!any_fallback(&t, C0), "码率达到上限不应回退中转");
 }
 
 /// 清单 #22（I26、F10）：同样在注入的较低 C 下，回退中转后解除该上限。
@@ -389,7 +390,7 @@ fn fallback_to_relay_lifts_direct_bitrate_cap() {
         );
     s.host.bitrate_cap_kbps = 30_000;
     let t = run(&s);
-    assert!(
+    p2p_assert!(
         fallback_at(&t, Side::Host, C0).is_some()
             || fallback_at(&t, Side::Controller, C0).is_some()
     );
@@ -397,8 +398,8 @@ fn fallback_to_relay_lifts_direct_bitrate_cap() {
         .bitrate
         .iter()
         .find(|b| b.path == Path::Relay && b.at >= ms(12_000))
-        .expect("回退后没有应用目标码率");
-    assert_eq!(after.kbps, 80_000, "回退中转后仍受直连上限 C 限制");
+        .p2p_expect("回退后没有应用目标码率");
+    p2p_assert_eq!(after.kbps, 80_000, "回退中转后仍受直连上限 C 限制");
 }
 
 /// 清单 #26（I1）：未启用时假 helper 工厂 0 次调用，无 `Direct*` 消息。
@@ -416,14 +417,14 @@ fn disabled_by_default_never_spawns_helper() {
         )
         .run_for(20);
     let t = run(&s);
-    assert!(
+    p2p_assert!(
         t.msgs(Side::Host, C0)
             .any(|s| matches!(s.msg, Msg::Hello { .. })),
         "会话没有开始"
     );
-    assert!(t.helper_spawns.is_empty());
-    assert!(t.network.is_empty());
-    assert!(!t.sent.iter().any(|s| s.msg.is_direct_control()));
+    p2p_assert!(t.helper_spawns.is_empty());
+    p2p_assert!(t.network.is_empty());
+    p2p_assert!(!t.sent.iter().any(|s| s.msg.is_direct_control()));
 }
 
 /// 清单 #29（I11）：直连上观测到的最大数据报 ≤ 1232；超限包被丢弃而非依赖库报错。
@@ -446,10 +447,10 @@ fn direct_quic_never_sends_datagram_over_1232() {
             },
         );
     let t = run(&s);
-    assert!(!t.datagrams.is_empty(), "没有观测到直连数据报");
+    p2p_assert!(!t.datagrams.is_empty(), "没有观测到直连数据报");
     let max = t.datagrams.iter().map(|d| d.size).max().unwrap_or(0);
-    assert!(max <= 1232, "观测到 {max} 字节的直连数据报");
-    assert!(!t.datagrams.iter().any(|d| d.dropped_oversize));
+    p2p_assert!(max <= 1232, "观测到 {max} 字节的直连数据报");
+    p2p_assert!(!t.datagrams.iter().any(|d| d.dropped_oversize));
 }
 
 /// 清单 #30（I12 / I16）：取得直连同意前不发 `DirectOffer`、不启动被控端 helper。
@@ -471,12 +472,12 @@ fn no_offer_before_approval() {
         .msgs(Side::Host, C0)
         .filter(|s| matches!(s.msg, Msg::DirectOffer { .. }))
         .collect();
-    assert!(!offers.is_empty(), "同意之后也没有 DirectOffer");
-    assert!(
+    p2p_assert!(!offers.is_empty(), "同意之后也没有 DirectOffer");
+    p2p_assert!(
         offers.iter().all(|s| s.at >= ms(5000)),
         "同意之前发了 DirectOffer"
     );
-    assert!(t.spawns(Side::Host, C0).iter().all(|&at| at >= ms(5000)));
+    p2p_assert!(t.spawns(Side::Host, C0).iter().all(|&at| at >= ms(5000)));
 }
 
 /// 清单 #31（I16）：控制端在 `DirectOffer` 到达之前 helper 无网络活动（不拉 DERP 图、不连 DERP）。
@@ -486,8 +487,8 @@ fn controller_helper_no_network_before_offer() {
     let offer = t
         .first(|s| s.from == Side::Host && matches!(s.msg, Msg::DirectOffer { .. }))
         .and_then(|s| s.delivered)
-        .expect("控制端没有收到 DirectOffer");
-    assert!(
+        .p2p_expect("控制端没有收到 DirectOffer");
+    p2p_assert!(
         !t.spawns(Side::Controller, C0).is_empty(),
         "控制端没有创建 helper（取 Client.PublicKey 用）"
     );
@@ -496,8 +497,8 @@ fn controller_helper_no_network_before_offer() {
         .iter()
         .filter(|n| n.side == Side::Controller)
         .collect();
-    assert!(!net.is_empty(), "控制端 helper 始终没有网络活动");
-    assert!(
+    p2p_assert!(!net.is_empty(), "控制端 helper 始终没有网络活动");
+    p2p_assert!(
         net.iter().all(|n| n.at >= offer),
         "DirectOffer 之前控制端 helper 已有网络活动：{:?}",
         net.iter().find(|n| n.at < offer)
@@ -515,12 +516,12 @@ fn approve_never_allows_direct_when_enabled() {
         C0,
     );
     let t = run(&s);
-    assert!(t.approval_prompts.is_empty());
-    assert!(
+    p2p_assert!(t.approval_prompts.is_empty());
+    p2p_assert!(
         !t.msgs(Side::Host, C0)
             .any(|s| s.msg == Msg::AwaitingApproval)
     );
-    assert!(t.msgs(Side::Host, C0).any(|s| s.msg
+    p2p_assert!(t.msgs(Side::Host, C0).any(|s| s.msg
         == Msg::Hello {
             granted_direct: true
         }));
@@ -550,7 +551,7 @@ fn never_mode_kicked_device_can_return_until_code_changed() {
     );
     let t = run(&s);
     let attempts: Vec<_> = t.connects.iter().map(|c| (c.at, c.accepted)).collect();
-    assert_eq!(
+    p2p_assert_eq!(
         attempts,
         vec![(ms(0), true), (ms(6000), true), (ms(13_000), false)]
     );
@@ -563,7 +564,7 @@ fn never_mode_kicked_device_can_return_until_code_changed() {
                 }
         })
         .count();
-    assert_eq!(hellos, 2, "再连回来时没有按 I21 再次授予直连");
+    p2p_assert_eq!(hellos, 2, "再连回来时没有按 I21 再次授予直连");
 }
 
 /// 清单 #34（I21）：`never` 与 `[direct] enabled` 两项显式配置视为同意，可发 `DirectOffer` / 启动 helper；
@@ -573,12 +574,12 @@ fn approve_never_operator_config_counts_as_consent() {
     let consent = run(&Scenario::new(never_direct_host())
         .controller(direct_controller(1))
         .at(0, connect(C0)));
-    assert!(consent.approval_prompts.is_empty());
-    assert!(
+    p2p_assert!(consent.approval_prompts.is_empty());
+    p2p_assert!(
         consent.offer_epoch(C0).is_some(),
         "never + 直连没有发 DirectOffer"
     );
-    assert!(!consent.spawns(Side::Host, C0).is_empty());
+    p2p_assert!(!consent.spawns(Side::Host, C0).is_empty());
 
     let never_only = HostConfig {
         approve: Approve::Never,
@@ -587,12 +588,12 @@ fn approve_never_operator_config_counts_as_consent() {
     let t = run(&Scenario::new(never_only)
         .controller(direct_controller(1))
         .at(0, connect(C0)));
-    assert!(t.msgs(Side::Host, C0).any(|s| s.msg
+    p2p_assert!(t.msgs(Side::Host, C0).any(|s| s.msg
         == Msg::Hello {
             granted_direct: false
         }));
-    assert!(t.offer_epoch(C0).is_none());
-    assert!(t.helper_spawns.is_empty());
+    p2p_assert!(t.offer_epoch(C0).is_none());
+    p2p_assert!(t.helper_spawns.is_empty());
 }
 
 /// 清单 #35（I2）：无画面无声音数十秒，Ping/Pong 正常 ⇒ 不回退。
@@ -605,12 +606,12 @@ fn static_screen_does_not_trigger_fallback() {
         .msgs(Side::Controller, C0)
         .filter(|s| s.path == Path::Direct && s.msg == Msg::Ping && s.at > up)
         .count();
-    assert!(
+    p2p_assert!(
         pings >= 100,
         "直连上只发了 {pings} 个 Ping（应为 250 ms 间隔）"
     );
-    assert!(!any_fallback(&t, C0));
-    assert_eq!(t.last_sender_path(Side::Host, C0), Some(Path::Direct));
+    p2p_assert!(!any_fallback(&t, C0));
+    p2p_assert_eq!(t.last_sender_path(Side::Host, C0), Some(Path::Direct));
 }
 
 /// 清单 #36（I2、存活检测）：直连上 K 秒收不到 `Pong` ⇒ `DirectFallback`，会话保持中转。
@@ -619,13 +620,13 @@ fn missing_pong_triggers_fallback() {
     let s = upgraded().at(8000, E::StopPongs { controller: C0 });
     let t = run(&s);
     upgrade(&t, C0);
-    let fb = fallback_at(&t, Side::Controller, C0).expect("收不到 Pong 却没有回退");
-    assert!(
+    let fb = fallback_at(&t, Side::Controller, C0).p2p_expect("收不到 Pong 却没有回退");
+    p2p_assert!(
         fb >= ms(8000) + ms(1500) && fb <= ms(8000) + ms(2500),
         "{fb:?}"
     );
-    assert!(!t.session_ended(C0));
-    assert_eq!(t.last_sender_path(Side::Controller, C0), Some(Path::Relay));
+    p2p_assert!(!t.session_ended(C0));
+    p2p_assert_eq!(t.last_sender_path(Side::Controller, C0), Some(Path::Relay));
 }
 
 /// 清单 #37（I2、I10）：helper 崩溃只回退，不结束会话。
@@ -640,9 +641,9 @@ fn helper_crash_does_not_end_session() {
     );
     let t = run(&s);
     upgrade(&t, C0);
-    assert!(any_fallback(&t, C0), "helper 崩溃后没有回退");
-    assert!(!sent_bye(&t, Side::Host, C0) && !t.session_ended(C0));
-    assert_eq!(t.last_sender_path(Side::Host, C0), Some(Path::Relay));
+    p2p_assert!(any_fallback(&t, C0), "helper 崩溃后没有回退");
+    p2p_assert!(!sent_bye(&t, Side::Host, C0) && !t.session_ended(C0));
+    p2p_assert_eq!(t.last_sender_path(Side::Host, C0), Some(Path::Relay));
 }
 
 /// 清单 #38（I3）：任一侧闸门未开时不切换发送端。
@@ -667,14 +668,14 @@ fn no_switch_before_both_gates_open() {
         )
         .run_for(25);
     let t = run(&s);
-    assert!(t.offer_epoch(C0).is_some(), "升级没有开始");
-    assert!(
+    p2p_assert!(t.offer_epoch(C0).is_some(), "升级没有开始");
+    p2p_assert!(
         !t.sent
             .iter()
             .any(|s| matches!(s.msg, Msg::DirectSwitch { .. } | Msg::DirectCommit { .. }))
     );
-    assert!(t.sender_paths.iter().all(|p| p.path == Path::Relay));
-    assert!(t.upgrades.is_empty() && !t.session_ended(C0));
+    p2p_assert!(t.sender_paths.iter().all(|p| p.path == Path::Relay));
+    p2p_assert!(t.upgrades.is_empty() && !t.session_ended(C0));
 }
 
 /// 清单 #39（I5）：直连令牌只能使用一次。
@@ -683,7 +684,7 @@ fn direct_token_is_one_time() {
     let s = upgraded().at(8000, E::ReplayDirectToken { controller: C0 });
     let t = run(&s);
     upgrade(&t, C0);
-    assert_eq!(t.token_checks, vec![true, false]);
+    p2p_assert_eq!(t.token_checks, vec![true, false]);
 }
 
 /// 清单 #41（I18）：停止共享换码，旧码立即被拒。
@@ -701,19 +702,19 @@ fn stop_sharing_rotates_code_old_code_rejected() {
         .at(10_000, connect(C0));
     let t = run(&s);
     upgrade(&t, C0);
-    assert_eq!(t.code_changes, vec![ms(8000)]);
-    assert!(
+    p2p_assert_eq!(t.code_changes, vec![ms(8000)]);
+    p2p_assert!(
         t.msgs(Side::Host, C0)
             .any(|s| s.path == Path::Relay && s.msg == Msg::Bye(Some(ByeReason::CodeChanged)))
     );
-    assert!(t.exits(Side::Host, C0).iter().any(|&at| at >= ms(8000)));
+    p2p_assert!(t.exits(Side::Host, C0).iter().any(|&at| at >= ms(8000)));
     let attempts: Vec<_> = t
         .connects
         .iter()
         .filter(|c| c.at >= ms(9000))
         .map(|c| (c.code, c.accepted))
         .collect();
-    assert_eq!(
+    p2p_assert_eq!(
         attempts,
         vec![(CodeChoice::Previous, false), (CodeChoice::Current, true)]
     );
@@ -745,14 +746,14 @@ fn disconnect_one_controller_keeps_code_and_closes_both_paths() {
     let t = run(&s);
     upgrade(&t, C0);
     upgrade(&t, C1);
-    assert!(
+    p2p_assert!(
         t.msgs(Side::Host, C0)
             .any(|s| s.path == Path::Relay && s.msg == Msg::Bye(Some(ByeReason::Kicked)))
     );
-    assert!(t.exits(Side::Host, C0).iter().any(|&at| at >= ms(8000)));
-    assert!(t.session_ended(C0));
-    assert!(!t.session_ended(C1) && t.exits(Side::Host, C1).is_empty());
-    assert!(t.code_changes.is_empty());
+    p2p_assert!(t.exits(Side::Host, C0).iter().any(|&at| at >= ms(8000)));
+    p2p_assert!(t.session_ended(C0));
+    p2p_assert!(!t.session_ended(C1) && t.exits(Side::Host, C1).is_empty());
+    p2p_assert!(t.code_changes.is_empty());
 }
 
 /// 清单 #43（I7）：地址 / 令牌 / 密钥不出现在调试日志明文里。
@@ -760,10 +761,10 @@ fn disconnect_one_controller_keeps_code_and_closes_both_paths() {
 fn direct_secrets_are_redacted_in_debug_and_logs() {
     let t = run(&upgraded());
     upgrade(&t, C0);
-    assert!(!t.secrets.is_empty(), "没有记录本次运行的直连机密");
-    assert!(!t.logs.is_empty());
+    p2p_assert!(!t.secrets.is_empty(), "没有记录本次运行的直连机密");
+    p2p_assert!(!t.logs.is_empty());
     for secret in &t.secrets {
-        assert!(
+        p2p_assert!(
             !t.logs.iter().any(|l| l.contains(secret.as_str())),
             "日志或调试输出里出现了直连机密的明文"
         );
@@ -775,14 +776,14 @@ fn direct_secrets_are_redacted_in_debug_and_logs() {
 fn verification_string_is_displayed_not_required() {
     let t = run(&upgraded());
     let up = upgrade(&t, C0);
-    assert!(up.completed <= ms(2000) + ms(12_000));
+    p2p_assert!(up.completed <= ms(2000) + ms(12_000));
     let shown = |side| {
         t.sas_shown
             .iter()
             .find(|(s, c, _)| *s == side && *c == C0)
             .map(|(_, _, v)| v.clone())
     };
-    let host = shown(Side::Host).expect("被控端没有显示校验串");
-    assert!(!host.is_empty());
-    assert_eq!(shown(Side::Controller), Some(host));
+    let host = shown(Side::Host).p2p_expect("被控端没有显示校验串");
+    p2p_assert!(!host.is_empty());
+    p2p_assert_eq!(shown(Side::Controller), Some(host));
 }

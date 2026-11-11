@@ -8,6 +8,11 @@
 //! * [`flow`]：被控端的在途帧控制和自适应码率；
 //! * [`Problem`]：显示给用户的问题，以类型而不是文字的形式传给界面。
 
+#[cfg(all(feature = "noop-lenient", feature = "noop-strict"))]
+compile_error!(
+    "noop-lenient 与 noop-strict 互斥：Lenient / Strict 两个作业必须分开构建（tailcat-p2p 规格 #98）"
+);
+
 pub mod controller;
 pub mod flow;
 pub mod host;

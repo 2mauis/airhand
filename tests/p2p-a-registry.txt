@@ -1,0 +1,47 @@
+# tailcat-p2p A 级登记表（docs/specs/tailcat-p2p.md「先红验收测试清单」#98、#99）
+# 格式：<用例> | <编号> <级别：A / A PV-1|2|3 / 元用例> | <驱动> | lenient=适用|不适用 | strict=适用|不适用 | <替代正向对照>
+#   用例与预期红名单同格式；“不适用”表示该极性的空操作驱动无法让用例因断言而红（线编码、常量、配置解析，或该极性下
+#   正好满足断言的“保持”类用例），此时须写替代正向对照“常规作业:<用例>”——它必须存在，且在常规作业里通过或仍在名单里。
+#   空操作作业（--noop）的判定：该极性“适用”的非元用例必须断言失败；“不适用”的用例在名单里时可红可绿，不在名单里时必须通过；
+#   元用例必须通过。元用例只能是 #98、#99、#139 三条。
+go p2p/gate_test.go::TestClientPingMustNotBeUsedForPath | #12 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/gate_test.go::TestControllerGateIgnoresSlowButDirectPath | #11 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/gate_test.go::TestGateDropsWhenPathNotDirect | #10 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/gate_test.go::TestHostGateClosedWhenCurAddrEmpty | #5 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/gate_test.go::TestHostGateClosesOnRxSilence | #1 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/gate_test.go::TestHostGateRxSilenceNotArmedBeforeFirstInbound | #2 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/gate_test.go::TestHostGateSilenceCloseIsStickyInEpoch | #3 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/gate_test.go::TestHostGateWindowIncludesStatusPollInterval | #9 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/gate_test.go::TestHostGateWindowZeroPacketsOnSelfHostedDerp | #4 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/gate_test.go::TestKDrivenGateStillSilentBeforeCommit | #6 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/helper_test.go::TestEmptyOrInvalidAllowlistRefusesToStart | #40 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/helper_test.go::TestWriteTimeoutReportsPathFailure | #19 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+rust client/src-tauri/tests/direct_config.rs::direct_config_bitrate_cap_default_is_100mbps | #23 A | 配置解析 airhand_lib::direct_config::parse（无空操作） | lenient=不适用 | strict=不适用 | 常规作业:rust client/src-tauri/tests/direct_config.rs::direct_config_bitrate_cap_default_is_100mbps
+rust client/src-tauri/tests/direct_config.rs::direct_config_defaults_off | #25 A | 配置解析 airhand_lib::direct_config::parse（无空操作） | lenient=不适用 | strict=不适用 | 常规作业:rust client/src-tauri/tests/direct_config.rs::direct_config_defaults_off
+rust client/src-tauri/tests/direct_config.rs::direct_config_rejects_bitrate_cap_over_100mbps | #24 A | 配置解析 airhand_lib::direct_config::parse（无空操作） | lenient=不适用 | strict=不适用 | 常规作业:rust client/src-tauri/tests/direct_config.rs::direct_config_rejects_bitrate_cap_over_100mbps
+rust crates/airhand-link/tests/direct.rs::approve_never_allows_direct_when_enabled | #32 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::approve_never_operator_config_counts_as_consent | #34 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::controller_helper_no_network_before_offer | #31 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::controller_waits_for_direct_gate_open_before_first_quic | #14 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::direct_quic_never_sends_datagram_over_1232 | #29 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::direct_secrets_are_redacted_in_debug_and_logs | #43 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::direct_session_caps_bitrate_instead_of_falling_back | #21 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::direct_token_is_one_time | #39 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::disabled_by_default_never_spawns_helper | #26 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::disconnect_one_controller_keeps_code_and_closes_both_paths | #42 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::fallback_to_relay_lifts_direct_bitrate_cap | #22 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::first_quic_initial_not_lost_to_host_gate | #13 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::helper_crash_does_not_end_session | #37 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::helper_write_stall_triggers_fallback | #20 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::host_gate_not_closed_during_fence_wait_on_static_screen | #7 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::host_sends_direct_gate_open_when_gate_opens | #15 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::late_or_mismatched_direct_gate_open_is_ignored | #16 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::missing_pong_triggers_fallback | #36 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::never_mode_kicked_device_can_return_until_code_changed | #33 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::no_offer_before_approval | #30 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::no_switch_before_both_gates_open | #38 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::static_screen_does_not_trigger_fallback | #35 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::stop_sharing_rotates_code_old_code_rejected | #41 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-link/tests/direct.rs::verification_string_is_displayed_not_required | #44 A | sim::Noop（场景驱动，crates/airhand-link/tests/direct/sim.rs） | lenient=适用 | strict=适用 | -
+rust crates/airhand-proto/tests/wire.rs::direct_messages_wire_is_stable | #27 A | 线编码（airhand_proto postcard，无空操作） | lenient=不适用 | strict=不适用 | 常规作业:rust crates/airhand-proto/tests/wire.rs::direct_messages_wire_is_stable
+rust crates/airhand-proto/tests/wire.rs::protocol_version_is_10 | #28 A | 线编码（airhand_proto postcard，无空操作） | lenient=不适用 | strict=不适用 | 常规作业:rust crates/airhand-proto/tests/wire.rs::protocol_version_is_10

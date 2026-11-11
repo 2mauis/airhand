@@ -5,6 +5,12 @@ version = "0.2.2"
 edition = "2024"
 license = "MIT"
 
+# 先红验收测试的空操作开关（docs/specs/tailcat-p2p.md「先红验收测试清单」#98）：只改变 tests/ 里驱动的行为，
+# 不影响库本身；两个互斥（src/lib.rs 里的 compile_error!），Lenient / Strict 两个 CI 作业分开构建。
+[features]
+noop-lenient = []
+noop-strict = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
