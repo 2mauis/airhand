@@ -53,9 +53,26 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component clippy --no-self-update && rustup default stable
       - name: 桌面客户端的系统依赖与前端产物（见 docs/building.md）
         if: matrix.ws == 'client'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev
+          # 最坏总耗时：3 次 ×（update 45s + install 120s + 各 5s 的强杀宽限）+ 两次间隔 10s/20s ≈ 555s，小于步骤的 10 分钟上限。
+          # apt-get update 在镜像域名解析失败时仍返回 0，所以成败只看 install 的退出码；超时返回 124，同样走重试。
+          pkgs=(build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev)
+          for attempt in 1 2 3; do
+            sudo timeout -k 5 45 apt-get update || echo "::warning::apt-get update 第 ${attempt} 次未成功（退出码 $?），仍尝试 install"
+            rc=0
+            sudo timeout -k 5 120 apt-get install -y --no-install-recommends "${pkgs[@]}" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            echo "::warning::apt-get install 第 ${attempt}/3 次失败（退出码 ${rc}；124 表示超时）"
+            if [ "$attempt" -lt 3 ]; then
+              sudo dpkg --configure -a || true
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::apt-get install 连续 3 次失败，多半是 Ubuntu 镜像或 DNS 故障，参见 actions/runner-images 的 #15296、#15297"
+          exit 1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: matrix.ws == 'client'
         with: { node-version: "22" }
@@ -91,9 +108,26 @@ jobs:
         run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
       - name: 桌面客户端的系统依赖与前端产物（见 docs/building.md）
         if: matrix.ws == 'client'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev
+          # 最坏总耗时：3 次 ×（update 45s + install 120s + 各 5s 的强杀宽限）+ 两次间隔 10s/20s ≈ 555s，小于步骤的 10 分钟上限。
+          # apt-get update 在镜像域名解析失败时仍返回 0，所以成败只看 install 的退出码；超时返回 124，同样走重试。
+          pkgs=(build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev)
+          for attempt in 1 2 3; do
+            sudo timeout -k 5 45 apt-get update || echo "::warning::apt-get update 第 ${attempt} 次未成功（退出码 $?），仍尝试 install"
+            rc=0
+            sudo timeout -k 5 120 apt-get install -y --no-install-recommends "${pkgs[@]}" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            echo "::warning::apt-get install 第 ${attempt}/3 次失败（退出码 ${rc}；124 表示超时）"
+            if [ "$attempt" -lt 3 ]; then
+              sudo dpkg --configure -a || true
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::apt-get install 连续 3 次失败，多半是 Ubuntu 镜像或 DNS 故障，参见 actions/runner-images 的 #15296、#15297"
+          exit 1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: matrix.ws == 'client'
         with: { node-version: "22" }
