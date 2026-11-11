@@ -1,4 +1,5 @@
-# 移植自 2mauis 的 passkey-demo 项目 workflow v2（MIT，Copyright (c) 2026 2mauis）；agent-trailer / spec-requires-tests 与原文一致，另加 workflow-scripts（脚本自测）。
+# 移植自 2mauis 的 passkey-demo 项目 workflow v2（MIT，Copyright (c) 2026 2mauis）；spec-requires-tests 与原文一致，另加 workflow-scripts（脚本自测）；
+# agent-trailer 按署名规范 v3 检查（docs/specs/commit-signature-v3.md）。
 name: workflow-v2
 on:
   pull_request:
@@ -15,7 +16,16 @@ jobs:
         with: { fetch-depth: 0, persist-credentials: false }
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: "22" }
-      - run: node scripts/agent-trailer.mjs --range "origin/${BASE_REF}..${HEAD_SHA}"
+      - name: 署名与 trailer（按 base 版放行表，docs/specs/commit-signature-v3.md §2.1）
+        run: |
+          set -euo pipefail
+          git cat-file -e "origin/${BASE_REF}^{commit}"
+          if git cat-file -e "origin/${BASE_REF}:scripts/allowed-author-hashes.json" 2>/dev/null; then
+            git show "origin/${BASE_REF}:scripts/allowed-author-hashes.json" > "$RUNNER_TEMP/base-allowed-author-hashes.json"
+          else
+            printf '%s\n' '{"version":1,"sha256_lowercase_email":[]}' > "$RUNNER_TEMP/base-allowed-author-hashes.json"
+          fi
+          node scripts/agent-trailer.mjs --range "origin/${BASE_REF}..${HEAD_SHA}" --require-nonempty --allow-hashes-file "$RUNNER_TEMP/base-allowed-author-hashes.json"
         env:
           BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}

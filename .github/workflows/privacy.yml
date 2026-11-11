@@ -1,5 +1,6 @@
 # 移植自 2mauis 的 passkey-demo 项目 workflow v2（MIT，Copyright (c) 2026 2mauis），按本 fork 调整：
 # 阻断项只扫“本次新增的行”（PR 对 base；push main 对 before）；上游既有内容里的正则误报见 docs/workflow-v2.md，全库扫描降为信息性步骤。
+# 署名规范 v3（docs/specs/commit-signature-v3.md §4.3）：PR 的提交元数据与提交信息按 base 版放行表扫描；push main 另有报告步骤（失败即红）。
 name: privacy
 on:
   pull_request:
@@ -23,6 +24,20 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: node scripts/privacy-scan.mjs --diff "origin/${BASE_REF}"
+      - name: 扫描 PR 提交元数据与提交信息
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "origin/${BASE_REF}^{commit}"
+          if git cat-file -e "origin/${BASE_REF}:scripts/allowed-author-hashes.json" 2>/dev/null; then
+            git show "origin/${BASE_REF}:scripts/allowed-author-hashes.json" > "$RUNNER_TEMP/base-allowed-author-hashes.json"
+          else
+            printf '%s\n' '{"version":1,"sha256_lowercase_email":[]}' > "$RUNNER_TEMP/base-allowed-author-hashes.json"
+          fi
+          node scripts/privacy-scan.mjs --commits "origin/${BASE_REF}..${HEAD_SHA}" --allow-hashes-file "$RUNNER_TEMP/base-allowed-author-hashes.json" --require-nonempty
       - name: 扫描 push 新增的行
         if: github.event_name == 'push'
         env:
@@ -31,6 +46,26 @@ jobs:
           set -euo pipefail
           [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ && "$BEFORE_SHA" != 0000000000000000000000000000000000000000 ]]
           node scripts/privacy-scan.mjs --diff "$BEFORE_SHA"
+      - name: push main 报告：提交元数据与提交信息（失败即红）
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          zero=0000000000000000000000000000000000000000
+          if [[ "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ && "$BEFORE_SHA" != "$zero" ]] && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            if ! git rev-list "$AFTER_SHA" --not "$BEFORE_SHA" > "$RUNNER_TEMP/shas.txt"; then echo "::error::push main 报告：git rev-list 失败，无法确定新提交"; exit 1; fi
+          else
+            # 新分支 / 强推后 before 不可用：退回最近 20 个提交（可能扫不全，见 spec §9）
+            if ! git rev-list -n 20 "$AFTER_SHA" > "$RUNNER_TEMP/shas.txt"; then echo "::error::push main 报告：git rev-list 失败，无法确定新提交"; exit 1; fi
+          fi
+          rc=0
+          node scripts/privacy-scan.mjs --shas-stdin --require-nonempty --allow-hashes-file scripts/allowed-author-hashes.json < "$RUNNER_TEMP/shas.txt" > "$RUNNER_TEMP/p.out" 2> "$RUNNER_TEMP/p.err" || rc=1
+          node scripts/agent-trailer.mjs --shas-stdin --require-nonempty --allow-hashes-file scripts/allowed-author-hashes.json < "$RUNNER_TEMP/shas.txt" > "$RUNNER_TEMP/a.out" 2> "$RUNNER_TEMP/a.err" || rc=1
+          { echo "### push main 报告（只含 sha12 与规则名）"; echo '```'; cat "$RUNNER_TEMP"/p.err "$RUNNER_TEMP"/a.err; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP"/p.err "$RUNNER_TEMP"/a.err >&2
+          if (( rc != 0 )); then echo "::error::push main 的新提交未通过元数据 / 信息检查，按“已泄露，需要轮换”处理，详见本步骤摘要"; exit 1; fi
       - name: 扫描 PR 正文与标题
         if: github.event_name == 'pull_request'
         env:

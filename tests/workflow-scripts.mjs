@@ -87,7 +87,7 @@ function repo(name, { bare = false } = {}) {
   return r;
 }
 const sha12 = (s) => s.slice(0, 12);
-const hitsOf = (r) => r.err.split('\n').map((l) => /^[0-9a-f]{12}:([a-z0-9-]+)(?::\d+)? ([a-z0-9-]+)$/.exec(l)).filter(Boolean).map((m) => ({ field: m[1], rule: m[2] }));
+const hitsOf = (r) => r.err.split('\n').map((l) => /^(?:[0-9a-f]{12}|HEAD):([a-z0-9-]+)(?::\d+)? ([a-z0-9-]+)$/.exec(l)).filter(Boolean).map((m) => ({ field: m[1], rule: m[2] }));
 const hasHit = (r, rule, field) => hitsOf(r).some((h) => h.rule === rule && (!field || h.field === field));
 const scanned = (r) => /已扫描 \d+ 个对象/.test(r.stdout);
 const scanClean = (r) => r.status === 0 && scanned(r) && hitsOf(r).length === 0;
@@ -537,7 +537,9 @@ t('41（R1）同一提交已在另一个远程的跟踪分支上，推到 origin
   const a = push('origin', 'main'); pw.g(['reset', '-q', '--hard', keep]);
   return m.status === 0 && pw.g(['rev-parse', 'refs/remotes/mirror/main']) !== keep && a.status !== 0 && /missing-code-tool/.test(a.err);
 });
-t('41（R1）推送目标是 URL（没有远程名）→ 按“范围无法确定”只检查 tip', () => { const r = push(bareA, 'main'); return r.status === 0 && /范围无法确定/.test(r.err); });
+t('41（R1）推送目标是 URL（没有远程名）→ 按“范围无法确定”只检查 tip', () => {
+  pw.commit(M('via url', '', 'Code-Tool: human'), 'g.txt', '7\n'); const r = push(bareA, 'main'); return r.status === 0 && /范围无法确定/.test(r.err);
+});
 
 // ---------- F. 工作流与文档一致性 ----------
 const wf = (name) => readFileSync(join(ROOT, '.github/workflows', name), 'utf8');
