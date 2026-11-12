@@ -1076,7 +1076,12 @@ mod tests {
         wait_for("the edit to be noticed", &|| {
             last().as_deref().is_some_and(|t| t.contains("书房"))
         });
-        std::fs::remove_dir_all(&dir).unwrap();
+        {
+            // keep_file 的线程只在 edit_at 里、拿着 last() 锁时写盘：删除期间拿住这把锁，
+            // 它就不会在 remove_dir_all 删完文件、还没删目录时又写进来（Linux 上报 ENOTEMPTY）
+            let _writer = last();
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
         wait_for("the directory to be recreated", &|| file.exists());
         assert_eq!(crate::devices::load(), vec![d]);
         assert_eq!(parse(&read_text().unwrap()).unwrap().code(), Some(code));
@@ -1088,7 +1093,11 @@ mod tests {
 
         STOP_KEEPING.store(true, std::sync::atomic::Ordering::Relaxed);
         std::thread::sleep(KEEP_CHECK * 4);
-        std::fs::remove_dir_all(&root).unwrap();
+        {
+            // 同上：万一 keep_file 的线程还没退出，也不会在删除期间写盘
+            let _writer = last();
+            std::fs::remove_dir_all(&root).unwrap();
+        }
     }
 
     /// macOS 的配置目录以 bundle ID 命名，要和 tauri.conf.json 一致
