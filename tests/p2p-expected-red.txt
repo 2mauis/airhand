@@ -24,6 +24,11 @@ go p2p/gate_test.go::TestHostGateWindowZeroPacketsOnSelfHostedDerp
 go p2p/gate_test.go::TestHostHandshakeWatchdogClosesGateWithoutRustCommand
 go p2p/gate_test.go::TestHostHandshakeWatchdogEdgePhaseWithin1910ms
 go p2p/gate_test.go::TestWindowCountDetectsLeakWhenGateClosesLate
+go p2p/helper_fix_test.go::TestClientKeyZeroRejectedAndAllowlistCanonical
+go p2p/helper_fix_test.go::TestEncodeEventFieldsAreLowercaseEnumAndSingleLine
+go p2p/helper_fix_test.go::TestStartFailureReturnsCategoryErrorOnly
+go p2p/helper_fix_test.go::TestWriteTimeoutReportsOnceAndNeverBlocksOnCallback
+go p2p/helper_fix_test.go::TestWriterLatchesAfterTimeoutAndPipeSerializes
 go p2p/helper_test.go::TestControlProtocolNeverEchoesAddressToArgvOrStderr
 go p2p/helper_test.go::TestNoTCPServiceAndNoRST
 go p2p/helper_test.go::TestOnlyAllowedClientKeyConnects
