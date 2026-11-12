@@ -3,7 +3,7 @@ package p2p
 // Hermetic PV-1 fixture, authored independently of the Phase 0 spike.
 import (
 	"context"
-	"fmt"
+	"errors"
 	"net"
 	"net/http/httptest"
 	"time"
@@ -64,7 +64,7 @@ func newDiscoNet(cfg TestNetConfig) (_ *discoNet, err error) {
 		ServedTCPPorts: []filter.PortRange{}, ServedUDPPorts: []filter.PortRange{},
 	}
 	if err = n.server.Start(); err != nil {
-		return nil, err
+		return nil, &categoryError{category: categoryStartFailed, cause: err}
 	}
 	n.client.Server = n.server.TailcatAddr()
 	n.sender = NewDiscoSender(n.client)
@@ -79,7 +79,7 @@ func newDiscoNet(cfg TestNetConfig) (_ *discoNet, err error) {
 		}
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("PV-1 direct discovery: %w (last ping: %v)", ctx.Err(), pingErr)
+			return nil, &categoryError{category: categoryUnknown, cause: errors.Join(ctx.Err(), pingErr)}
 		case <-time.After(25 * time.Millisecond):
 		}
 	}

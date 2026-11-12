@@ -2,7 +2,6 @@ package p2p
 
 import (
 	"context"
-	"os"
 	"time"
 )
 
@@ -23,7 +22,7 @@ type TestNetConfig struct {
 
 // NewTestNet 启动夹具。
 func NewTestNet(cfg TestNetConfig) (*TestNet, error) {
-	if os.Getenv("P2P_TEST_NOOP") != "" {
+	if noopActive {
 		return &TestNet{}, nil
 	}
 	n, err := newDiscoNet(cfg)

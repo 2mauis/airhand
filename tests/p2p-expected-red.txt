@@ -24,8 +24,6 @@ go p2p/gate_test.go::TestHostGateWindowZeroPacketsOnSelfHostedDerp
 go p2p/gate_test.go::TestHostHandshakeWatchdogClosesGateWithoutRustCommand
 go p2p/gate_test.go::TestHostHandshakeWatchdogEdgePhaseWithin1910ms
 go p2p/gate_test.go::TestWindowCountDetectsLeakWhenGateClosesLate
-go p2p/helper_batch2_test.go::TestNoopSwitchReadOnlyInTests
-go p2p/helper_batch2_test.go::TestPackageConstructedErrorsAreCategoryOnly
 go p2p/helper_test.go::TestControlProtocolNeverEchoesAddressToArgvOrStderr
 go p2p/helper_test.go::TestNoTCPServiceAndNoRST
 go p2p/helper_test.go::TestOnlyAllowedClientKeyConnects

@@ -14,3 +14,6 @@ const (
 )
 
 var noop = strict
+
+// noopActive 仅由测试的 TestMain 设置；普通构建保持默认 false。
+var noopActive bool
