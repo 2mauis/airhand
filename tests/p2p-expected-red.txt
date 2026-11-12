@@ -25,15 +25,9 @@ go p2p/gate_test.go::TestHostHandshakeWatchdogClosesGateWithoutRustCommand
 go p2p/gate_test.go::TestHostHandshakeWatchdogEdgePhaseWithin1910ms
 go p2p/gate_test.go::TestWindowCountDetectsLeakWhenGateClosesLate
 go p2p/helper_test.go::TestControlProtocolNeverEchoesAddressToArgvOrStderr
-go p2p/helper_test.go::TestEmptyOrInvalidAllowlistRefusesToStart
-go p2p/helper_test.go::TestHelperEventsAndErrorsContainNoEndpoint
-go p2p/helper_test.go::TestHelperNeverCallsAddAllowedClient
 go p2p/helper_test.go::TestNoTCPServiceAndNoRST
 go p2p/helper_test.go::TestOnlyAllowedClientKeyConnects
 go p2p/helper_test.go::TestServesExactlyOneUDPPort
-go p2p/helper_test.go::TestTailcatLogfDiscardedByDefault
-go p2p/helper_test.go::TestWriteStallReportedByIndependentTimer
-go p2p/helper_test.go::TestWriteTimeoutReportsPathFailure
 go p2p/integration_test.go::TestGateStaysOpenWithKeepAliveDatagramsAndNoPing
 go p2p/integration_test.go::TestPublicKeyBeforeOfferMakesNoNetworkActivity
 go p2p/integration_test.go::TestSchemeAControllerSendsNothingBeforeGateOpenAndUpgradeCompletes
