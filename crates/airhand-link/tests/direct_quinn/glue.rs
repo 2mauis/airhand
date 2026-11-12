@@ -1,9 +1,8 @@
 //! 真实 quinn 前置核实（PV-2 / PV-3）用例的胶水层：两端 quinn 0.11 端点 + 可注入时延、单向丢包、带宽与队列的
 //! 内存数据报通道（`docs/specs/tailcat-p2p.md` §2 O / H）。
 //!
-//! 尚未实现：这里只有让 `tests/direct_quinn.rs` 能编译的类型与签名，全部是空操作——握手不完成、不开探测流、
-//! 不记录任何事件，用例因正向对照不成立而以 `ASSERT:` 失败；两种空操作极性（`noop-lenient` / `noop-strict`）
-//! 下行为相同。PV PR 把这里换成真实端点（探测流、`direct_transport_config()`、通道模型），不改用例本身。
+//! Uses the standalone signal source and independent direct transport configuration.
+//! Both noop polarities still bypass all real work and return no observations.
 #![allow(dead_code)]
 
 use std::time::Duration;
@@ -217,7 +216,197 @@ impl Observed {
     }
 }
 
-/// 建连、按 `losses` 注入丢包、运行 `run_for`（握手完成后起算），返回观测。空操作：什么都不做。
-pub fn run(_cfg: &ChannelConfig, _losses: &[Loss], _run_for: Duration) -> Observed {
-    Observed::default()
+#[path = "channel.rs"]
+mod channel;
+
+use airhand_link::direct::{direct_transport_config, probe::ProbeSource};
+use std::sync::Arc;
+use tokio::time::{Instant, timeout};
+
+/// Real endpoints and datagrams; only time and network conditions are simulated.
+pub fn run(cfg: &ChannelConfig, losses: &[Loss], run_for: Duration) -> Observed {
+    if cfg!(any(feature = "noop-lenient", feature = "noop-strict"))
+        || std::env::var("AIRHAND_TEST_NOOP").is_ok_and(|v| v == "lenient" || v == "strict")
+    {
+        return Observed::default();
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap()
+        .block_on(run_async(cfg, losses, run_for))
+}
+
+async fn run_async(cfg: &ChannelConfig, losses: &[Loss], run_for: Duration) -> Observed {
+    let state = channel::State::new(cfg, losses);
+    let [hs, cs] = channel::pair(state.clone());
+    let cert =
+        rustls::pki_types::CertificateDer::from(include_bytes!("fixtures/cert.der").to_vec());
+    let key =
+        rustls::pki_types::PrivatePkcs8KeyDer::from(include_bytes!("fixtures/key.der").to_vec());
+    let mut server = quinn::ServerConfig::with_single_cert(vec![cert.clone()], key.into()).unwrap();
+    // PV-2 intentionally holds loss for 10 s to exhaust 16 probes. Keep the
+    // measurement connection alive beyond that interval; no product gate is run.
+    let mut transport = direct_transport_config();
+    transport.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
+    let peer_uni_limit = format!("{transport:?}")
+        .split("max_concurrent_uni_streams: ")
+        .nth(1)
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.parse::<u64>().ok())
+        .expect("transport Debug exposes configured credit");
+    let transport = Arc::new(transport);
+    server.transport_config(transport.clone());
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    let mut client = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+    client.transport_config(transport);
+    let mut endpoint_cfg = quinn::EndpointConfig::default();
+    endpoint_cfg.max_udp_payload_size(1232).unwrap();
+    let host = quinn::Endpoint::new_with_abstract_socket(
+        endpoint_cfg.clone(),
+        Some(server),
+        hs,
+        Arc::new(quinn::TokioRuntime),
+    )
+    .unwrap();
+    let mut ctrl = quinn::Endpoint::new_with_abstract_socket(
+        endpoint_cfg,
+        None,
+        cs,
+        Arc::new(quinn::TokioRuntime),
+    )
+    .unwrap();
+    ctrl.set_default_client_config(client);
+    let connect = ctrl
+        .connect(host.local_addr().unwrap(), "localhost")
+        .unwrap();
+    let accept = async { host.accept().await.unwrap().await };
+    let start = Instant::now();
+    let (h, c) = tokio::join!(
+        timeout(Duration::from_secs(5), accept),
+        timeout(Duration::from_secs(5), connect)
+    );
+    let (h, c) = match (h, c) {
+        (Ok(Ok(h)), Ok(Ok(c))) => (h, c),
+        other => panic!("ASSERT: real Quinn fixture handshake failed: {other:?}"),
+    };
+    let origin = Instant::now();
+    {
+        let mut s = state.lock().unwrap();
+        s.origin = Some(origin);
+        s.observed.handshake_completed = Some(origin - start);
+        let since_inbound = origin - s.first_host_inbound.unwrap();
+        s.observed.handshake_abandoned =
+            since_inbound + Duration::from_millis(50) >= cfg.handshake_watchdog;
+        let abandoned = s.observed.handshake_abandoned;
+        s.trace.push(format!("host handshake complete at {:?}; since first inbound {since_inbound:?}; H + IPC exceeded={}", origin-start, abandoned));
+        if std::env::var_os("P2P_TRACE").is_some() {
+            eprintln!(
+                "TRACE RTT {:?} drop {:?}\n{}",
+                cfg.rtt,
+                cfg.handshake_drop,
+                s.trace.join("\n")
+            );
+        }
+    }
+    let priority = if cfg.probe_priority == ProbePriority::Highest {
+        i32::MAX
+    } else {
+        0
+    };
+    let mut hp = if priority == i32::MAX {
+        ProbeSource::start(h.clone())
+    } else {
+        ProbeSource::with_priority(h.clone(), priority)
+    };
+    let mut cp = if priority == i32::MAX {
+        ProbeSource::start(c.clone())
+    } else {
+        ProbeSource::with_priority(c.clone(), priority)
+    };
+    let mut media = tokio::task::JoinSet::new();
+    if cfg.media_saturation {
+        let send = h.clone();
+        media.spawn(async move {
+            let mut stream = send.open_bi().await.unwrap().0;
+            let data = vec![0u8; 64 * 1024];
+            while stream.write_all(&data).await.is_ok() {}
+        });
+        let recv = c.clone();
+        let stats = state.clone();
+        media.spawn(async move {
+            let mut stream = recv.accept_bi().await.unwrap().1;
+            let mut data = vec![0u8; 64 * 1024];
+            while let Ok(Some(n)) = stream.read(&mut data).await {
+                stats.lock().unwrap().observed.media_bytes += n as u64;
+            }
+        });
+    }
+    let end = origin + run_for;
+    let mut tick = tokio::time::interval(Duration::from_millis(5));
+    let mut acks = [0; 2];
+    let mut eliciting = [0; 2];
+    loop {
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(end) => break,
+            Some(at) = hp.sent.recv() => state.lock().unwrap().observed.probes_sent.push((at.duration_since(origin.into_std()), Side::Host)),
+            Some(at) = cp.sent.recv() => state.lock().unwrap().observed.probes_sent.push((at.duration_since(origin.into_std()), Side::Controller)),
+            Some(at) = hp.progress.recv() => state.lock().unwrap().observed.progress.push((at.duration_since(origin.into_std()), Side::Host)),
+            Some(at) = cp.progress.recv() => state.lock().unwrap().observed.progress.push((at.duration_since(origin.into_std()), Side::Controller)),
+            _ = tick.tick() => {
+                let now = Instant::now() - origin;
+                let mut s = state.lock().unwrap();
+                for (i, (conn, side)) in [(&h, Side::Host), (&c, Side::Controller)].into_iter().enumerate() {
+                    let stats = conn.stats();
+                    s.observed.max_queued_rtt = Some(s.observed.max_queued_rtt.unwrap_or_default().max(stats.path.rtt));
+                    if stats.frame_rx.acks > acks[i] { s.observed.ack_frames_received.push((now, side)); acks[i] = stats.frame_rx.acks; }
+                    let n = stats.frame_tx.stream + stats.frame_tx.ping + stats.frame_tx.crypto;
+                    if n > eliciting[i] { s.observed.ack_eliciting_sent.push((now, side)); eliciting[i] = n; }
+                }
+            }
+        }
+    }
+    if std::env::var_os("P2P_TRACE").is_some() {
+        eprintln!(
+            "END {:?} media {}: host close {:?}; controller close {:?}; host probes {:?}; controller probes {:?}",
+            run_for,
+            cfg.media_saturation,
+            h.close_reason(),
+            c.close_reason(),
+            hp.stats.lock().unwrap(),
+            cp.stats.lock().unwrap()
+        );
+    }
+    let mut s = state.lock().unwrap();
+    for (source, side) in [(&hp, Side::Host), (&cp, Side::Controller)] {
+        let stats = source.stats.lock().unwrap();
+
+        s.observed.probes_accepted.push((side, stats.accepted));
+        s.observed.probes_skipped.push((side, stats.skipped));
+        s.observed
+            .max_in_flight_probes
+            .push((side, stats.max_in_flight));
+        s.observed
+            .peer_uni_stream_limit
+            .push((side, peer_uni_limit));
+    }
+    // TransportConfig's Debug view exposes the configured peer credit without
+    // adding product getters solely for the fixture.
+    s.observed.relay_uni_stream_limit = Some(
+        if format!("{:?}", airhand_link::net::transport_config())
+            .contains("max_concurrent_uni_streams: 0")
+        {
+            0
+        } else {
+            u64::MAX
+        },
+    );
+    s.observed.probe_priority = Some(priority);
+    s.observed.carried_old_ack_ranges = None; // frame counters cannot establish which ranges an ACK carried
+    h.close(0u32.into(), b"PV done");
+    c.close(0u32.into(), b"PV done");
+    s.observed.clone()
 }

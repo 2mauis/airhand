@@ -2,14 +2,16 @@ package p2p
 
 import (
 	"context"
+	"os"
 	"time"
 )
 
 // TestNet 是进程内的真实 tailcat 夹具：自建 derper、一个被控端 Server 与一个控制端 Client（不访问外网）。
 //
-// 尚未实现：tailcat v0.7.0 要求 Go 1.27.1，接入之前这里只有空操作桩（极性见 noop.go），
-// p2p/integration_test.go 因断言不满足而失败。
-type TestNet struct{}
+// PV-1 uses real tailcat v0.7.0, a local DERP/STUN pair, and DiscoSender.
+// Other integration surfaces remain first-red stubs. Explicit noop modes bypass
+// the real fixture so the acceptance tests still fail their positive controls.
+type TestNet struct{ disco *discoNet }
 
 // TestNetConfig 是夹具参数。
 type TestNetConfig struct {
@@ -20,18 +22,43 @@ type TestNetConfig struct {
 }
 
 // NewTestNet 启动夹具。
-func NewTestNet(cfg TestNetConfig) (*TestNet, error) { return &TestNet{}, nil }
+func NewTestNet(cfg TestNetConfig) (*TestNet, error) {
+	if os.Getenv("P2P_TEST_NOOP") != "" {
+		return &TestNet{}, nil
+	}
+	n, err := newDiscoNet(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &TestNet{disco: n}, nil
+}
 
 // Close 关闭夹具。
-func (n *TestNet) Close() {}
+func (n *TestNet) Close() {
+	if n.disco != nil {
+		n.disco.close()
+	}
+}
 
 // DiscoPing 是控制端 Client.DiscoPing（可并发调用，各自带 ctx）。
 func (n *TestNet) DiscoPing(ctx context.Context) (direct bool, rtt time.Duration, err error) {
-	return noop == lenient, 0, nil
+	if n.disco == nil {
+		return noop == lenient, 0, nil
+	}
+	result, err := n.disco.sender.Ping(ctx)
+	if err != nil {
+		return false, 0, err
+	}
+	return result.Endpoint != "", time.Duration(result.LatencySeconds * float64(time.Second)), nil
 }
 
 // PongsReceived 是控制端实际收到的 disco pong 个数。
-func (n *TestNet) PongsReceived() int { return 0 }
+func (n *TestNet) PongsReceived() int {
+	if n.disco != nil {
+		return n.disco.sender.PongsReceived()
+	}
+	return 0
+}
 
 // NewClientForPublicKey 只为取 Client.PublicKey() 而创建控制端 Client（DirectOffer 之前）。
 func (n *TestNet) NewClientForPublicKey() (string, error) { return "", nil }
