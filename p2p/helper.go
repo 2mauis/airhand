@@ -7,16 +7,55 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"tailscale.com/types/key"
 )
 
-// ErrInvalidClientKey 表示 client_key 为空或无法解析（I14：tailcat v0.7.0 的空 AllowedClients 会放行所有客户端）。
-var ErrInvalidClientKey = errors.New("p2p: empty or invalid client_key")
+// ErrInvalidClientKey 表示 client_key 为空、无法解析或全零（I14）。
+var ErrInvalidClientKey = errors.New("p2p: invalid_client_key")
 
 // ErrWriteTimeout 表示一次写入超过 write_timeout_ms 仍未完成（I25）。
-var ErrWriteTimeout = errors.New("p2p: write timeout")
+var ErrWriteTimeout = errors.New("p2p: write_timeout")
+
+// errorCategory 是 helper 的封闭原因码，与 Rust DirectDecline.reason 分属不同命名空间。
+type errorCategory string
+
+const (
+	categoryWriteTimeout     errorCategory = "write_timeout"
+	categoryInvalidClientKey errorCategory = "invalid_client_key"
+	categoryStartFailed      errorCategory = "start_failed"
+	categoryPipeClosed       errorCategory = "pipe_closed"
+	categoryUnknown          errorCategory = "unknown"
+)
+
+// categoryError 的文案只含类别；原始原因仅供内部解包，不拼接到日志或事件。
+type categoryError struct {
+	category errorCategory
+	cause    error
+}
+
+func (e *categoryError) Error() string { return "p2p: " + string(e.category) }
+func (e *categoryError) Unwrap() error { return e.cause }
+
+func classifyError(err error) errorCategory {
+	var categorized *categoryError
+	if errors.As(err, &categorized) {
+		return categorized.category
+	}
+	switch {
+	case errors.Is(err, ErrWriteTimeout):
+		return categoryWriteTimeout
+	case errors.Is(err, ErrInvalidClientKey):
+		return categoryInvalidClientKey
+	case errors.Is(err, io.ErrClosedPipe), errors.Is(err, os.ErrClosed), errors.Is(err, syscall.EPIPE):
+		return categoryPipeClosed
+	default:
+		return categoryUnknown
+	}
+}
 
 // ServerConfig 是被控端为一个 epoch 新建 tailcat Server 的参数。
 type ServerConfig struct {
@@ -104,10 +143,7 @@ func EncodeEvent(obs PathObservation) []byte {
 	}
 	if obs.Err != nil {
 		ev.Kind = "error"
-		ev.Reason = "unknown"
-		if errors.Is(obs.Err, ErrWriteTimeout) {
-			ev.Reason = "write_timeout"
-		}
+		ev.Reason = string(classifyError(obs.Err))
 	}
 	// Event 只含字符串和整数，编码不会失败；原始观测不进入 JSON。
 	line, _ := json.Marshal(ev)
@@ -128,14 +164,14 @@ func StartServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	var clientKey key.NodePublic
-	if err := clientKey.UnmarshalText([]byte(cfg.ClientKey)); err != nil {
+	if err := clientKey.UnmarshalText([]byte(cfg.ClientKey)); err != nil || clientKey.IsZero() {
 		return nil, ErrInvalidClientKey
 	}
 	if cfg.Backend != nil {
 		cfg.Backend.SetLogf(func(string, ...any) {})
-		cfg.Backend.SetAllowedClients([]string{cfg.ClientKey})
+		cfg.Backend.SetAllowedClients([]string{clientKey.String()})
 		if err := cfg.Backend.Start(); err != nil {
-			return nil, err
+			return nil, &categoryError{category: categoryStartFailed, cause: err}
 		}
 	}
 	return &Server{}, nil
@@ -169,13 +205,14 @@ func (t *TunnelWriter) WriteTo(p []byte, addr net.Addr) (int, error) {
 	}
 	// 超时返回后底层写可能仍阻塞，副本允许调用者安全复用输入。
 	payload := append([]byte(nil), p...)
-	return t.watchdog.write(func() (int, error) { return t.writer.WriteTo(payload, addr) })
+	return t.watchdog.write(func() (int, error) { return t.writer.WriteTo(payload, addr) }, nil)
 }
 
 // PipeWriter 给候选 (ii) 往 Rust 方向的数据报管道写加上写超时看门狗。
 type PipeWriter struct {
 	writer   io.Writer
 	watchdog *writeWatchdog
+	serial   chan struct{}
 }
 
 // NewPipeWriter 包装 w；写入超过 timeout 时返回 ErrWriteTimeout 并调用 onFailure 上报直连失效。
@@ -184,7 +221,7 @@ func NewPipeWriter(w io.Writer, timeout time.Duration, onFailure func(error)) (*
 	if os.Getenv("P2P_TEST_NOOP") != "" {
 		return &PipeWriter{}, nil
 	}
-	return &PipeWriter{writer: w, watchdog: newWriteWatchdog(timeout, onFailure)}, nil
+	return &PipeWriter{writer: w, watchdog: newWriteWatchdog(timeout, onFailure), serial: make(chan struct{}, 1)}, nil
 }
 
 // Write 写一个数据报帧。
@@ -195,13 +232,14 @@ func (p *PipeWriter) Write(b []byte) (int, error) {
 	}
 	// 超时返回后底层写可能仍阻塞，副本允许调用者安全复用输入。
 	payload := append([]byte(nil), b...)
-	return p.watchdog.write(func() (int, error) { return p.writer.Write(payload) })
+	return p.watchdog.write(func() (int, error) { return p.writer.Write(payload) }, p.serial)
 }
 
 type writeWatchdog struct {
 	timeout     time.Duration
 	onFailure   func(error)
 	failureOnce sync.Once
+	failed      atomic.Bool
 }
 
 func newWriteWatchdog(timeout time.Duration, onFailure func(error)) *writeWatchdog {
@@ -211,16 +249,35 @@ func newWriteWatchdog(timeout time.Duration, onFailure func(error)) *writeWatchd
 	return &writeWatchdog{timeout: timeout, onFailure: onFailure}
 }
 
-func (w *writeWatchdog) write(write func() (int, error)) (int, error) {
+func (w *writeWatchdog) write(write func() (int, error), serial chan struct{}) (int, error) {
+	if w.failed.Load() {
+		return 0, ErrWriteTimeout
+	}
 	type result struct {
 		n   int
 		err error
 	}
-	// 缓冲让超时后才完成的底层写也能退出，不必等待调用者接收。
-	done := make(chan result, 1)
 	timer := time.NewTimer(w.timeout)
 	defer timer.Stop()
+	if serial != nil {
+		// 管道排队与底层写共用本次计时器；取得后把持有权交给底层写协程。
+		select {
+		case serial <- struct{}{}:
+			if w.failed.Load() {
+				<-serial
+				return 0, ErrWriteTimeout
+			}
+		case <-timer.C:
+			return w.writeTimeout()
+		}
+	}
+	// 缓冲让超时后才完成的底层写也能退出，不必等待调用者接收。
+	done := make(chan result, 1)
 	go func() {
+		if serial != nil {
+			// 超时返回不能释放；只有底层写返回后才允许下一个底层写。
+			defer func() { <-serial }()
+		}
 		n, err := write()
 		done <- result{n: n, err: err}
 	}()
@@ -230,13 +287,18 @@ func (w *writeWatchdog) write(write func() (int, error)) (int, error) {
 	case r := <-done:
 		return r.n, r.err
 	case <-timer.C:
-		w.failureOnce.Do(func() {
-			if w.onFailure != nil {
-				w.onFailure(ErrWriteTimeout)
-			}
-		})
-		return 0, ErrWriteTimeout
+		return w.writeTimeout()
 	}
+}
+
+func (w *writeWatchdog) writeTimeout() (int, error) {
+	w.failed.Store(true)
+	w.failureOnce.Do(func() {
+		if w.onFailure != nil {
+			go w.onFailure(ErrWriteTimeout)
+		}
+	})
+	return 0, ErrWriteTimeout
 }
 
 // noopWrite 不碰底层写端：lenient 报告整包已写，strict 报告丢弃（0 字节、无错误）。
