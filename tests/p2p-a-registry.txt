@@ -27,6 +27,13 @@ go p2p/gate_test.go::TestHostHandshakeWatchdogClosesGateWithoutRustCommand | #12
 go p2p/gate_test.go::TestHostHandshakeWatchdogEdgePhaseWithin1910ms | #143 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
 go p2p/gate_test.go::TestNegativeAssertionsFailOnNoopGate | #99 元用例 | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=不适用 | strict=不适用 | -
 go p2p/gate_test.go::TestWindowCountDetectsLeakWhenGateClosesLate | #103 A | p2p 闸门桩（p2p/gate.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/helper_fix_test.go::TestClientKeyZeroRejectedAndAllowlistCanonical | #155 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/helper_fix_test.go::TestEncodeEventFieldsAreLowercaseEnumAndSingleLine | #154 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/helper_fix_test.go::TestStartFailureReturnsCategoryErrorOnly | #153 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/helper_fix_test.go::TestStartServerConfiguresBackendBeforeStart | #152 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/helper_fix_test.go::TestWriteTimeoutReportsOnceAndNeverBlocksOnCallback | #150 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/helper_fix_test.go::TestWriterLatchesAfterTimeoutAndPipeSerializes | #151 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
+go p2p/helper_fix_test.go::TestWriterPassesThroughUnderlyingResult | #149 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
 go p2p/helper_test.go::TestControlProtocolNeverEchoesAddressToArgvOrStderr | #108 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
 go p2p/helper_test.go::TestEmptyOrInvalidAllowlistRefusesToStart | #40 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -
 go p2p/helper_test.go::TestHelperEventsAndErrorsContainNoEndpoint | #109 A | p2p helper 桩（p2p/helper.go，P2P_TEST_NOOP） | lenient=适用 | strict=适用 | -

@@ -14,6 +14,7 @@ compile_error!(
 );
 
 pub mod controller;
+pub mod direct;
 pub mod flow;
 pub mod host;
 pub mod net;
