@@ -7,6 +7,12 @@ license = "MIT"
 
 # 桌面客户端（client/src-tauri）、网页控制台（web/）和 Android（android/native）共用，不依赖任何 GUI 库。
 # 两者都是独立的 Cargo 工作区；这个库和 airhand-proto 一样属于根目录的工作区（在仓库根目录 cargo test）
+# 先红验收测试的空操作开关（docs/specs/tailcat-p2p.md「先红验收测试清单」#98）：只改变 tests/ 里驱动的行为，
+# 不影响库本身；两个互斥（src/lib.rs 里的 compile_error!），Lenient / Strict 两个 CI 作业分开构建。
+[features]
+noop-lenient = []
+noop-strict = []
+
 [dependencies]
 airhand-proto = { path = "../airhand-proto" }
 anyhow = "1"

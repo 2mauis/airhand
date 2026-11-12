@@ -10,12 +10,18 @@
 //!   Linux 在 `~/.config/airhand/`；被删掉了会自动重新生成。其余运行时产生的文件退出时删除（见 [`ephemeral`]）；
 //! * 界面支持中文 / 英文，默认跟随系统语言（见 [`i18n`]）。
 
+#[cfg(all(feature = "noop-lenient", feature = "noop-strict"))]
+compile_error!(
+    "noop-lenient 与 noop-strict 互斥：Lenient / Strict 两个作业必须分开构建（tailcat-p2p 规格 #98）"
+);
+
 // 最先声明：其它模块都要用到 `tr!`
 #[macro_use]
 mod i18n;
 mod clipboard;
 mod config;
 mod devices;
+pub mod direct_config;
 #[cfg(test)]
 mod e2e;
 mod ephemeral;

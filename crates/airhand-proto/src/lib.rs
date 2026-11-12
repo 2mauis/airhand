@@ -22,6 +22,11 @@
 //!
 //! 每条流上都是 `u32 LE 长度前缀 | 负载`。媒体包是定长头 + 原始数据，控制端原样交给界面，不重新编码。
 
+#[cfg(all(feature = "noop-lenient", feature = "noop-strict"))]
+compile_error!(
+    "noop-lenient 与 noop-strict 互斥：Lenient / Strict 两个作业必须分开构建（tailcat-p2p 规格 #98）"
+);
+
 pub mod framing;
 pub mod media;
 pub mod session;

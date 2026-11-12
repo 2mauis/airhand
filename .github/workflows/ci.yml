@@ -53,9 +53,26 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component clippy --no-self-update && rustup default stable
       - name: 桌面客户端的系统依赖与前端产物（见 docs/building.md）
         if: matrix.ws == 'client'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev
+          # 最坏总耗时：3 次 ×（update 45s + install 120s + 各 5s 的强杀宽限）+ 两次间隔 10s/20s ≈ 555s，小于步骤的 10 分钟上限。
+          # apt-get update 在镜像域名解析失败时仍返回 0，所以成败只看 install 的退出码；超时返回 124，同样走重试。
+          pkgs=(build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev)
+          for attempt in 1 2 3; do
+            sudo timeout -k 5 45 apt-get update || echo "::warning::apt-get update 第 ${attempt} 次未成功（退出码 $?），仍尝试 install"
+            rc=0
+            sudo timeout -k 5 120 apt-get install -y --no-install-recommends "${pkgs[@]}" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            echo "::warning::apt-get install 第 ${attempt}/3 次失败（退出码 ${rc}；124 表示超时）"
+            if [ "$attempt" -lt 3 ]; then
+              sudo dpkg --configure -a || true
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::apt-get install 连续 3 次失败，多半是 Ubuntu 镜像或 DNS 故障，参见 actions/runner-images 的 #15296、#15297"
+          exit 1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: matrix.ws == 'client'
         with: { node-version: "22" }
@@ -72,6 +89,14 @@ jobs:
           key: clippy-${{ matrix.ws }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.dir)) }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
         working-directory: ${{ matrix.dir }}
+      - name: clippy（tailcat-p2p 空操作 lenient / strict，两个 feature 互斥、分开构建）
+        if: matrix.ws == 'root' || matrix.ws == 'client'
+        working-directory: ${{ matrix.dir }}
+        run: |
+          for p in lenient strict; do
+            if [ "${{ matrix.ws }}" = root ]; then f="airhand-link/noop-$p,airhand-proto/noop-$p"; else f="noop-$p"; fi
+            cargo clippy --workspace --all-targets --locked --features "$f" -- -D warnings
+          done
   test:
     name: test (${{ matrix.ws }})
     runs-on: ubuntu-24.04
@@ -91,11 +116,28 @@ jobs:
         run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
       - name: 桌面客户端的系统依赖与前端产物（见 docs/building.md）
         if: matrix.ws == 'client'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev
+          # 最坏总耗时：3 次 ×（update 45s + install 120s + 各 5s 的强杀宽限）+ 两次间隔 10s/20s ≈ 555s，小于步骤的 10 分钟上限。
+          # apt-get update 在镜像域名解析失败时仍返回 0，所以成败只看 install 的退出码；超时返回 124，同样走重试。
+          pkgs=(build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev)
+          for attempt in 1 2 3; do
+            sudo timeout -k 5 45 apt-get update || echo "::warning::apt-get update 第 ${attempt} 次未成功（退出码 $?），仍尝试 install"
+            rc=0
+            sudo timeout -k 5 120 apt-get install -y --no-install-recommends "${pkgs[@]}" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            echo "::warning::apt-get install 第 ${attempt}/3 次失败（退出码 ${rc}；124 表示超时）"
+            if [ "$attempt" -lt 3 ]; then
+              sudo dpkg --configure -a || true
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::apt-get install 连续 3 次失败，多半是 Ubuntu 镜像或 DNS 故障，参见 actions/runner-images 的 #15296、#15297"
+          exit 1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: matrix.ws == 'client'
+        if: matrix.ws == 'client' || matrix.ws == 'root'
         with: { node-version: "22" }
       - name: 构建前端（Tauri 编译需要 frontendDist）
         if: matrix.ws == 'client'
@@ -111,7 +153,26 @@ jobs:
       - run: cargo build --workspace --locked
         working-directory: ${{ matrix.dir }}
       - run: cargo test --workspace --locked
+        if: matrix.ws != 'root' && matrix.ws != 'client'
         working-directory: ${{ matrix.dir }}
+      # 根工作区与桌面客户端含 tailcat-p2p 的先红用例：cargo test 在测试失败时返回非零，收集步骤吞掉退出码，
+      # 判定交给预期红名单门禁（编译失败、错误原因的红、意外失败 / 意外通过都会让门禁失败）。
+      - name: cargo test（收集失败集合，判定交给预期红名单门禁）
+        if: matrix.ws == 'root' || matrix.ws == 'client'
+        working-directory: ${{ matrix.dir }}
+        env:
+          P2P_RECORD_DIR: ${{ github.workspace }}/target/p2p-records
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/target"
+          set +e
+          cargo test --workspace --locked --no-fail-fast 2>&1 | tee "$GITHUB_WORKSPACE/target/cargo-test-${{ matrix.ws }}.log"
+          exit 0
+      - name: 预期红名单门禁（tailcat-p2p #139）
+        if: matrix.ws == 'root' || matrix.ws == 'client'
+        run: node tests/p2p-expected-red.mjs --rust "${{ matrix.dir }}=target/cargo-test-${{ matrix.ws }}.log" --write-result "target/p2p-regular-${{ matrix.ws }}.json"
+      - name: 只记录用例的观测值（不作断言）
+        if: always() && (matrix.ws == 'root' || matrix.ws == 'client')
+        run: cat target/p2p-records/*.txt 2>/dev/null || echo "（没有记录）"
   client-frontend:
     name: client-frontend (typecheck + test)
     runs-on: ubuntu-24.04
@@ -141,10 +202,127 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.detect.outputs.present == '1'
         with: { go-version-file: p2p/go.mod }
-      - name: gofmt / vet / test
+      - name: gofmt / vet
         if: steps.detect.outputs.present == '1'
         working-directory: p2p
         run: |
           test -z "$(gofmt -l .)"
           go vet ./...
-          go test ./...
+      - name: go test（收集失败集合，判定交给预期红名单门禁）
+        if: steps.detect.outputs.present == '1'
+        working-directory: p2p
+        run: |
+          mkdir -p ../target
+          set +e
+          go test -json ./... > ../target/go-test.json
+          exit 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.detect.outputs.present == '1'
+        with: { node-version: "22" }
+      - name: 预期红名单门禁（tailcat-p2p #139）
+        if: steps.detect.outputs.present == '1'
+        run: node tests/p2p-expected-red.mjs --go p2p=target/go-test.json --write-result target/p2p-regular-go.json
+  # tailcat-p2p 规格 #98 / #99：空操作驱动的两个极性各一个作业（feature 互斥，分开构建），跑全部 A 级用例（跨 crate、含 Go）。
+  # 通过条件：该极性“适用”的 A 级非元用例全部断言失败，“不适用”的按登记表处理（见 tests/p2p-a-registry.txt）。
+  p2p-noop:
+    name: p2p-noop-${{ matrix.polarity }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        polarity: [lenient, strict]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: 安装 stable 工具链
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - name: 桌面客户端的系统依赖（见 docs/building.md）
+        timeout-minutes: 10
+        run: |
+          # 最坏总耗时：3 次 ×（update 45s + install 120s + 各 5s 的强杀宽限）+ 两次间隔 10s/20s ≈ 555s，小于步骤的 10 分钟上限。
+          # apt-get update 在镜像域名解析失败时仍返回 0，所以成败只看 install 的退出码；超时返回 124，同样走重试。
+          pkgs=(build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev)
+          for attempt in 1 2 3; do
+            sudo timeout -k 5 45 apt-get update || echo "::warning::apt-get update 第 ${attempt} 次未成功（退出码 $?），仍尝试 install"
+            rc=0
+            sudo timeout -k 5 120 apt-get install -y --no-install-recommends "${pkgs[@]}" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              exit 0
+            fi
+            echo "::warning::apt-get install 第 ${attempt}/3 次失败（退出码 ${rc}；124 表示超时）"
+            if [ "$attempt" -lt 3 ]; then
+              sudo dpkg --configure -a || true
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::apt-get install 连续 3 次失败，多半是 Ubuntu 镜像或 DNS 故障，参见 actions/runner-images 的 #15296、#15297"
+          exit 1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: "22" }
+      - name: 构建前端（Tauri 编译需要 frontendDist）
+        working-directory: client
+        run: npm ci && npm run build
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: p2p/go.mod }
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            client/src-tauri/target
+          key: p2p-noop-${{ matrix.polarity }}-${{ hashFiles('Cargo.lock', 'client/src-tauri/Cargo.lock') }}
+      - name: cargo test（根工作区，空操作 ${{ matrix.polarity }}）
+        run: |
+          mkdir -p target
+          set +e
+          cargo test --workspace --locked --no-fail-fast --features "airhand-link/noop-${{ matrix.polarity }},airhand-proto/noop-${{ matrix.polarity }}" 2>&1 | tee target/p2p-noop-root.log
+          exit 0
+      - name: cargo test（桌面客户端，空操作 ${{ matrix.polarity }}）
+        working-directory: client/src-tauri
+        run: |
+          set +e
+          cargo test --locked --no-fail-fast --features "noop-${{ matrix.polarity }}" 2>&1 | tee ../../target/p2p-noop-client.log
+          exit 0
+      - name: go test（P2P_TEST_NOOP=${{ matrix.polarity }}）
+        working-directory: p2p
+        env:
+          P2P_TEST_NOOP: ${{ matrix.polarity }}
+        run: |
+          set +e
+          go test -json ./... > ../target/p2p-noop-go.json
+          exit 0
+      - name: 空操作门禁（写结果文件 target/p2p-noop-${{ matrix.polarity }}.json）
+        run: >-
+          node tests/p2p-expected-red.mjs --noop "${{ matrix.polarity }}"
+          --rust .=target/p2p-noop-root.log --rust client/src-tauri=target/p2p-noop-client.log --go p2p=target/p2p-noop-go.json
+          --write-result "target/p2p-noop-${{ matrix.polarity }}.json"
+      - name: 元用例 #98 / #99 复核结果文件与登记表（常规构建）
+        run: |
+          cargo test -p airhand-link --test direct --locked -- --exact negative_assertions_fail_on_noop_driver
+          (cd p2p && go test -run '^TestNegativeAssertionsFailOnNoopGate$' ./...)
+  # 门禁脚本自身（#139 的合成场景自检）、名单与登记表自洽、桩不得含 todo!() / unimplemented!()。
+  p2p-gate:
+    name: p2p-gate (self-test + registry + stubs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: "22" }
+      - run: node tests/p2p-expected-red.mjs --self-test
+      - run: node tests/p2p-expected-red.mjs --check-registry
+      - run: node tests/p2p-expected-red.mjs --check-stubs
+  # OQ-23d：spike/ 的测量代码不得被产品代码复用。
+  spike-isolation:
+    name: spike-isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: "22" }
+      - run: node scripts/check-spike-isolation.mjs
