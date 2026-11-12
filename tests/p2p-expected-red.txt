@@ -34,7 +34,6 @@ go p2p/helper_test.go::TestServesExactlyOneUDPPort
 go p2p/helper_test.go::TestTailcatLogfDiscardedByDefault
 go p2p/helper_test.go::TestWriteStallReportedByIndependentTimer
 go p2p/helper_test.go::TestWriteTimeoutReportsPathFailure
-go p2p/integration_test.go::TestDiscoPingConcurrentCallsAreSafe
 go p2p/integration_test.go::TestGateStaysOpenWithKeepAliveDatagramsAndNoPing
 go p2p/integration_test.go::TestPublicKeyBeforeOfferMakesNoNetworkActivity
 go p2p/integration_test.go::TestSchemeAControllerSendsNothingBeforeGateOpenAndUpgradeCompletes
@@ -124,10 +123,7 @@ rust crates/airhand-link/tests/direct.rs::stop_sharing_rotates_code_old_code_rej
 rust crates/airhand-link/tests/direct.rs::unknown_offer_kind_is_declined
 rust crates/airhand-link/tests/direct.rs::verification_string_is_displayed_not_required
 rust crates/airhand-link/tests/direct.rs::verification_string_not_logged
-rust crates/airhand-link/tests/direct_quinn.rs::ack_probe_streams_are_accepted_and_do_not_exhaust_stream_limit
-rust crates/airhand-link/tests/direct_quinn.rs::ack_progress_not_advanced_by_repeated_ack_ranges
 rust crates/airhand-link/tests/direct_quinn.rs::ack_progress_recovery_after_burst_real_quinn
-rust crates/airhand-link/tests/direct_quinn.rs::ack_progress_signal_stalls_on_one_way_loss_real_quinn
 rust crates/airhand-link/tests/direct_quinn.rs::host_handshake_not_abandoned_under_single_loss_up_to_rtt_350ms
 rust crates/airhand-link/tests/direct_quinn.rs::probe_streams_use_highest_send_priority_and_survive_media_saturation_real_quinn
 rust crates/airhand-link/tests/lifecycle.rs::bye_always_sent_on_relay
