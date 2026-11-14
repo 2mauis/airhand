@@ -106,7 +106,7 @@ function defaultSourceHas(id) {
 const ANSI_SGR = /\x1b\[[0-9;]*m/g;
 export const stripAnsi = (t) => String(t ?? '').replace(ANSI_SGR, '');
 
-// cargo test 的文本输出 → Map<id, {status, message}>；resolveRust(rel, bin) 把“Running <rel> (deps/<bin>-hash)”映射到仓库内路径
+// cargo test 的文本输出 → Map<id, {status, message}>；resolveRust(rel, bin) 把 Running 的 deps/<bin>-hash 或 build/<pkg>/<hash>/out/<bin>-hash 映射到仓库内路径
 export function parseCargo(text, resolveRust = (rel) => rel) {
   text = stripAnsi(text);
   const results = new Map(); const fatal = [];
@@ -119,7 +119,7 @@ export function parseCargo(text, resolveRust = (rel) => rel) {
   };
   for (const line of text.split('\n')) {
     let m;
-    if ((m = line.match(/^\s+Running (?:unittests )?(\S+) \(.*?deps[\\/]([^\\/]+?)(?:-[0-9a-f]+)?(?:\.exe)?\)$/))) { flush(); file = resolveRust(m[1], m[2]); continue; }
+    if ((m = line.match(/^\s+Running (?:unittests )?(\S+) \(.*?(?:deps[\\/]|build[\\/][^\\/]+[\\/][0-9a-f]+[\\/]out[\\/])([^\\/]+?)(?:-[0-9a-f]+)?(?:\.exe)?\)$/))) { flush(); file = resolveRust(m[1], m[2]); continue; }
     if ((m = line.match(/^\s+Doc-tests (\S+)$/))) { flush(); file = `doc:${m[1]}`; continue; }
     if (/^error(?:\[E\d+\])?: could not compile|^error\[E\d+\]/.test(line)) fatal.push(`编译失败：${line.trim()}`);
     if (!file) continue;
