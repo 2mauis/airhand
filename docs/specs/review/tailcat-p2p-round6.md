@@ -1,3 +1,5 @@
+> 已被 [tailcat-direct-mvp.md](../tailcat-direct-mvp.md) 取代，仅作历史归档。
+
 > 评审者：Claude Code（`--model claude-opus-5-5 --effort medium`，只读）。
 > 对象：规格 r6（第一轮）与修订后的 r6.1（针对性复审）。
 > 本文件不记录花费、token 或运行耗时。

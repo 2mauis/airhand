@@ -1,189 +1,51 @@
-<p align="center"><img src="assets/icon.svg" width="96" alt="Airhand"></p>
+<p align="center"><img src="assets/icon.svg" width="96" alt="AirHand"></p>
 
-<h1 align="center">Airhand</h1>
+# AirHand · Tailcat direct MVP
 
-<p align="center"><b>High-performance, low-latency remote desktop</b><br>QUIC transport · hardware encoding and decoding · up to 120 fps<br>Windows · macOS · Linux · Android · browser</p>
+[English](README.md) · [简体中文](README.zh-CN.md)
 
-<p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a></p>
+This fork of [sqlpxc/airhand](https://github.com/sqlpxc/airhand) implements a single-pair macOS desktop path managed by **Tailcat**, this repository's direct transport. Tailcat is not Tailscale. This path needs no independent AirHand relay or signaling service; it retains Tailcat-native DERP/STUN for discovery.
 
----
+The authority is the [approved direct design](docs/specs/tailcat-direct-mvp.md), imported without changing its bytes. The [direct feature map](docs/specs/tailcat-direct-feature-map.md) records implemented, unimplemented and pending-Mac-validation items. The [handoff archive](docs/tailcat-handoff.md) preserves the prior evidence and its limits.
 
-## This fork: Tailcat-managed direct connections (planned)
+**Status: source integration and local transport tests; two-Mac App acceptance pending.** The helper-binary test carries synthetic UDP datagrams, not a desktop. The prior Tailcat library tests and PR #17's relay desktop tests do not demonstrate that this App's screen or keyboard/mouse path has passed.
 
-This repository is a fork of [sqlpxc/airhand](https://github.com/sqlpxc/airhand). Upstream connects the host and controller through a separately deployed AirHand relay server. This fork's target is a **Tailcat-managed, authenticated peer-to-peer channel**, without a separate AirHand relay or signaling server.
-
-- **Zero-trust goal:** authenticate and explicitly authorize the peer; being on the same network is not authorization. Using Tailcat alone is not proof that this goal has been met.
-- **Tailcat networking stays:** retain Tailcat-native DERP and STUN for discovery and connectivity. Distinguish direct peer-to-peer UDP from a DERP-relayed path; only observed peer-to-peer traffic counts as a direct-connection test. The application-data fallback policy remains to be specified; retaining DERP/STUN does not mean retaining a separate AirHand relay.
-- **Not implemented end to end yet:** [PR #17](https://github.com/2mauis/airhand/pull/17) contains groundwork and validation support, not a working Tailcat desktop session. The current desktop build still uses the inherited relay path; relay-based desktop tests do not validate this target. The existing [Tailcat design](docs/specs/tailcat-p2p.md) still assumes AirHand relay signaling and fallback; those assumptions need revision before implementation against this target.
-
-### Existing relay-based implementation
-
-The remaining description and server deployment instructions document the inherited implementation, not the target above.
-
-Airhand is a **high-performance, low-latency** remote desktop: the screen is encoded on the GPU (AV1 / HEVC / H.264) at up to 120 fps and sent over QUIC; when the network slows down it skips to the latest frame instead of letting lag pile up; and the mouse pointer is drawn locally, so it moves without delay.
-
-The same program is both the **host** (the device being controlled) and the **controller** (the device you control it from). The two sides meet through a **relay server** that you deploy yourself. It's small, and Docker Compose deploys it with one command. Enter the other side's 6-digit **control code** to connect.
-
-> [!NOTE]
-> **Work in progress (0.2.2).** The protocol still changes between versions, so the clients and the server need to be the same version; a mismatch is detected and reported (see [Protocol versions](docs/development.md#protocol-versions)).
-
-## Performance
-
-Every stage from capture to display is built for low latency:
-
-- **Hardware encoding and decoding**: the host encodes on the GPU (NVENC / Quick Sync / AMF, VideoToolbox, MediaCodec) in low-latency mode without B-frames; the controller decodes on the GPU (WebCodecs / MediaCodec). Measured with a 4K screen streamed at 1080p, hardware AV1 encoding takes about 7 ms per frame (RTX graphics card)
-- **The best format**: AV1 > HEVC > H.264, automatically picking the most efficient format both sides support; scaling and color conversion use SIMD, and all buffers are reused
-- **No lag build-up**: the host limits frames in flight (≈ RTT × frame rate + 2) and skips to the latest frame on a slow network; adaptive bitrate backs off under congestion and recovers gradually
-- **QUIC + BBR**: BBR congestion control is steadier than Cubic on lossy networks such as Wi-Fi or long-distance links; control messages, audio and video are queued separately, so mouse input and pings never wait behind a large frame; the relay only forwards bytes and never parses the video
-- **Decode and show**: the decoder runs in low-latency mode, and each frame is drawn to a desynchronized canvas as soon as it's decoded, without waiting for vsync
-- **Local pointer**: the remote cursor's shape is mirrored locally, and moving it happens locally
-- **Low bandwidth**: no frames are sent while the screen is still, so an idle desktop uses almost nothing; sessions that aren't on screen drop to 5 fps
-
-See [How it works → Video](docs/architecture.md#video) for details.
-
-## Features
-
-- **Windows system service**: the lock screen, the sign-in screen and UAC prompts can be seen and controlled, and the computer can be reached after boot, before anyone signs in
-- **Fixed control codes**: they survive restarts, upgrades and even server restarts until you change them yourself
-- **Console**: browser-style tabs to control several computers at once, plus a multi-screen overview to watch them all. Computers you've connected to are saved and reconnect with one click; if one is offline, it connects as soon as it comes back
-- **Web console**: the controller can also run in Docker and be used from a browser, with nothing to install on the computer you control from
-- **Android**: control computers and phones from a phone as a trackpad or touchscreen, or share your own screen to get help (you approve each connection by default); watch on a TV with the remote
-- **Audio**: the host's system audio plays on the controller (Opus + adaptive jitter buffer), with optional A/V sync for watching videos
-- **Handy tools**: two-way clipboard sync, typing the clipboard as keystrokes, system shortcuts (Win, Alt+Tab, Ctrl+Shift+Esc…), multiple monitors, keyboard lock in fullscreen, quality presets
-- **Secure by default**: TLS 1.3 with certificate pinning, brute-force protection for control codes; the host always sees who is connected and can disconnect them with one click
-- **Leaves nothing behind**: the host is just a tray icon and doesn't start a WebView; everything worth keeping is in one `config.toml`, other runtime files are deleted on exit, and nothing is left after [uninstalling](docs/usage.md#uninstalling) (Windows has an uninstaller, macOS has "Uninstall Airhand…" in the menu, Linux takes two commands)
-- **English and Chinese**: follows the system language; notices from the other computer and the server also appear in **your** language
-
-## Platforms
-
-| Platform | Host | Controller | Notes |
-|---|:-:|:-:|---|
-| Windows 10 / 11 | ✅ | ✅ | Installed; the host runs as a system service |
-| macOS 13+ | ✅ | ✅ | The host needs the Screen & System Audio Recording and Accessibility permissions |
-| Linux | ✅ | ✅ | The host supports X11 desktops only, with software encoding for now |
-| Android 7+ phones / tablets | ✅ | ✅ | Can only be watched until the accessibility service is turned on; the controller connects to one device at a time |
-| Android TV / Google TV | — | View only | Operated entirely with the remote |
-| Browser (web console) | — | ✅ | Chrome / Edge, Safari 16.4+, Firefox 130+ |
-
-See [Known limitations](docs/limitations.md) for platform-specific caveats.
-
-## How it works
-
-```mermaid
-flowchart LR
-    host["Host<br>Windows / macOS / Linux / Android"]
-    relay["Relay server<br>airhand-server (Docker)"]
-    ctrl["Controller<br>desktop console / web console / Android"]
-    host <-->|"QUIC · UDP 4433"| relay
-    relay <-->|"QUIC · UDP 4433"| ctrl
-```
-
-The host connects to the relay server and gets a 6-digit control code; the controller uses that code to find it. The server only registers codes, pairs sessions and forwards bytes; it never parses the video. Both the host and the controller connect out to the server, so neither needs an open port or a public IP. See [How it works](docs/architecture.md) for details.
-
-## Quick start
-
-You need:
-
-- A machine both sides can reach, with Docker and **UDP 4433** open
-- Rust, Node.js 20+ and CMake to build the client (per-platform requirements in [Building](docs/building.md#requirements))
-
-### 1. Deploy the relay server
-
-```bash
-git clone https://github.com/sqlpxc/airhand.git
-cd airhand
-docker compose up -d
-docker compose logs airhand | grep fingerprint   # note the certificate's SHA-256 fingerprint
-```
-
-The certificate and the control-code database live in `data/`. **Keep that directory**: with a new certificate, clients you've already built can no longer connect. Server settings are in [Deployment](docs/deploy.md#relay-server).
-
-### 2. Build the client
-
-Compile in the server address and the fingerprint from step 1.
-
-Windows (PowerShell):
-
-```powershell
-cd client
-npm install
-$env:AIRHAND_SERVER    = "relay.example.com:4433"
-$env:AIRHAND_SERVER_FP = "<fingerprint from step 1>"
-npm run tauri build
-```
-
-macOS / Linux:
-
-```bash
-cd client
-npm install
-export AIRHAND_SERVER=relay.example.com:4433
-export AIRHAND_SERVER_FP=<fingerprint from step 1>
-npm run tauri build
-```
-
-The packages are under `client/src-tauri/target/release/bundle/`:
-
-| System | Package |
+| Area | Current state |
 |---|---|
-| Windows | `nsis/Airhand_<version>_x64-setup.exe` |
-| macOS | `macos/Airhand.app`, `dmg/Airhand_<version>_<arch>.dmg` |
-| Linux | `deb/Airhand_<version>_amd64.deb` |
+| Tailcat helper | Implemented: fixed control argv, stdin secrets, real Server/Client, one-port loopback UDP bridge, direct gate, redacted events and DERP data counters; local binary test passes |
+| Direct QUIC | Implemented: independent ALPN, pair-pinned mutual TLS, one session / three lanes, binding/timeout/extra-stream rejection; local tests pass |
+| Pairing and consent | Implemented in source: AirDrop R/I files, H(R), expiry, one-time consumption, SAS, native Keychain, per-session default-deny consent, optional input and revocation; native macOS validation pending |
+| Screen and keyboard/mouse | Existing real capture/encoding/rendering/input pipelines wired after authentication, consent and direct gating; actual two-Mac behavior remains unverified |
+| Failure handling and packaging | Input release/discard, controller stop, session closure, separate macOS identifier, signed sidecar build path, local-network description; Mac timing/TCC/signing validation pending |
+| Deliberately unimplemented | Windows/Android/iOS direct flow and P1 items, including socketpair, QR/Bonjour, authorization memory, gate recovery within a session and new CI before Mac acceptance |
 
-The server address and fingerprint can also be changed later in [`config.toml`](docs/usage.md#configuration-file). For the Android APK, see [Building → Android](docs/building.md#android-apk).
+Only **UDP direct** opens the application gate in this trial. Path loss closes the session and releases input; a recovered gate does not resume it. The detection window can still contain DERP packets and must be measured. Long-term DERP application-data fallback remains a product decision. Remembering a pair is an experimental, switchable preference; persistent host key/PSK and standing DERP presence are not settled production policy.
 
-### 3. Connect
+## Build and try on two Macs
 
-1. Install Airhand on both computers (on Windows run the installer, which needs administrator rights; on macOS grant the permissions it asks for the first time)
-2. On the computer **to be controlled**, right-click the tray icon (on macOS, click the menu bar icon) to see its 6-digit **control code**
-3. On **your** computer, choose **Open console** from the tray menu (**Switch to controller** on macOS / Linux) and enter the code
+Use the [fixed-signature macOS build](docs/building.md), then the [App pairing flow](docs/usage.md): controller exports R → AirDrop → host explicitly allows pairing → AirDrop I → controller imports once → both show SAS → host confirms → host authorizes each session. No long address/key is entered or copied to the clipboard. The host's **Allow connections** switch starts off; its menu bar provides a persistent disconnect action.
 
-The full guide is in [Usage](docs/usage.md).
+Credentials persist in Keychain; private helper configuration goes only through stdin. Explicit invitation files contain a secret and need deletion after transfer/import. `Secret<T>` redacts Rust Debug; neither telemetry nor the normal UI exposes addresses, keys or peer IPs. Clipboard synchronization is disabled for direct sessions.
 
-### Without installing a client: the web console
-
-Start the web console on any machine with Docker and use it from a browser:
-
-```bash
-cd web
-AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<fingerprint> docker compose up -d
-```
-
-Open `http://localhost:8080` on that machine, or `https://<its address>:8080` from other computers. For the access password, the HTTPS certificate and reverse proxies, see [Deployment → Web console](docs/deploy.md#web-console-docker).
+Run the local checks documented in [Development](docs/development.md). The [validation record](docs/tailcat-direct-validation.md) lists evidence and the pending same-LAN/hotspot, negative, failure and secret checks. Native Apple bundle building, AirDrop/Keychain/TCC and ten-minute screen/input acceptance require actual Macs. Do not alter firewall or macOS security settings to manufacture a pass.
 
 ## Documentation
 
-| Document | Contents |
+| Guide | Fork-specific content |
 |---|---|
-| [Usage](docs/usage.md) | Host, Windows installation, configuration file, uninstalling, console, quality, language |
-| [Deployment](docs/deploy.md) | Relay server settings, web console, reverse proxies |
-| [Android](docs/android.md) | Controlling from a phone, sharing the phone, gestures, TVs |
-| [Building](docs/building.md) | Per-platform requirements and packages, signing, APK |
-| [How it works](docs/architecture.md) | Architecture, source layout, Windows service, video and audio pipelines, A/V sync, files on disk |
-| [Security](docs/security.md) | Encryption and pinning, brute-force protection, control codes and resume tokens |
-| [Known limitations](docs/limitations.md) | Known issues by platform |
-| [Development](docs/development.md) | Tests, debugging tools, project conventions |
+| [Architecture](docs/architecture.md) | Helper bridge, mutual TLS, direct session/consent boundary and reused media pipeline |
+| [Deployment](docs/deploy.md) | No AirHand service deployment for this direct path |
+| [Usage](docs/usage.md) | App pairing, session consent, disconnect, forgetting and persistence switch |
+| [Security](docs/security.md) | Two-layer identity, secrets, loopback protection and fail-closed limits |
+| [Limitations](docs/limitations.md) | Pending native acceptance, detection window and excluded scope |
+| [Building](docs/building.md) | Separate bundle ID, existing fixed signing identity and sidecar |
+| [Development](docs/development.md) | Local tests, historical first-red fixtures and Mac acceptance |
+| [Android](docs/android.md) | Out of direct-MVP scope; inherited phone/TV behavior retained |
 
-## Security notes
+The inherited relay implementation remains in the repository. Its guides explicitly label retained sections **“Upstream relay-mode behavior, not this fork's target design.”** Its multi-platform feature/performance claims and deployment recipes are not direct-MVP guarantees. Old Tailcat relay-upgrade designs and review records remain at their original paths with archive notices; use the new direct design/map instead.
 
-- Everything runs over TLS 1.3 (QUIC), and clients verify the server by its certificate fingerprint. A client built without a fingerprint **doesn't verify** the server; use that for development only
-- **The relay server can see session contents** (TLS terminates at the server), so run it on a machine you trust; the same goes for the web console
-- **A control code is a key**: the Windows host runs as SYSTEM, so whoever has the code controls the computer with administrator rights. Give it only to people you trust; the host's tray always shows who is connected and lets you disconnect them or change the code
-
-See [Security](docs/security.md) for details.
-
-## Contributing
-
-| Directory | Contents |
-|---|---|
-| `crates/` | The protocol (`airhand-proto`) and the client-to-relay link (`airhand-link`) |
-| `server/` | Relay server |
-| `web/` | Web console service |
-| `client/` | Desktop client: Tauri (Rust) + React UI, which the web console uses too |
-| `android/` | Android app (Kotlin + Jetpack Compose) and its Rust core |
-
-How to run the tests, the debugging tools and the project conventions (protocol versions, UI strings…) are in [Development](docs/development.md).
+When functionality changes, update **both READMEs and the direct feature map together**, keeping source implementation separate from real-device acceptance. `server/` and CI policy are unchanged by this work. New dependencies, policy changes, credentials, merge or deployment require separate approval.
 
 ## License
 
-[MIT](LICENSE)
+MIT; retain the upstream copyright and license in [LICENSE](LICENSE).

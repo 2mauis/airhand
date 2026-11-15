@@ -2,11 +2,31 @@
 
 [← 返回 README](../README.zh-CN.md) · [English](building.md)
 
+## 本 fork：固定签名 macOS App 与 sidecar
+
+本[直连 MVP](specs/tailcat-direct-mvp.md)不需要设置中转地址/指纹。需要 macOS 13+、Xcode 命令行工具、Go 1.27.1（`p2p/go.mod` 固定 Tailcat v0.7.0）、stable Rust、Node.js 和 CMake。经 `APPLE_SIGNING_IDENTITY` 选择已有固定开发签名身份，取值不写进仓库；本轮不创建或安装签名凭据。
+
+```bash
+# 在已配置所选签名身份的 Mac 上，从仓库根目录执行
+(cd client && npm ci)
+bash client/scripts/build-tailcat-macos.sh
+```
+
+脚本编译本机 helper sidecar、签名，再以同一身份构建并验证 App。`tauri.macos.conf.json` 覆盖通用 NSIS 配置，提供 App 目标、`bundle.externalBin`、hardened runtime 和独立 identifier `app.airhand.client.tailcatdev`；`Info.plist` 添加本地网络用途说明。临时 ad-hoc 签名不等于固定身份验收环境；不得为通过而放宽防火墙、TCC 或隔离设置。
+
+云环境不能签名、构建或运行 Apple bundle。两个测试 Mac 的签名身份在本地私下记录，屏幕录制/辅助功能只授予主 App，记录本地网络弹窗归属进程。原生 bundle 构建、sidecar 签名、Keychain ACL 延续和 TCC 均待验证。下方为历史中转构建流程，其中的中转配置及 ad-hoc macOS 建议不适用于本直连 App。
+
+> upstream 中转模式现状，非本 fork 目标设计。
+
 客户端会把**中转服务器的地址和证书指纹**编译进去作为默认值，所以请先[部署中转服务器](deploy.zh-CN.md#中转服务器)，记下证书指纹。
 
 ## 桌面客户端
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 ### 依赖
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 | 系统 | 需要 |
 |---|---|
@@ -25,6 +45,8 @@ sudo apt install build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-d
 
 ### 服务器地址和证书指纹
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 构建时用环境变量 `AIRHAND_SERVER` 和 `AIRHAND_SERVER_FP` 设置，也可以直接修改 `client/src-tauri/src/config.rs` 里的默认值：
 
 - 不设置 `AIRHAND_SERVER` 时连接 `127.0.0.1:4433`
@@ -35,6 +57,8 @@ sudo apt install build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-d
 > `AIRHAND_SERVER_FP` 留空时**不校验服务器证书**，无法防止中间人攻击，只适合开发环境；这时控制台左上角会显示“未固定证书”。
 
 ### 构建
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 Windows（PowerShell）：
 
@@ -66,6 +90,8 @@ npm run tauri build
 
 ### Windows 说明
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 - 安装程序为所有用户安装并注册系统服务（见 [Windows 安装版](usage.zh-CN.md#windows-安装版)），附加步骤在 `client/src-tauri/windows/hooks.nsh`
 - `npm run tauri build -- --no-bundle` 只生成 `airhand.exe`，但发布版没有安装时不能运行
 - C 运行时是静态链接的，不需要装 VC++ 运行库
@@ -73,11 +99,15 @@ npm run tauri build
 
 ### macOS 说明
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 - 只要 .app 时用 `npm run tauri build -- --bundles app`；构建的是本机的架构（Apple 芯片是 arm64）
 - 程序只做了临时签名（ad-hoc），没有经过 Apple 公证：拷到别的 Mac 上第一次打开时，在访达里右键 → 打开（或者 `xattr -dr com.apple.quarantine Airhand.app`）
 - 系统按签名记住授予的权限，而临时签名每次构建都会变：重新构建后要在“系统设置 → 隐私与安全性”里把 Airhand 删掉再重新授权。长期使用的话，在 `client/src-tauri/tauri.macos.conf.json` 里把 `signingIdentity` 换成自己的开发者证书
 
 ## Android（APK）
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 需要：JDK 17 及以上（Android Studio 自带的就行）、Android SDK（Platform 35）和 NDK 27、Rust 的 Android 目标、[cargo-ndk](https://github.com/bbqsrc/cargo-ndk)：
 

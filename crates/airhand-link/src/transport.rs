@@ -77,6 +77,75 @@ pub async fn open_session(
     .context("timed out opening session streams")?
 }
 
+/// Direct connections accept exactly one controller session. A stalled header
+/// shares the same deadline as all three streams. The fourth-stream monitor
+/// lives as long as the returned streams (and closes the whole connection).
+pub struct AcceptedSession {
+    pub session_id: u64,
+    pub streams: SessionStreams,
+    pub guard: crate::tasks::OwnedTask<()>,
+}
+
+pub async fn accept_session(conn: &Connection) -> Result<AcceptedSession> {
+    accept_session_with_timeout(conn, Duration::from_secs(10)).await
+}
+
+pub async fn accept_session_with_timeout(
+    conn: &Connection,
+    timeout: Duration,
+) -> Result<AcceptedSession> {
+    let result = tokio::time::timeout(timeout, async {
+        let mut id = None;
+        let mut lanes: [Option<Stream>; 3] = [None, None, None];
+        for _ in 0..3 {
+            let (send, mut recv) = conn.accept_bi().await?;
+            let mut bytes = [0; SessionHeader::LEN];
+            recv.read_exact(&mut bytes).await?;
+            let header = SessionHeader::decode(&bytes).context("invalid direct session header")?;
+            anyhow::ensure!(
+                header.role == Role::Controller,
+                "invalid direct session role"
+            );
+            anyhow::ensure!(
+                id.is_none_or(|id| id == header.session_id),
+                "mixed direct sessions"
+            );
+            id = Some(header.session_id);
+            let slot = &mut lanes[header.lane as usize];
+            anyhow::ensure!(slot.is_none(), "duplicate direct channel");
+            send.set_priority(match header.lane {
+                SessionLane::Control => 10,
+                SessionLane::Audio => 5,
+                SessionLane::Video => 0,
+            })?;
+            *slot = Some((send, recv));
+        }
+        let guard_conn = conn.clone();
+        let guard = crate::tasks::OwnedTask(tokio::spawn(async move {
+            if guard_conn.accept_bi().await.is_ok() {
+                guard_conn.close(1u32.into(), b"extra direct stream");
+            }
+        }));
+        Ok(AcceptedSession {
+            session_id: id.context("missing direct session")?,
+            streams: SessionStreams {
+                control: lanes[0].take().unwrap(),
+                video: lanes[1].take().unwrap(),
+                audio: lanes[2].take().unwrap(),
+            },
+            guard,
+        })
+    })
+    .await;
+    match result {
+        Ok(Ok(session)) => Ok(session),
+        _ => {
+            conn.close(1u32.into(), b"invalid direct session");
+            Err(anyhow!("invalid or incomplete direct session"))
+        }
+    }
+}
+
 /// 被控端发来的一样东西
 #[derive(Debug)]
 pub enum FromHost {

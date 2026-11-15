@@ -2,7 +2,28 @@
 
 [← 返回 README](../README.zh-CN.md) · [English](architecture.md)
 
+## 本 fork：macOS 直连 MVP
+
+本 fork 以[批准设计](specs/tailcat-direct-mvp.md)、[功能映射](specs/tailcat-direct-feature-map.md)和[交接归档](tailcat-handoff.md)为准。代码已接入不经 broker 的 macOS 路径；双 Mac 桌面验收仍待进行。
+
+```mermaid
+flowchart LR
+    C[控制端 App] <-->|回环 UDP + 配对固定的双向 mTLS QUIC| CH[Tailcat helper]
+    CH <-->|经认证的 UDP direct| HH[Tailcat helper]
+    HH <-->|回环 UDP + 配对固定的双向 mTLS QUIC| H[被控端 App]
+    CH -. 原生发现 .-> D[DERP / STUN]
+    HH -. 原生发现 .-> D
+```
+
+控制端开三条流，被控端接受，拒绝混入其他会话、重复通道、第四条流及不完整头部。直连使用独立 ALPN `airhand-direct/1` 和版本；中转协议 v9 不变。每配对的 WireGuard 身份与证书指纹交叉绑定；QUIC 接入前还核对 helper 的固定回环四元组。
+
+R/I 文件绑定请求哈希及随机数承诺，首连 SAS 和每会话本机允许都在 Host Hello、采集及输入之前。授权后复用现有采集、编码、解码及输入管线。直连路径、新数据 ACK 进展、helper 或会话所有权丢失都会结束会话并释放输入；恢复需要新会话。
+
+`p2p/control.go` 与 `p2p/cmd/airhand-p2p` 管理桥接；`airhand-link/src/direct/` 管理 TLS 和配对文本规则；`client/src-tauri/src/direct/` 管理 Keychain、文件、helper 生命周期与授权；`DirectPairing.tsx` 提供配对 UI。原生 Keychain/AirDrop、签名、TCC 和真实画面/输入仍待 macOS 验证。下方保留的架构及性能数值属于继承的中转实现，不是 Tailcat 桌面实测。
+
 ## 架构
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 ```mermaid
 flowchart LR
@@ -33,6 +54,8 @@ flowchart LR
 
 ### 代码目录
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 | 目录 | 内容 |
 |---|---|
 | `crates/airhand-proto` | 协议：信令、会话控制消息、媒体包、帧格式 |
@@ -46,6 +69,8 @@ flowchart LR
 | `assets/icon.svg` | 应用图标源文件 |
 
 ### 被控端在各平台上的实现
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服务)）：
 
@@ -62,6 +87,8 @@ Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服
 
 ## Windows 服务
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 同一个 `airhand.exe` 按命令行参数扮演不同的角色（`client/src-tauri/src/winsvc/`）：
 
 | 进程 | 身份 | 做什么 |
@@ -76,6 +103,8 @@ Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服
 - 服务和被控端没有控制台：日志用 `OutputDebugString` 输出（见开发文档的[调试 Windows 服务](development.zh-CN.md#调试-windows-服务)）
 
 ## 画面
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 | 环节 | 做法 |
 |---|---|
@@ -94,6 +123,8 @@ Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服
 
 ## 声音
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 被控端的系统声音（不含麦克风）会同步到控制端：
 
 | 环节 | 做法 |
@@ -109,6 +140,8 @@ Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服
 
 ## 音画同步（可选，默认关闭）
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 声音要经过抖动缓冲，画面则是一到就显示，所以默认声音会比画面晚一点：实测约 **70 ms**（同机、本地中转、4K 屏输出 1080p；单次 49~78 ms）。操作电脑时几乎察觉不到，看视频时可能会。
 
 在工具栏的喇叭菜单里打开**音画同步**后：
@@ -121,6 +154,8 @@ Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服
 画到 Canvas 之后到屏幕真正亮起来的时间按 8 ms 估算（没有用摄像头实测）。
 
 ## 磁盘上的文件
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 - Airhand 要保存的东西（设置、本机的控制码、我的设备）都在一个 `config.toml` 里（见[配置文件](usage.zh-CN.md#配置文件)）。日志从不写文件：写到 stderr，Windows 服务写到 `OutputDebugString`
 - 被控端模式**不创建 WebView**，Airhand 自己不会产生任何文件（macOS 的系统框架以 Airhand 的名义建的目录见下）

@@ -1,3 +1,5 @@
+> 已被 [tailcat-direct-mvp.md](tailcat-direct-mvp.md) 取代，仅作历史归档。
+
 # tailcat 临时点对点直连：设计评审记录
 
 > 对象：[`tailcat-p2p.md`](tailcat-p2p.md) 与 [`tailcat-p2p-feature-map.md`](tailcat-p2p-feature-map.md)。

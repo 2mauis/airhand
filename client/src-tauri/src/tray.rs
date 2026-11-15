@@ -115,6 +115,44 @@ fn server_line(server: &ServerState) -> String {
 }
 
 fn build_menu(app: &AppHandle, st: &AppStatus) -> tauri::Result<Menu<Wry>> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::Manager;
+        let view = app.state::<crate::AppState>().direct.view();
+        let menu = Menu::new(app)?;
+        menu.append(&label(app, format!("AirHand Tailcat · {}", view.path))?)?;
+        menu.append(&CheckMenuItem::with_id(
+            app,
+            "direct_allow",
+            tr!("允许被连接", "Allow connections"),
+            true,
+            view.listening,
+            None::<&str>,
+        )?)?;
+        menu.append(&item(
+            app,
+            "direct_open",
+            tr!("配对与控制台…", "Pairing and console…"),
+        )?)?;
+        menu.append(&item(
+            app,
+            "direct_import",
+            tr!("导入配对请求…", "Import pairing request…"),
+        )?)?;
+        menu.append(&item(
+            app,
+            "direct_devices",
+            tr!("已配对设备…", "Paired device…"),
+        )?)?;
+        menu.append(&item(
+            app,
+            "direct_revoke",
+            tr!("断开当前会话", "Disconnect current session"),
+        )?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        menu.append(&item(app, "quit", tr!("退出", "Quit"))?)?;
+        return Ok(menu);
+    }
     let menu = Menu::new(app)?;
     menu.append(&label(
         app,
@@ -398,6 +436,11 @@ pub fn refresh(app: &AppHandle, st: &AppStatus) {
         host_known && st.host.server == ServerState::Connected
     } else {
         st.controller == ServerState::Connected
+    };
+    #[cfg(target_os = "macos")]
+    let online = {
+        use tauri::Manager;
+        app.state::<crate::AppState>().direct.view().path == "direct"
     };
     let _ = tray.set_icon(Some(if online {
         icon_online()

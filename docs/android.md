@@ -2,6 +2,12 @@
 
 [← Back to README](../README.md) · [简体中文](android.zh-CN.md)
 
+## This fork's scope
+
+Android is not part of the single-pair [macOS direct MVP](specs/tailcat-direct-mvp.md). No Tailcat App pairing, mutual-TLS helper transport or direct input path is implemented for Android in this change. The [feature map](specs/tailcat-direct-feature-map.md) separates inherited support from direct-MVP status. The following phone/TV behavior still belongs to the inherited AirHand relay mode and does not establish Tailcat interoperability.
+
+> Upstream relay-mode behavior, not this fork's target design.
+
 One APK (`android/`, see [building](building.md#android-apk)) for phones, tablets and TVs. The same app shows a different interface depending on how it's opened:
 
 | Opened from | Interface | What it does |
@@ -12,6 +18,8 @@ One APK (`android/`, see [building](building.md#android-apk)) for phones, tablet
 On a TV, the phone entry point also switches to the TV interface.
 
 ## Phone: Remote
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 - The home page is a **6-digit control code field**; it connects as soon as 6 digits are in ("Paste code" also finds a code inside text like "code: 123 456"). Connecting happens right there (a spinner on the button) and the remote screen opens once connected; a wrong code, an offline device, too many attempts and so on are explained right under the field
 - **My devices**: every device you connect to is saved (name, OS, control code, last connection, resume token), so next time it's **one tap**. If it's offline the row says "Offline · connects automatically when it's back" and the remote screen opens by itself when it comes online; you can cancel any time. Devices can be renamed, their code copied, or removed (with undo)
@@ -47,6 +55,8 @@ When the remote phone runs Android 7 (no continuous multi-finger gestures), only
 
 ## Phone: Share screen (be controlled)
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 On the "Share screen" tab, tap **Start sharing screen**: Airhand asks for notification and audio-recording permission (recording is only used to share **what the phone is playing**, never the microphone; the screen is shared even if you decline), then the system asks to confirm screen recording. Once sharing:
 
 - The **control code** is shown in large digits, with copy and share. Like the Windows installation it is **fixed** (saved in the app's own data directory, and the server keeps it for this phone) until you tap "Change control code"
@@ -63,14 +73,20 @@ Remote input maps to the phone like this: touch points and the left mouse button
 
 ## Phone: Settings
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 Server address and certificate fingerprint (defaults are compiled in and can be changed here; a malformed fingerprint can't be saved), this device's name (shown to others, defaults to the system device name), ask before someone connects, change control code, default quality, default touch input, play sound by default, A/V sync, navigation keys for phones, clear saved devices, version and protocol version.
 
 ## TV
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 - Enter the control code on the left with the remote's number keys or the on-screen keypad; recent devices are on the right (arrow keys to pick, OK to connect); to remove a device, use the delete button next to it, or hold OK / press Menu on it (asks first); Settings (server, fingerprint, device name) is at the top right
 - The picture is full screen with sound on. **OK / Menu** opens the side menu: sound, A/V sync, displays, quality (each press picks the next preset), video format (auto / each format both sides support, each press picks the next one), picture size (fit / fill, cropping the edges / stretch), connection info, disconnect; video format and picture size are remembered for later connections; **left / right** switch the remote display; **Back** closes the menu, and asks before disconnecting
 - TVs only watch, so there's no warning when the other side hasn't allowed remote control (the phone's accessibility service, the Mac's Accessibility permission)
 
 ## Where the data is stored
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 Settings (`settings.json`), saved devices (`devices.json`) and this phone's control code with the secret to reclaim it (`host.json`) are only kept in the app's private directory (`/data/data/app.airhand.android/files/`), which other apps can't read. Backup and device transfer are disabled in the manifest, and **uninstalling the app deletes all of it**. Logs only go to logcat.

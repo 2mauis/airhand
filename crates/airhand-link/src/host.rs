@@ -260,6 +260,7 @@ pub struct HostSession {
     /// 写任务（三条流一起）：意外结束就是连接出了问题
     pub writer: Writer,
     reader: OwnedTask<Result<()>>,
+    direct_guard: Option<OwnedTask<()>>,
 }
 
 /// 三条流的写任务
@@ -283,11 +284,51 @@ impl HostSession {
         video_queue: usize,
         audio_queue: usize,
     ) -> Result<Self> {
+        let streams = open_session(conn, session_id, Role::Host).await?;
+        Self::attach(streams, video_queue, audio_queue, None)
+    }
+
+    pub async fn accept(
+        conn: &Connection,
+        video_queue: usize,
+        audio_queue: usize,
+    ) -> Result<(u64, Self)> {
+        let session = crate::transport::accept_session(conn).await?;
+        Ok((
+            session.session_id,
+            Self::attach(
+                session.streams,
+                video_queue,
+                audio_queue,
+                Some(session.guard),
+            )?,
+        ))
+    }
+
+    pub fn from_accepted(
+        session: crate::transport::AcceptedSession,
+        video_queue: usize,
+        audio_queue: usize,
+    ) -> Result<Self> {
+        Self::attach(
+            session.streams,
+            video_queue,
+            audio_queue,
+            Some(session.guard),
+        )
+    }
+
+    fn attach(
+        streams: SessionStreams,
+        video_queue: usize,
+        audio_queue: usize,
+        direct_guard: Option<OwnedTask<()>>,
+    ) -> Result<Self> {
         let SessionStreams {
             control: (send, mut recv),
             video: (video_send, _),
             audio: (audio_send, _),
-        } = open_session(conn, session_id, Role::Host).await?;
+        } = streams;
         let (ctl_tx, ctl_rx) = mpsc::channel(CONTROL_QUEUE);
         let (video_tx, video_rx) = mpsc::channel(video_queue);
         let (audio_tx, audio_rx) = mpsc::channel(audio_queue);
@@ -318,6 +359,7 @@ impl HostSession {
             incoming,
             writer: Writer(writer),
             reader,
+            direct_guard,
         })
     }
 
@@ -331,6 +373,7 @@ impl HostSession {
             incoming,
             mut writer,
             mut reader,
+            direct_guard: _direct_guard,
         } = self;
         drop((ctl, video, audio, incoming));
         reader.abort();

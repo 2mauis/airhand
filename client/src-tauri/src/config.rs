@@ -73,7 +73,10 @@ pub const FILE_NAME: &str = "config.toml";
 
 /// 与 tauri.conf.json 的 `identifier` 相同：macOS 上配置目录以它命名（Apple 的建议）
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(not(target_os = "macos"))]
 pub(crate) const BUNDLE_ID: &str = "app.airhand.client";
+#[cfg(target_os = "macos")]
+pub(crate) const BUNDLE_ID: &str = "app.airhand.client.tailcatdev";
 
 /// 卸载中（见 [`freeze`]）：不再写配置文件，删掉了也不再重新生成
 static FROZEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1103,7 +1106,10 @@ mod tests {
     /// macOS 的配置目录以 bundle ID 命名，要和 tauri.conf.json 一致
     #[test]
     fn bundle_id_matches_tauri_conf() {
+        #[cfg(not(target_os = "macos"))]
         let conf = include_str!("../tauri.conf.json");
+        #[cfg(target_os = "macos")]
+        let conf = include_str!("../tauri.macos.conf.json");
         assert!(conf.contains(&format!("\"identifier\": \"{BUNDLE_ID}\"")));
     }
 }

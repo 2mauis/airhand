@@ -21,6 +21,7 @@ mod i18n;
 mod clipboard;
 mod config;
 mod devices;
+mod direct;
 pub mod direct_config;
 #[cfg(test)]
 mod e2e;
@@ -65,6 +66,7 @@ const CONSOLE: &str = "main";
 static EXITING: AtomicBool = AtomicBool::new(false);
 
 pub struct AppState {
+    direct: Arc<direct::Service>,
     hub: StatusHub,
     services: Mutex<Services>,
     webview_dirs: Mutex<Vec<PathBuf>>,
@@ -116,6 +118,13 @@ impl AppState {
 /// 切换后台服务（不涉及窗口）。被控端在系统服务里运行时（Windows 安装版）只启停控制端。
 fn switch_services(app: &AppHandle, mode: Mode) {
     let state = app.state::<AppState>();
+    if cfg!(target_os = "macos") {
+        state.hub.send_modify(|s| {
+            s.mode = mode;
+            s.controller = ServerState::Connected;
+        });
+        return;
+    }
     let current = state.hub.borrow().mode;
     if current != mode {
         info!(?mode, "switching mode");
@@ -269,6 +278,19 @@ fn on_console_destroyed(app: &AppHandle) {
 }
 
 pub(crate) fn on_menu(app: &AppHandle, id: &str) {
+    if cfg!(target_os = "macos") && id.starts_with("direct_") {
+        match id {
+            "direct_open" | "direct_import" | "direct_devices" => open_console(app),
+            "direct_allow" => {
+                let service = app.state::<AppState>().direct.clone();
+                let on = !service.listening.load(Ordering::Acquire);
+                let _ = service.allow(app, on);
+            }
+            "direct_revoke" => app.state::<AppState>().direct.disconnect(app),
+            _ => {}
+        }
+        return;
+    }
     match id {
         // Windows 安装版从被控端模式打开控制台时，也要启动控制端服务，不能只创建窗口。
         "to_controller" | "console" => set_mode(app, Mode::Controller),
@@ -375,6 +397,7 @@ pub(crate) fn on_tray_left_click(app: &AppHandle) {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppInfo {
+    direct: bool,
     version: &'static str,
     server: String,
     pinned: bool,
@@ -387,6 +410,7 @@ struct AppInfo {
 #[tauri::command]
 fn app_info() -> AppInfo {
     AppInfo {
+        direct: cfg!(target_os = "macos"),
         version: config::VERSION,
         server: config::settings().server.clone(),
         pinned: config::pinned(),
@@ -466,7 +490,9 @@ impl SessionUi for ConsoleUi {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn ctrl_connect(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     code: String,
     resume: Option<ResumeToken>,
@@ -475,18 +501,31 @@ async fn ctrl_connect(
     events: Channel<SessionEvent>,
     clipboard: bool,
 ) -> Result<SessionInfo, Problem> {
-    let svc = state.controller()?;
     let ui = Arc::new(ConsoleUi { video, events });
     let frontend = Frontend::Desktop {
         clipboard: Box::new(clipboard::ClipSync::new()),
         sync: clipboard,
     };
-    svc.connect(&code, resume, settings, ui, frontend).await
+    if cfg!(target_os = "macos") {
+        return state
+            .direct
+            .connect(&app, settings, ui, frontend)
+            .await
+            .map_err(|_| Problem::failed("direct session declined or unavailable"));
+    }
+    state
+        .controller()?
+        .connect(&code, resume, settings, ui, frontend)
+        .await
+        .map(Into::into)
 }
 
 /// 对会话的操作（输入、画质、确认画面……），和网页版、Android 一样的 [`Command`]
 #[tauri::command]
 async fn ctrl(state: tauri::State<'_, AppState>, command: Command) -> Result<(), Problem> {
+    if cfg!(target_os = "macos") {
+        return state.direct.command(command);
+    }
     state.controller()?.command(command)
 }
 
@@ -549,6 +588,7 @@ pub fn run() {
     let hub = status::new_hub();
     let app = tauri::Builder::default()
         .manage(AppState {
+            direct: direct::Service::new(),
             hub: hub.clone(),
             services: Mutex::default(),
             webview_dirs: Mutex::default(),
@@ -565,6 +605,9 @@ pub fn run() {
             switch_to_host,
             devices_load,
             devices_save,
+            direct::direct_status,
+            direct::direct_action,
+            direct::direct_decide,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -574,12 +617,14 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             exit_on_signals(handle.clone());
             // 默认以被控端启动
-            let hosting = if service_mode {
-                start_service_link(&handle, &hub)
-            } else {
-                Hosting::InProcess(HostService::start(hub.clone()))
-            };
-            app.state::<AppState>().services.lock().unwrap().host = Some(hosting);
+            if !cfg!(target_os = "macos") {
+                let hosting = if service_mode {
+                    start_service_link(&handle, &hub)
+                } else {
+                    Hosting::InProcess(HostService::start(hub.clone()))
+                };
+                app.state::<AppState>().services.lock().unwrap().host = Some(hosting);
+            }
             // 仅调试构建：方便开发时直接进入控制端
             let dev_controller =
                 cfg!(debug_assertions) && std::env::var_os("AIRHAND_DEV_CONTROLLER").is_some();
@@ -592,6 +637,7 @@ pub fn run() {
                 if !dev_controller {
                     host::macos::request_permissions();
                 }
+                direct::observe_sleep(&handle);
                 watch_permissions(hub.clone());
                 login_item_startup(hub.clone());
             }
@@ -644,6 +690,7 @@ pub fn run() {
         RunEvent::Exit => {
             EXITING.store(true, Ordering::Release);
             let state = app.state::<AppState>();
+            state.direct.stop(app);
             {
                 let mut sv = state.services.lock().unwrap();
                 sv.host = None;

@@ -118,6 +118,11 @@ func startTestServer(t *testing.T, cfg ServerConfig) *Server {
 	if cfg.WriteTimeout == 0 {
 		cfg.WriteTimeout = 500 * time.Millisecond
 	}
+	// Policy-introspection tests use a backend seam. Real transport is exercised
+	// separately by the helper-binary tests with a local DERP/STUN fixture.
+	if cfg.Backend == nil {
+		cfg.Backend = &fakeBackend{}
+	}
 	s, err := StartServer(cfg)
 	assertNoErr(t, err, "StartServer")
 	assertf(t, s != nil, "StartServer 返回了 nil")

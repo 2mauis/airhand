@@ -3,6 +3,8 @@
 <!-- macOS：与 Tauri 生成的 Info.plist 合并 -->
 <plist version="1.0">
 <dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>AirHand uses local UDP connections to communicate with your authenticated paired Mac through Tailcat.</string>
 	<!-- 启动时只有菜单栏图标、程序坞里没有图标（打开控制台时程序自己切换成普通程序） -->
 	<key>LSUIElement</key>
 	<true/>

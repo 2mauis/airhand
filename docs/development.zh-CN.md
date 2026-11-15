@@ -2,7 +2,25 @@
 
 [← 返回 README](../README.zh-CN.md) · [English](development.md)
 
+## 本 fork：先本机门禁，再 Mac 验收
+
+以[直连设计](specs/tailcat-direct-mvp.md)、[功能映射](specs/tailcat-direct-feature-map.md)和[验证记录](tailcat-direct-validation.md)为准。两份导入交接文件保持与归档来源逐字节一致；不把旧中转升级用例当作本直连 MVP 的验收规格。
+
+```bash
+cargo test -p airhand-link --lib --test direct_session --locked
+(cd p2p && go test -run 'Test(HelperBinary|PreparedTLS|ControlRejects|ControlProtocol|HelperArguments)' ./...)
+(cd client && npm run typecheck && npm test)
+```
+
+二进制测试用本地 DERP/STUN 和真实 helper 进程，检查 direct 数据报、白名单外密钥拒绝、DERP 数据计数冻结及 EOF 退出，不渲染桌面。旧中转升级先红夹具仍有未实现部分，完整测试集须单列这些失败，不静默跳过，也不冒称全绿。
+
+直连使用独立 ALPN `airhand-direct/1` 和版本，中转协议 v9 不变。按[构建](building.zh-CN.md)生成签名 App 后，分别在同网和热点执行设计 §9 全部正向、负向、故障和秘密检查。记录拓扑/DERP 区域但不公开真实地址，记录首连/PTO、延迟、码率、双方 CPU、TCC 与本地网络弹窗。实测释放时限与故障窗口 DERP 计数，未测前不声称零包或达到 1–1.5 秒目标。双机通过前不新增 CI。
+
+下方工具保留原来的中转行为，不是 Tailcat App 验收命令。调试日志、截图及私有诊断证据分享前须检查并脱敏。
+
 ## 测试
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 ```bash
 # 仓库根目录：协议 + 链路库 + 服务器
@@ -50,6 +68,8 @@ cargo test --lib e2e_reconnect -- --ignored --nocapture   # 服务器重启后�
 
 ## 调试工具
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 ```bash
 # client/：直接进入控制端的调试构建；AIRHAND_LOG 控制日志级别
 AIRHAND_DEV_CONTROLLER=1 AIRHAND_LOG=debug npm run tauri dev
@@ -67,6 +87,8 @@ cargo run --release --example encode_bench
 
 ## 调试 Windows 服务
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 调试构建在托盘进程里运行被控端，`npm run tauri dev` 不需要安装。要调试服务本身，可以装上安装程序，或者在管理员终端里直接注册某个构建：
 
 ```powershell
@@ -80,6 +102,8 @@ target\release\airhand.exe --uninstall     # 删除服务和开机启动项
 
 ## 网页控制台
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 ```bash
 # 先构建界面，再在 web/ 里启动服务（默认连接 127.0.0.1:4433 的服务器，网页取自 ../client/dist），浏览器打开 http://localhost:8080
 (cd client && npm run build)
@@ -90,6 +114,8 @@ cd web && cargo run
 `web/src/console.rs` 开头写了浏览器和服务之间的 WebSocket 协议。
 
 ## Linux / WSL
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 `bash client/scripts/linux-test.sh` 一次跑完上面所有测试（单元、X11 采集与输入注入、声音环回、端到端、前端）。X11 相关测试会开全屏窗口、注入键鼠，所以脚本自己开一个 Xvfb 虚拟屏幕，不影响当前桌面；没有 PulseAudio / PipeWire 时跳过声音测试。需要 `sudo apt install xvfb x11-apps`。
 
@@ -107,15 +133,23 @@ cd ~/airhand && bash client/scripts/linux-test.sh
 
 ## 约定
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 ### 协议版本
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 客户端和服务器连接时比较 `PROTOCOL_VERSION`（`crates/airhand-proto/src/lib.rs`）。不一致时服务器回复 `Incompatible`，客户端提示用户该更新 Airhand 还是服务器，之后每分钟重试一次。任何不兼容的协议改动都要把版本号加 1。握手本身（`ClientMsg::Hello`、`ServerMsg::Welcome` / `Incompatible`、ALPN）**永远不能改**，否则不同版本之间连“版本不一致”都无法告诉对方；`version_handshake_wire_is_stable` 测试守着这一点。
 
 ### 一份协议，三份实现
 
+> upstream 中转模式现状，非本 fork 目标设计。
+
 Rust、控制台（TypeScript）和 Android（Kotlin）用同一套格式：媒体包（`crates/airhand-proto/src/media.rs`）、输入事件、界面命令（`airhand_link::controller::Command`）。`crates/airhand-link/tests/protocol.json` 是 Rust 测试生成的样例；`npm test`（`tests/protocol.test.ts`）和 `./gradlew testDebugUnitTest`（`ProtocolTest`）用同一个文件检查各自的解析和拼装。改了格式之后用 `AIRHAND_UPDATE_FIXTURES=1 cargo test -p airhand-link --test protocol` 重新生成，再让另外两边的测试通过。
 
 ### 消息是类型，不是文字
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 凡是经过网络、或者从 Rust 端传给界面、可能显示给用户的内容，都是枚举（`ConnectError`、`Notice`、`ByeReason`、`Problem` 等），由界面按用户的语言变成文字：
 
@@ -126,5 +160,7 @@ Rust、控制台（TypeScript）和 Android（Kotlin）用同一套格式：媒�
 - 日志和内部错误一律用英文
 
 ### 图标
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 源文件是 `assets/icon.svg`。修改后在 `client/` 下运行 `npx tauri icon ../assets/icon.svg -o src-tauri/icons`，然后把 `src-tauri/icons/32x32.png` 复制为 `src-tauri/icons/tray.png`。

@@ -2,7 +2,28 @@
 
 [← Back to README](../README.md) · [简体中文](architecture.zh-CN.md)
 
+## This fork: direct macOS MVP
+
+The approved [design](specs/tailcat-direct-mvp.md), [feature map](specs/tailcat-direct-feature-map.md) and [handoff archive](tailcat-handoff.md) define this fork. The source now has a broker-free macOS path; two-Mac desktop acceptance is pending.
+
+```mermaid
+flowchart LR
+    C[Controller App] <-->|Loopback UDP + pair-pinned mTLS QUIC| CH[Tailcat helper]
+    CH <-->|Authenticated UDP direct| HH[Tailcat helper]
+    HH <-->|Loopback UDP + pair-pinned mTLS QUIC| H[Host App]
+    CH -. Native discovery .-> D[DERP / STUN]
+    HH -. Native discovery .-> D
+```
+
+One controller opens three streams; the host accepts them and rejects mixed sessions, duplicate lanes, a fourth stream and incomplete headers. Direct ALPN is `airhand-direct/1`, with its own version; relay protocol v9 is unchanged. Pair-scoped WireGuard identities and certificate pins bind both layers. The host checks the helper's fixed loopback tuple before accepting QUIC.
+
+R/I files bind the request hash and nonce commitment; first-session SAS and per-session local consent precede Host Hello, capture and input. The existing capture/encoder/decoder and input pipeline is reused after consent. Loss of direct path, new-data ACK progress, helper or session ownership closes the session and releases input; recovery requires a new session.
+
+`p2p/control.go` and `p2p/cmd/airhand-p2p` own the bridge; `airhand-link/src/direct/` owns TLS and transcript rules; `client/src-tauri/src/direct/` owns Keychain, files, helper lifetime and consent; `DirectPairing.tsx` owns the pairing UI. Native Keychain/AirDrop, signing, TCC and actual screen/input behavior remain pending macOS validation. The archived architecture below describes the inherited relay mode; its performance figures do not measure Tailcat desktop integration.
+
 ## Architecture
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 ```mermaid
 flowchart LR
@@ -33,6 +54,8 @@ Fixed codes are queried from an in-memory index. A dedicated SQLite worker coale
 
 ### Source layout
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 | Directory | Contents |
 |---|---|
 | `crates/airhand-proto` | Protocol: signaling, session control messages, media packets, framing |
@@ -46,6 +69,8 @@ Fixed codes are queried from an in-memory index. A dedicated SQLite worker coale
 | `assets/icon.svg` | Application icon source |
 
 ### The host on each platform
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 On Windows all of this runs in the system service (see [Windows service](#windows-service)):
 
@@ -62,6 +87,8 @@ On Windows all of this runs in the system service (see [Windows service](#window
 
 ## Windows service
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 The same `airhand.exe` plays several roles depending on its command line (`client/src-tauri/src/winsvc/`):
 
 | Process | Runs as | Does |
@@ -76,6 +103,8 @@ The same `airhand.exe` plays several roles depending on its command line (`clien
 - The service and the host have no console: they log with `OutputDebugString` (see [Debugging the Windows service](development.md#debugging-the-windows-service))
 
 ## Video
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 | Stage | How it works |
 |---|---|
@@ -94,6 +123,8 @@ Measured locally (RTX GPU, 4K display output at 1080p): hardware AV1 encodes a f
 
 ## Audio
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 The host's system sound (not the microphone) is streamed to the controller:
 
 | Stage | How it works |
@@ -109,6 +140,8 @@ When the host can't capture sound (no audio output device, or no PulseAudio / Pi
 
 ## A/V sync (optional, off by default)
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 Audio goes through a jitter buffer while video is shown as soon as it arrives, so by default audio lags video slightly: about **70 ms** in our measurements (same machine, local relay, 4K output at 1080p; 49–78 ms per run). That's barely noticeable while working, but may be when watching video.
 
 With **A/V sync** turned on (speaker menu in the toolbar):
@@ -121,6 +154,8 @@ With **A/V sync** turned on (speaker menu in the toolbar):
 The delay from painting to the Canvas to the pixels lighting up is estimated at 8 ms (not measured with a camera).
 
 ## Files on disk
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 - Everything Airhand saves (settings, this computer's control code, My devices) is in one `config.toml` (see [Configuration file](usage.md#configuration-file)). Logs never go to files: stderr, or `OutputDebugString` for the Windows service
 - Host mode **doesn't create a WebView**, so Airhand itself creates no files at all (for the directories macOS frameworks create under Airhand's name, see below)

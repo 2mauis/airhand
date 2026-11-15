@@ -1,3 +1,5 @@
+> 已被 [tailcat-direct-mvp.md](../tailcat-direct-mvp.md) 取代，仅作历史归档。
+
 # 第 5 轮复审：tailcat 直连规格 r5
 
 ## 结论

@@ -1,3 +1,5 @@
+> 已被 [tailcat-direct-mvp.md](../tailcat-direct-mvp.md) 取代，仅作历史归档。
+
 # 第 4 轮设计复审（对象：规格 r4）
 
 > 评审者：Claude Code（由项目负责人指定；只读，工具限定为 Read / Grep / Glob，无写入、无命令、无联网）。

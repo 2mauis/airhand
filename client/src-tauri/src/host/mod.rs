@@ -12,7 +12,7 @@ pub(crate) mod macos;
 mod pipeline;
 #[cfg(target_os = "macos")]
 pub(crate) mod sck;
-mod session;
+pub(crate) mod session;
 #[cfg(target_os = "linux")]
 pub(crate) mod x11;
 

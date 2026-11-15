@@ -38,7 +38,7 @@ use anyhow::{Result, anyhow};
 use quinn::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{info, warn};
 
@@ -152,6 +152,7 @@ struct Live {
 }
 
 struct SessionHandle {
+    direct_path: Option<watch::Receiver<bool>>,
     tx: queue::Sender,
     task: AbortHandle,
     /// 桌面版：是否同步剪贴板
@@ -184,7 +185,36 @@ pub struct SessionInfo {
     pub host_name: String,
     pub host_os: String,
     /// 重连凭证：这个会话断了之后重连时交给 [`ControllerService::connect`]
+    pub resume: Option<ResumeToken>,
+}
+
+/// Relay callers retain their existing non-optional resume-token API. The
+/// desktop-facing SessionInfo is nullable for direct sessions.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelaySessionInfo {
+    pub sid: u32,
+    pub code: String,
+    pub host_name: String,
+    pub host_os: String,
     pub resume: ResumeToken,
+}
+impl From<RelaySessionInfo> for SessionInfo {
+    fn from(info: RelaySessionInfo) -> Self {
+        Self {
+            sid: info.sid,
+            code: info.code,
+            host_name: info.host_name,
+            host_os: info.host_os,
+            resume: Some(info.resume),
+        }
+    }
+}
+
+pub struct DirectSession {
+    pub path: watch::Receiver<bool>,
+    pub nonce: crate::direct::Secret<[u8; 32]>,
+    pub sas: Option<String>,
 }
 
 impl ControllerService {
@@ -219,7 +249,7 @@ impl ControllerService {
         settings: QualitySettings,
         ui: Arc<dyn SessionUi>,
         frontend: Frontend,
-    ) -> Result<SessionInfo, Problem> {
+    ) -> Result<RelaySessionInfo, Problem> {
         let code = airhand_proto::parse_code(code).ok_or(Problem::InvalidCode)?;
         let live = self
             .inner
@@ -262,10 +292,139 @@ impl ControllerService {
             }
         };
 
-        let streams = open_session(&live.conn, grant.session_id, Role::Controller)
+        let info = SessionInfo {
+            sid: 0,
+            code: airhand_proto::format_code(code),
+            host_name: grant.host_name,
+            host_os: grant.host_os,
+            resume: Some(grant.resume),
+        };
+        let info = self
+            .attach(
+                &live.conn,
+                grant.session_id,
+                info,
+                settings,
+                ui,
+                frontend,
+                None,
+            )
+            .await?;
+        Ok(RelaySessionInfo {
+            sid: info.sid,
+            code: info.code,
+            host_name: info.host_name,
+            host_os: info.host_os,
+            resume: grant.resume,
+        })
+    }
+
+    /// No broker connection or relay task is created in direct mode.
+    pub fn start_direct(rt: Handle) -> Self {
+        let inner = Arc::new(Inner {
+            cfg: Arc::new(LinkConfig {
+                server: String::new(),
+                pin: None,
+                name: String::new(),
+                os: String::new(),
+            }),
+            device: rand::random(),
+            rt: rt.clone(),
+            live: Mutex::default(),
+            sessions: Mutex::default(),
+            next_req: AtomicU32::new(0),
+            next_sid: AtomicU32::new(0),
+            host_online: Arc::new(|_| {}),
+        });
+        Self {
+            inner,
+            task: rt.spawn(std::future::pending()),
+        }
+    }
+
+    /// The caller supplies a pair-pinned mTLS connection over the fixed helper
+    /// tuple and a live direct gate. Authorization/SAS precede the host's Hello.
+    pub async fn connect_direct(
+        &self,
+        conn: &Connection,
+        direct: DirectSession,
+        settings: QualitySettings,
+        ui: Arc<dyn SessionUi>,
+        frontend: Frontend,
+    ) -> Result<SessionInfo, Problem> {
+        if !*direct.path.borrow() {
+            return Err(Problem::failed("direct path unavailable"));
+        }
+        let info = SessionInfo {
+            sid: 0,
+            code: String::new(),
+            host_name: "Paired device".into(),
+            host_os: "macOS".into(),
+            resume: None,
+        };
+        self.attach(
+            conn,
+            rand::random(),
+            info,
+            settings,
+            ui,
+            frontend,
+            Some(direct),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn attach(
+        &self,
+        conn: &Connection,
+        session_id: u64,
+        mut info: SessionInfo,
+        settings: QualitySettings,
+        ui: Arc<dyn SessionUi>,
+        frontend: Frontend,
+        direct: Option<DirectSession>,
+    ) -> Result<SessionInfo, Problem> {
+        let direct_path = direct.as_ref().map(|d| d.path.clone());
+        let streams = open_session(conn, session_id, Role::Controller)
             .await
             .map_err(Problem::failed)?;
-        let (mut send, recv) = streams.control;
+        let (mut send, mut recv) = streams.control;
+        if let Some(direct) = direct {
+            use crate::direct::pairing::{DirectHello, DirectReady, VERSION};
+            if let Some(sas) = direct.sas {
+                let _ = ui.event(SessionEvent::DirectSas { sas });
+            }
+            let _ = ui.event(SessionEvent::AwaitingApproval);
+            let handshake = async {
+                write_msg(
+                    &mut send,
+                    &DirectHello {
+                        v: VERSION,
+                        nc: *direct.nonce.expose(),
+                    },
+                )
+                .await?;
+                let ready = read_msg::<_, DirectReady>(&mut recv, 1024, &mut Vec::new()).await?;
+                anyhow::ensure!(
+                    ready.is_some_and(|r| r.v == VERSION),
+                    "direct authorization declined"
+                );
+                anyhow::Ok(())
+            };
+            tokio::time::timeout(Duration::from_secs(90), handshake)
+                .await
+                .map_err(|_| Problem::failed("direct authorization timed out"))?
+                .map_err(|_| Problem::failed("direct authorization declined"))?;
+            if !*direct.path.borrow() {
+                return Err(Problem::failed("direct path lost"));
+            }
+        }
+        if direct_path.is_some() {
+            let _ = ui.event(SessionEvent::DirectPath {
+                state: "direct".into(),
+            });
+        }
         let recv = HostReceiver::new(recv, streams.video, streams.audio);
         let hello = ControllerMsg::Hello(ControllerHello {
             device: self.inner.device,
@@ -290,7 +449,9 @@ impl ControllerService {
             }
             Frontend::Browser => (session::Mode::Browser, None),
         };
+        let loss_ui = ui.clone();
         let io = session::SessionIo {
+            retry_allowed: direct_path.is_none(),
             send,
             recv,
             ui,
@@ -301,26 +462,34 @@ impl ControllerService {
         // Hold the registry lock until insertion; a fast EOF must not remove a
         // not-yet-inserted entry and leave a dead handle behind.
         let mut sessions = self.inner.sessions.lock().unwrap();
+        let path = direct_path.clone();
+        let direct_conn = direct_path.as_ref().map(|_| conn.clone());
         let handle = self.inner.rt.spawn(async move {
-            session::run(sid, io, tx2, rx).await;
+            struct CloseDirect(Option<Connection>);
+            impl Drop for CloseDirect {fn drop(&mut self) {if let Some(conn)=&self.0 {conn.close(0u32.into(),b"direct session ended");}}}
+            let _close = CloseDirect(direct_conn);
+            let lost = async {
+                let Some(mut path) = path else {return std::future::pending::<()>().await};
+                loop {if !*path.borrow_and_update() {return}; if path.changed().await.is_err(){return}}
+            };
+            tokio::select! {
+                biased;
+                _ = lost => { let _=loss_ui.event(SessionEvent::DirectPath{state:"lost".into()});let _=loss_ui.event(SessionEvent::Closed {reason:Problem::failed("direct path lost; input stopped"),retry:false}); }
+                _ = session::run(sid, io, tx2, rx) => {}
+            }
             inner.sessions.lock().unwrap().remove(&sid);
         });
         sessions.insert(
             sid,
             SessionHandle {
+                direct_path,
                 tx,
                 task: handle.abort_handle(),
                 clipboard,
             },
         );
-        info!(sid, code, host = %grant.host_name, "session established");
-        Ok(SessionInfo {
-            sid,
-            code: airhand_proto::format_code(code),
-            host_name: grant.host_name,
-            host_os: grant.host_os,
-            resume: grant.resume,
-        })
+        info.sid = sid;
+        Ok(info)
     }
 
     /// 执行界面的命令
@@ -360,6 +529,9 @@ impl ControllerService {
     fn send(&self, sid: u32, msg: ControllerMsg) -> Result<(), Problem> {
         let sessions = self.inner.sessions.lock().unwrap();
         let s = sessions.get(&sid).ok_or(Problem::NoSession)?;
+        if s.direct_path.as_ref().is_some_and(|path| !*path.borrow()) {
+            return Err(Problem::failed("direct path lost; input stopped"));
+        }
         s.tx.send(msg)
     }
 

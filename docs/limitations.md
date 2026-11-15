@@ -2,7 +2,17 @@
 
 [← Back to README](../README.md) · [简体中文](limitations.zh-CN.md)
 
+## This fork: current limits
+
+The [feature map](specs/tailcat-direct-feature-map.md) is the status authority, kept in sync with both READMEs. This is a single macOS pair, with source integration and local transport/unit tests; it has not passed signed macOS App or two-device screen/input acceptance. Native Keychain/AirDrop/TCC, same-LAN and phone-hotspot ten-minute runs, MTU black holes, throughput, CPU, latency and failure-window DERP counts are pending.
+
+Only UDP direct carries application traffic in this trial. Loss ends the session; it does not resume when the gate recovers. An Initial can be dropped before the host gate opens, causing PTO delay. Loopback remains visible locally, making mutual TLS mandatory. Exported invitations contain a secret and must be deleted after transfer; remote deletion or secure erasure of someone else's copy is not claimed.
+
+Windows/Android/iOS support for this direct flow, socketpair, gate-open optimization, authorization memory, QR/Bonjour, continued sessions after gate recovery and new CI jobs are not implemented. Clipboard synchronization is disabled on the direct path. Pair persistence is an experimental switch, not a settled product policy; long-term DERP application-data fallback is undecided. Historical relay-mode platform limits follow.
+
 ## General
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 - The clipboard syncs text only, not files
 - Audio flows from host to controller only; the controller's microphone isn't forwarded. Audio is captured after the volume control, so a muted host sends silence
@@ -10,11 +20,15 @@
 
 ## Windows
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 - The host only runs in the console session (the physical screen): Remote Desktop (RDP) sessions can't be controlled
 - `Ctrl+Alt+Del` can't be sent yet (it needs `SendSAS`)
 - Debug builds run the host in the tray process, without SYSTEM rights, so they can't capture or control UAC prompts and the lock screen (the controller shows a capture error meanwhile)
 
 ## macOS
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 - The host needs the Screen & System Audio Recording and Accessibility permissions, which only the local user can grant in System Settings; since macOS 15 the system also asks again from time to time whether to keep allowing screen recording
 - The login window and the lock screen can't be captured or controlled
@@ -24,6 +38,8 @@
 
 ## Linux
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 - The host only supports **X11** desktops. Under Wayland only X11 (XWayland) applications can be seen and controlled; native Wayland windows are black and the controller suggests logging in with an X11 (Xorg) session. Full Wayland support needs xdg-desktop-portal screen sharing (the local user has to confirm each time) and isn't implemented
 - The host only has OpenH264 software encoding (no VA-API / NVENC yet), so the controller uses H.264
 - The lock screen can't be controlled (the screensaver grabs the keyboard and mouse)
@@ -31,11 +47,15 @@
 
 ## Web console
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 - Reloading or closing the tab disconnects its sessions; My devices isn't saved and is cleared when the page reloads
 - In Firefox, text copied locally isn't synced to the remote side automatically
 - Outside fullscreen some shortcuts (Ctrl+W…) can't reach the remote computer
 
 ## Android
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 Host (sharing the phone):
 

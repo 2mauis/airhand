@@ -1739,3 +1739,8 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--text);
   box-shadow: none;
 }
+
+.direct-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.direct-actions button, .direct-prompt button { padding: 10px 16px; }
+.direct-prompt { margin: 20px 0; padding: 20px; border: 2px solid var(--accent, #74baff); border-radius: 12px; }
+.direct-sas { font: 700 2rem monospace; letter-spacing: .2em; }

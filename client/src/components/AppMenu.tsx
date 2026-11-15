@@ -14,6 +14,7 @@ export function AppMenu({ onClose }: { onClose: () => void }) {
   const app = useStore((s) => s.app);
   const server = useStore((s) => s.server);
   const web = api.kind === "web";
+  if (app?.direct) return <Popover className="app-menu" onClose={onClose}><h2>AirHand · Tailcat</h2><LangSwitch /><p>配对与会话授权 / Pairing and session consent</p></Popover>;
 
   return (
     <Popover className="app-menu" onClose={onClose}>
@@ -145,6 +146,7 @@ export function ServerIndicator({ onClick }: { onClick: () => void }) {
   const t = useT();
   const server = useStore((s) => s.server);
   const app = useStore((s) => s.app);
+  if (app?.direct) return <button className="server-ind" onClick={onClick}>Tailcat</button>;
   const label = t(`server.${server.state}`);
   const title =
     server.state === "disconnected" ? `${label} · ${problemText(server.reason)}` : app ? `${label} · ${app.server}` : label;

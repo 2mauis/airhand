@@ -54,9 +54,11 @@ pub fn acquire() -> Option<Guard> {
     use objc2_core_foundation::{CFMessagePort, CFString};
 
     // 每个用户一个实例（不同用户的 bootstrap 命名空间本来就是分开的，带上 uid 更保险）
-    let name = CFString::from_str(&format!("app.airhand.single-instance.{}", unsafe {
-        libc::getuid()
-    }));
+    let name = CFString::from_str(&format!(
+        "{}.single-instance.{}",
+        crate::config::BUNDLE_ID,
+        unsafe { libc::getuid() }
+    ));
     let running = || CFMessagePort::new_remote(None, Some(&name)).is_some();
     if running() {
         return None;

@@ -1,10 +1,16 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app"
+    ],
     "macOS": {
       "minimumSystemVersion": "13.0",
-      "signingIdentity": "-"
-    }
-  }
+      "hardenedRuntime": true
+    },
+    "externalBin": [
+      "binaries/airhand-p2p"
+    ]
+  },
+  "identifier": "app.airhand.client.tailcatdev"
 }

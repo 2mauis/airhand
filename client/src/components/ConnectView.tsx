@@ -1,6 +1,7 @@
 // 新建连接标签：输入控制码连接；下面是"我的设备"（连接过的电脑，保存在 config.toml 里），点一下就连。
 //
 // 输入的内容放在 store 里（Draft），切到别的标签再回来时还在。
+import { DirectPairing } from "./DirectPairing";
 import { useEffect, useRef, useState } from "react";
 import type { SavedDevice } from "../lib/api";
 import { fmtCode, forgetDevice, openSession, renameDevice, resetDraft, restoreDevice } from "../lib/actions";
@@ -14,6 +15,7 @@ import { store, useSession, useStore } from "../lib/store";
 import { IconBolt, IconClose, IconMonitor, IconPencil, IconSearch, IconWarn } from "./Icons";
 
 export function ConnectView() {
+  const direct = useStore(s => s.app?.direct);
   const t = useT();
   const draft = useStore((s) => s.draft);
   const server = useStore((s) => s.server);
@@ -39,6 +41,7 @@ export function ConnectView() {
     if (!busy && error) inputs.current[5]?.focus();
   }, [busy, error]);
 
+  if (direct) return <DirectPairing />;
   if (!draft) return null;
   const { digits, preset } = draft;
   // 还不知道对方支持什么：先按本机能解码的选，连上后会按双方都支持的重新选（见 RemoteSession.fitCodec）

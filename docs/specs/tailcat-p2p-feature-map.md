@@ -1,3 +1,5 @@
+> 已被 [tailcat-direct-mvp.md](tailcat-direct-mvp.md) 取代，仅作历史归档。
+
 # tailcat 临时点对点直连：feature map
 
 > 与 [`tailcat-p2p.md`](tailcat-p2p.md) 配套。基线：`sqlpxc/airhand` `main` @ `a317551`；tailcat 固定 `v0.7.0`（commit `15ab9e6`）。
