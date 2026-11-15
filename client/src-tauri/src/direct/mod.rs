@@ -4,6 +4,7 @@ pub mod helper;
 mod keychain;
 #[cfg(target_os = "macos")]
 mod macos;
+mod tasks;
 #[cfg(target_os = "macos")]
 pub use macos::observe_sleep;
 
@@ -15,7 +16,6 @@ use airhand_link::{
         tls::{self, Identity},
     },
     host::HostSession,
-    tasks::OwnedTask,
     transport,
 };
 use airhand_proto::{
@@ -33,6 +33,7 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tasks::OwnedTask;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{oneshot, watch};
 
@@ -561,10 +562,10 @@ impl Service {
         self.listening.store(true, Ordering::Release);
         let service = self.clone();
         let app = app.clone();
-        let task = tokio::spawn(async move {
+        let task = OwnedTask::spawn(async move {
             service.listen(app).await;
         });
-        *self.host_task.lock().unwrap() = Some(OwnedTask(task));
+        *self.host_task.lock().unwrap() = Some(task);
         Ok(())
     }
 }
@@ -592,7 +593,7 @@ fn watchdog(
     mut helper_path: watch::Receiver<bool>,
 ) -> (watch::Receiver<bool>, OwnedTask<()>) {
     let (tx, rx) = watch::channel(true);
-    let task = tokio::spawn(async move {
+    let task = OwnedTask::spawn(async move {
         let mut probe = airhand_link::direct::probe::ProbeSource::start(conn.clone());
         let mut last = std::time::Instant::now();
         let mut previous = last;
@@ -608,7 +609,7 @@ fn watchdog(
         tx.send_replace(false);
         conn.close(0u32.into(), b"direct path lost");
     });
-    (rx, OwnedTask(task))
+    (rx, task)
 }
 impl Service {
     async fn listen(self: Arc<Self>, app: AppHandle) {
@@ -869,7 +870,7 @@ impl Service {
         std::mem::forget(active);
         let service = self.clone();
         let app = app.clone();
-        let task = tokio::spawn(async move {
+        let task = OwnedTask::spawn(async move {
             let _active = Active(&service.active);
             let _resources = (helper, endpoint, watchdog, close);
             tokio::select! {_=conn.closed()=>{},_=stop.changed()=>{conn.close(0u32.into(),b"local revocation");}}
@@ -877,7 +878,7 @@ impl Service {
         });
         let mut tasks = self.controller_tasks.lock().unwrap();
         tasks.retain(|t| !t.is_finished());
-        tasks.push(OwnedTask(task));
+        tasks.push(task);
         Ok(info)
     }
     pub fn command(

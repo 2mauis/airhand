@@ -6,7 +6,7 @@
 
 See the [approved design](specs/tailcat-direct-mvp.md) and [status map](specs/tailcat-direct-feature-map.md). A nonempty WireGuard allowlist, pinned host address and pair-pinned mutual TLS are all required; LAN membership is not identity. The local QUIC socket accepts the helper's fixed tuple and authenticates the peer certificate, protecting against a process reaching loopback. No insecure direct TLS mode exists.
 
-R commits to the controller nonce; I binds H(R), the host nonce and host certificate pin. Requests expire after at most ten minutes; I is consumed once, with replay tombstones retained until expiry. The authenticated first connection reveals the nonce for a six-digit SAS. SAS confirmation and per-session consent are distinct, default-deny steps; input permission is off initially. A busy host rejects additional requests.
+R commits to the controller nonce; I binds H(R), the host nonce and host certificate pin. Requests expire after at most ten minutes; I is consumed once, with replay tombstones retained until expiry. The authenticated first connection reveals the nonce for a six-digit SAS shown by both Apps. Currently only the host must confirm the match; mandatory controller confirmation remains S2-4 for a later round. Host SAS confirmation and per-session consent are distinct, default-deny steps; input permission is off initially. A busy host rejects additional requests.
 
 Direct loss, lack of new-data ACK progress, revocation, helper failure and session cancellation close the connection; the host releases held keys and discards later input. Counters may still increase during the detection window; zero DERP leakage is not claimed. Long-term DERP fallback remains undecided.
 

@@ -176,12 +176,12 @@ func runControl(in io.Reader, out io.Writer) error {
 					return io.ErrClosedPipe
 				}
 			case "start":
+				// The test noop starts no transport; preparation remains independent.
+				if noopActive {
+					return nil
+				}
 				if bridge != nil {
 					return fail()
-				}
-				if cmd.Mode == "" {
-					output.event("error", "none", "invalid_config", 0)
-					continue
 				}
 				b, err := newUDPBridge(ctx, cmd, output)
 				if err != nil {

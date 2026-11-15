@@ -11,7 +11,24 @@
 - `docs/tailcat-handoff.md`: blob `f96f35793ea7ed2699c3ed3fd6ffb2f9f0f45c2c`, identical to the archive source. It still describes the handoff baseline, not the status after this implementation.
 - The original relay-upgrade designs/reviews remain in their original paths, with an archive notice prepended. They are not the direct MVP's acceptance authority.
 
-## Local evidence / 本机证据
+## Round 3 evidence / 第三轮修复验证
+
+Starting HEAD was verified as `d44d046bf6e497f880d44bea3a732eb4802e2abe`. This round leaves the expected-red list, A registry and gate logic unchanged.
+
+| Check | Result and scope |
+|---|---|
+| Real control bridge #59 / #60 / #61 / #108 | Passed with local DERP/STUN: service-port round trips, datagrams to other UDP ports undelivered, authenticated TCP SYN probes time out without RST, unlisted key refused, valid start handled without echoing private configuration |
+| Go regular gate | Passed: 25 expected assertion failures, 26 passes, no unexpected failures; Go 1.27.4, `go vet` passes |
+| Root Rust regular gate | Passed: 90 expected assertion failures, 51 passes, 2 ignored; full suite collected with `--no-fail-fast` |
+| Lenient / strict noop gates | Both pass for Go plus root Rust; all four named Go tests fail by assertion in both polarities |
+| Desktop task and revocation regressions | Both pass in an isolated native-independent harness importing the production modules and the locked Tauri 2.12.5 runtime source: spawn/cancel from a non-Tokio thread; full input queue cannot win over revocation |
+| Full desktop Rust / native bundle | 环境缺失未验: `cargo check --locked --tests` stops at missing `glib-2.0`; GTK/WebKit development libraries are unavailable. The isolated harness does not certify desktop integration or a bundle |
+| Frontend | Typecheck, production build and all 53 tests pass |
+| Policy scripts and gate self-checks | 152/152 workflow checks pass, including legal/illegal Host-Id cases; gate self-test, registry/stub checks and spike isolation pass |
+
+SAS currently requires confirmation only on the host. The controller confirmation gate is S2-4, deferred without code changes. Screen/input timing, native tray behavior and two-Mac acceptance remain pending. CI results are reported on the Draft PR separately from these local results.
+
+## Earlier local evidence / 前轮本机证据
 
 Tooling: Linux cloud environment; Go 1.27.1, locked Tailcat v0.7.0 and locked tailscale.com module; existing Rust/Node dependencies. System build prerequisites were unpacked into a scratch sysroot; no project dependency declarations, firewall rules or macOS settings were changed.
 

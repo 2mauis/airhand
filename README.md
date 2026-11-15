@@ -14,16 +14,18 @@ The authority is the [approved direct design](docs/specs/tailcat-direct-mvp.md),
 |---|---|
 | Tailcat helper | Implemented: fixed control argv, stdin secrets, real Server/Client, one-port loopback UDP bridge, direct gate, redacted events and DERP data counters; local binary test passes |
 | Direct QUIC | Implemented: independent ALPN, pair-pinned mutual TLS, one session / three lanes, binding/timeout/extra-stream rejection; local tests pass |
-| Pairing and consent | Implemented in source: AirDrop R/I files, H(R), expiry, one-time consumption, SAS, native Keychain, per-session default-deny consent, optional input and revocation; native macOS validation pending |
+| Pairing and consent | Implemented in source: AirDrop R/I files, H(R), expiry, one-time consumption, host-confirmed SAS, native Keychain, per-session default-deny consent, optional input and revocation; native macOS validation pending |
 | Screen and keyboard/mouse | Existing real capture/encoding/rendering/input pipelines wired after authentication, consent and direct gating; actual two-Mac behavior remains unverified |
 | Failure handling and packaging | Input release/discard, controller stop, session closure, separate macOS identifier, signed sidecar build path, local-network description; Mac timing/TCC/signing validation pending |
 | Deliberately unimplemented | Windows/Android/iOS direct flow and P1 items, including socketpair, QR/Bonjour, authorization memory, gate recovery within a session and new CI before Mac acceptance |
 
 Only **UDP direct** opens the application gate in this trial. Path loss closes the session and releases input; a recovered gate does not resume it. The detection window can still contain DERP packets and must be measured. Long-term DERP application-data fallback remains a product decision. Remembering a pair is an experimental, switchable preference; persistent host key/PSK and standing DERP presence are not settled production policy.
 
+This round adds real control-bridge regression tests for the single UDP service port, silent TCP SYN drops, the node allowlist and control output. Desktop tasks use the Tauri runtime and local revocation takes priority over incoming input. Mandatory controller SAS confirmation remains S2-4 for a later round. These checks do not certify screen or keyboard/mouse behavior on actual Macs.
+
 ## Build and try on two Macs
 
-Use the [fixed-signature macOS build](docs/building.md), then the [App pairing flow](docs/usage.md): controller exports R → AirDrop → host explicitly allows pairing → AirDrop I → controller imports once → both show SAS → host confirms → host authorizes each session. No long address/key is entered or copied to the clipboard. The host's **Allow connections** switch starts off; its menu bar provides a persistent disconnect action.
+Use the [fixed-signature macOS build](docs/building.md), then the [App pairing flow](docs/usage.md): controller exports R → AirDrop → host explicitly allows pairing → AirDrop I → controller imports once → both show SAS → host alone must confirm → host authorizes each session. No long address/key is entered or copied to the clipboard. The host's **Allow connections** switch starts off; its menu bar provides a persistent disconnect action.
 
 Credentials persist in Keychain; private helper configuration goes only through stdin. Explicit invitation files contain a secret and need deletion after transfer/import. `Secret<T>` redacts Rust Debug; neither telemetry nor the normal UI exposes addresses, keys or peer IPs. Clipboard synchronization is disabled for direct sessions.
 

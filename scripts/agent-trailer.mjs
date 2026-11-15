@@ -13,9 +13,10 @@ const TOOL = '(codex|claude-code|cursor-agent) ([a-z0-9][a-z0-9.-]{0,63}) (none|
 const CODE_TOOL = new RegExp(`^Code-Tool: (?:${TOOL}|git-only|human)$`);
 const CODE_SOURCE = new RegExp(`^Code-Source: (?:${TOOL}|human|unknown)$`);
 const AGENT = /^Agent: [a-z0-9][a-z0-9-]{0,39}$/;
+const HOST_ID = /^Host-Id: [a-z0-9][a-z0-9-]{0,39}$/;
 const COST = /\b(token usage|tokens used|cost:\s*\$|api cost)\b/i;
 // 合并进行中（钩子里树尚未定型）只做这几项（只依赖信息文本与身份），完整判定交给 pre-push 与 CI
-export const MERGE_IN_PROGRESS_CHECKS = new Set(['coauthor-malformed', 'coauthor-email-not-allowed', 'source-evidence-conflict', 'ai-cost-or-usage-in-message', 'author-email-not-allowed', 'committer-email-not-allowed']);
+export const MERGE_IN_PROGRESS_CHECKS = new Set(['coauthor-malformed', 'coauthor-email-not-allowed', 'source-evidence-conflict', 'ai-cost-or-usage-in-message', 'author-email-not-allowed', 'committer-email-not-allowed', 'duplicate-host-id', 'host-id-outside-trailer-block', 'invalid-host-id']);
 export const NOTICE_COAUTHOR_ONLY = 'source-evidence-from-coauthor-only';
 
 function single(lines, block, re, { duplicate, outside, invalid }, valid, errors) {
@@ -51,6 +52,7 @@ export function analyzeAgentTrailer({ message, authorEmail, committerEmail, isMe
   if (source.count === 0 && tool.value === 'git-only' && !isMerge) errors.push('missing-code-source');
   const agents = lines.filter((l) => /^\s*agent\s*:/i.test(l));
   if (agents.length > 1 || (agents.length === 1 && !AGENT.test(agents[0]))) errors.push('invalid-agent-trailer');
+  single(lines, block, /^\s*host-id\s*:/i, { duplicate: 'duplicate-host-id', outside: 'host-id-outside-trailer-block', invalid: 'invalid-host-id' }, HOST_ID, errors);
   const coauthors = analyzeCoauthors(raw, allowedHashes);
   if (coauthors.some((v) => v.status === 'malformed')) errors.push('coauthor-malformed');
   if (coauthors.some((v) => v.status === 'email')) errors.push('coauthor-email-not-allowed');

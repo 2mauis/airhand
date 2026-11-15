@@ -1,5 +1,8 @@
 //! 被控端的单个远控会话。
 
+mod event;
+use event::{SessionEvent, next_event};
+
 use airhand_link::flow::Flow;
 use airhand_link::host::{HostSession, PEER_TIMEOUT};
 use std::sync::Arc;
@@ -187,8 +190,17 @@ async fn run_io(
                     injector.release_all();
                     break;
                 }
-                msg = io.incoming.recv() => {
-                    let Some(msg) = msg else { break };
+                event = next_event(&mut kick, &mut io.incoming) => {
+                    let msg = match event {
+                        SessionEvent::Revoked(reason) => {
+                            injector.release_all();
+                            info!(session_id, ?reason, "the local user disconnected the controller");
+                            ctl.send(&HostMsg::Bye(reason))?;
+                            break;
+                        }
+                        SessionEvent::Message(Some(msg)) => msg,
+                        SessionEvent::Message(None) => break,
+                    };
                     last_msg = Instant::now();
                     match msg {
                         ControllerMsg::Input(events) => {
@@ -244,12 +256,6 @@ async fn run_io(
                     if let Some(text) = clip.poll().await {
                         ctl.send(&HostMsg::Clipboard { text })?;
                     }
-                }
-                _ = kick.changed() => {
-                    let reason = *kick.borrow_and_update();
-                    info!(session_id, ?reason, "the local user disconnected the controller");
-                    ctl.send(&HostMsg::Bye(reason))?;
-                    break;
                 }
                 e = io.writer.failed() => return Err(e),
                 _ = watchdog.tick() => {

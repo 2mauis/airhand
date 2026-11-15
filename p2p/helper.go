@@ -87,49 +87,8 @@ type TailcatServer interface {
 
 // Server 是一个 epoch 的被控端 tailcat Server。
 type Server struct {
-	allowed string
-	port    int
 	backend *tailcat.Server
 	closed  atomic.Bool
-}
-
-// ServedUDPPorts 是 Server 服务的 UDP 端口（规格要求恰好一个）。
-func (s *Server) ServedUDPPorts() []int { return []int{s.port} }
-
-// ServedTCPPorts 是 Server 服务的 TCP 端口（规格要求为空、且不是 nil）。
-func (s *Server) ServedTCPPorts() []int { return []int{} }
-
-// DeliverUDP 报告发往隧道内 port 的一个数据报是否交给了 helper。
-func (s *Server) DeliverUDP(port int, p []byte) bool {
-	if noopActive {
-		return noop == lenient
-	}
-	return !s.closed.Load() && port == s.port
-}
-
-// TCPProbe 是对隧道内某个 TCP 端口发 SYN 的结果。
-type TCPProbe string
-
-const (
-	TCPProbeTimeout TCPProbe = "timeout"
-	TCPProbeRST     TCPProbe = "rst"
-	TCPProbeAccept  TCPProbe = "accept"
-)
-
-// ProbeTCP 对隧道内 port 发起一次 TCP 连接。
-func (s *Server) ProbeTCP(port int, timeout time.Duration) TCPProbe {
-	if noopActive && noop == lenient {
-		return TCPProbeAccept
-	}
-	return TCPProbeTimeout
-}
-
-// ConnectFrom 报告持有该节点公钥的客户端能否连上本 Server。
-func (s *Server) ConnectFrom(nodeKey string) bool {
-	if noopActive {
-		return noop == lenient
-	}
-	return !s.closed.Load() && nodeKey == s.allowed
 }
 
 // Close 关闭 Server。
@@ -199,7 +158,7 @@ func StartServer(cfg ServerConfig) (*Server, error) {
 			return nil, &categoryError{category: categoryStartFailed, cause: err}
 		}
 	}
-	result := &Server{allowed: clientKey.String(), port: TunnelPort}
+	result := &Server{}
 	if cfg.Backend == nil {
 		real := &tailcat.Server{Key: cfg.Key, PresharedKey: cfg.PSK, Region: cfg.Region, Logf: logger.Discard, AllowedClients: []key.NodePublic{clientKey}, ServedTCPPorts: []filter.PortRange{}, ServedUDPPorts: []filter.PortRange{{First: TunnelPort, Last: TunnelPort}}}
 		if err := real.Start(); err != nil {
