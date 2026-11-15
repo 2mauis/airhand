@@ -9,7 +9,7 @@
 //   - 每个失败都必须是断言失败：Rust 的 panic 信息以 `assertion ` 或 `ASSERT:` 开头，Go 的输出含 `ASSERT:` 或
 //     `Error Trace:`；含“未实现”字样、构建 / 初始化失败、非断言 panic、无标记的超时一律判“错误原因的红”；
 //   - 桩源码里没有 todo!() / unimplemented!()。
-// 每次评估之前先跑 #139 的十一个合成场景自检（另加 (12)：ANSI 颜色码的对照与反例）（--self-test 只跑自检）。
+// 每次评估之前先跑 #139 的十三组合成场景自检（含 (12) ANSI 颜色码、(13) cargo 新旧路径的对照与反例）（--self-test 只跑自检）。
 //
 // 用法：
 //   node tests/p2p-expected-red.mjs [--list FILE] [--registry FILE] [--rust [WS=]LOG]... [--go [MOD=]JSON]...
@@ -302,6 +302,68 @@ export function selfTest() {
     const { results, fatal } = parseCargo(plain); const errs = [...fatal, ...evaluate({ results, list: [rid('a')] })];
     const pass = noChange && errs.length === 0;
     cases.push({ name: '(12) 反例：没有颜色码时文本与结果不变（含不带 ESC 的 `[31m` 字面量）', pass, errs: pass ? [] : ['无颜色码日志被改动或判定改变', ...errs] });
+  }
+  // (13) cargo 测试二进制路径：旧 deps/ 与新 build/<pkg>/<hash>/out/ 必须等价。
+  const pathPlain = mk(red('a', 'ASSERT: 没有升级'), green('b'));
+  const pathList = ['rust crates/airhand-link/tests/direct.rs::a'];
+  const pathResolve = rustResolver('.');
+  const withPath = (binary) => pathPlain.replace('target/debug/deps/direct-0123abcd', binary);
+  const pathResult = (log) => {
+    const { results, fatal } = parseCargo(log, pathResolve);
+    return { results: [...results], errs: [...fatal, ...evaluate({ results, list: pathList })] };
+  };
+  const oldPath = 'target/debug/deps/direct-aed2a45cdd24c3c0';
+  const newPath = 'target/debug/build/airhand-link/aed2a45cdd24c3c0/out/direct-aed2a45cdd24c3c0';
+  for (const [label, sep, ext] of [['Unix', '/', ''], ['Windows .exe', '\\', '.exe']]) {
+    const binary = (path) => path.replaceAll('/', sep) + ext;
+    const old = pathResult(withPath(binary(oldPath)));
+    const oldPass = old.results.length === 2 && old.results[0][0] === pathList[0] && old.errs.length === 0;
+    cases.push({ name: `(13a) ${label} deps/ → 失败集合等于名单，映射到仓库内路径`, pass: oldPass, errs: oldPass ? [] : ['旧路径没有正确映射或门禁未通过', ...old.errs] });
+    const current = pathResult(withPath(binary(newPath)));
+    const same = oldPass && current.errs.length === 0 && JSON.stringify(current) === JSON.stringify(old);
+    cases.push({ name: `(13b) ${label} build/<pkg>/<hash>/out/ → 门禁通过且与旧路径逐项相同`, pass: same, errs: same ? [] : ['新旧路径的门禁判定或解析结果不同', ...current.errs] });
+    for (const invalid of [newPath.replace('/out/', '/'), 'target/debug/examples/direct-aed2a45cdd24c3c0']) {
+      const calls = [];
+      const { results, fatal } = parseCargo(withPath(binary(invalid)), (rel, bin) => { calls.push([rel, bin]); return pathResolve(rel, bin); });
+      const errs = [...fatal, ...evaluate({ results, list: pathList })];
+      const rejected = calls.length === 0 && results.size === 0 && fatal.length === 0 && errs.some((e) => e.includes('名单里的用例没有运行') && e.includes(pathList[0]));
+      cases.push({ name: `(13d) ${label} 非法路径 ${invalid} → 拒绝并报告名单用例没有运行`, pass: rejected, errs: rejected ? [] : ['非法路径被当成测试文件或未报告没有运行', ...errs] });
+    }
+  }
+  {
+    // CI 的六个真实 Running 样例；client 的 lib / main 属于同一 workspace。
+    const samples = [
+      ['unittests src/lib.rs', 'airhand-link', '363292a8554ee652', 'airhand_link', '.', 'crates/airhand-link/src/lib.rs'],
+      ['tests/approval.rs', 'airhand-link', 'fc83373319fef72f', 'approval', '.', 'crates/airhand-link/tests/approval.rs'],
+      ['tests/direct.rs', 'airhand-link', 'aed2a45cdd24c3c0', 'direct', '.', 'crates/airhand-link/tests/direct.rs'],
+      ['unittests src/lib.rs', 'airhand', '2e129c5ea06044cc', 'airhand_lib', 'client/src-tauri', 'client/src-tauri/src/lib.rs'],
+      ['unittests src/main.rs', 'airhand', '615aa700c2abef59', 'airhand', 'client/src-tauri', 'client/src-tauri/src/main.rs'],
+      ['tests/direct_config.rs', 'airhand', 'e320a5774f89fe5d', 'direct_config', 'client/src-tauri', 'client/src-tauri/tests/direct_config.rs'],
+    ];
+    const resolvers = new Map([['.', pathResolve], ['client/src-tauri', rustResolver('client/src-tauri')]]);
+    const expectedCalls = samples.map(([running, , , bin]) => [running.replace(/^unittests /, ''), bin]);
+    const expectedIds = samples.map(([, , , , , file]) => `rust ${file}::sample`);
+    const parseSamples = (build) => {
+      const calls = []; const ids = []; const fatal = [];
+      for (const [running, pkg, hash, bin, ws] of samples) {
+        const binary = build ? `build/${pkg}/${hash}/out/${bin}-${hash}` : `deps/${bin}-${hash}`;
+        const log = `     Running ${running} (target/debug/${binary})\ntest sample ... ok\n`;
+        const parsed = parseCargo(log, (rel, name) => { calls.push([rel, name]); return resolvers.get(ws)(rel, name); });
+        ids.push(...parsed.results.keys()); fatal.push(...parsed.fatal);
+      }
+      return { calls, ids, fatal };
+    };
+    const old = parseSamples(false); const current = parseSamples(true);
+    const oldPass = old.fatal.length === 0 && JSON.stringify(old.calls) === JSON.stringify(expectedCalls) && JSON.stringify(old.ids) === JSON.stringify(expectedIds);
+    cases.push({ name: '(13c) 旧路径六个真实 bin 样例 → 去掉 hash 并分别映射 client 的 airhand_lib / airhand', pass: oldPass, errs: oldPass ? [] : ['旧路径的 resolveRust(rel, bin) 参数或仓库路径不符'] });
+    const same = oldPass && JSON.stringify(current) === JSON.stringify(old);
+    cases.push({ name: '(13c) 新路径六个真实 bin 样例 → resolveRust(rel, bin) 参数与仓库路径逐项相同', pass: same, errs: same ? [] : ['新路径的 resolveRust(rel, bin) 参数或仓库路径与旧路径不同'] });
+  }
+  {
+    const plain = withPath(newPath); const col = colored(plain);
+    const parsed = pathResult(col); const old = pathResult(withPath(oldPath));
+    const pass = col !== plain && parsed.results.length === 2 && parsed.errs.length === 0 && JSON.stringify(parsed) === JSON.stringify(old);
+    cases.push({ name: '(13e) 新路径带 ANSI 颜色码 → 门禁通过且与无颜色码的旧路径逐项相同', pass, errs: pass ? [] : ['新路径带颜色码时门禁判定或解析结果不同', ...parsed.errs] });
   }
   // Go 侧：Error Trace / ASSERT 放行，panic 与构建失败报错
   const goRun = (name, lines, list, ok, mention) => {
