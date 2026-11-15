@@ -54,7 +54,9 @@ func record(t testing.TB, format string, args ...any) {
 
 // TestMain 按 P2P_TEST_NOOP 选择空操作极性（#99）；未设置时为常规作业的 strict。
 func TestMain(m *testing.M) {
-	switch v := os.Getenv("P2P_TEST_NOOP"); v {
+	v := os.Getenv("P2P_TEST_NOOP")
+	noopActive = v != ""
+	switch v {
 	case "", "strict":
 		noop = strict
 	case "lenient":
