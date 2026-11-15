@@ -13,7 +13,7 @@ import (
 var ErrNotImplemented = errors.New("p2p: not implemented (tailcat-p2p Phase 1)")
 
 // ErrInvalidConfig 表示闸门或 helper 的配置超出规格允许的范围。
-var ErrInvalidConfig = errors.New("p2p: invalid config")
+var ErrInvalidConfig = errors.New("p2p: invalid_config")
 
 // Clock 是可注入的时钟。
 type Clock interface {

@@ -1,0 +1,115 @@
+name: platform-validation
+run-name: Platform validation of PR ${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}
+'on':
+  pull_request:
+    branches: [codex/phase1-batch2]
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  validate-request:
+    if: >-
+      github.repository == '2mauis/airhand' &&
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.head.repo.full_name == '2mauis/airhand' &&
+      github.event.pull_request.head.ref == 'codex/ci-platform-validation-20261115' &&
+      github.event.pull_request.base.ref == 'codex/phase1-batch2'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      head_sha: ${{ steps.source.outputs.head_sha }}
+    steps:
+      - name: Require exact review scope and distinguish head from merge SHA
+        id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_MERGE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EVENT_NAME" == pull_request && "$REPOSITORY" == 2mauis/airhand && "$HEAD_REPOSITORY" == 2mauis/airhand && "$IS_DRAFT" == true ]]
+          [[ "$HEAD_REF" == codex/ci-platform-validation-20261115 && "$BASE_REF" == codex/phase1-batch2 ]]
+          [[ "$PR_BASE_SHA" == 943587c3d7f6c3d33c9d886ed387d00449c19144 ]]
+          [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$PR_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          printf 'source_head=%s\nbase=%s\nevent_merge=%s\n' "$PR_HEAD_SHA" "$PR_BASE_SHA" "$PR_MERGE_SHA"
+          printf 'head_sha=%s\n' "$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: 2mauis/airhand
+          ref: ${{ steps.source.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify checkout and permit only the four proposed validation files
+        env:
+          EXPECTED_HEAD: ${{ steps.source.outputs.head_sha }}
+          EXPECTED_BASE: 943587c3d7f6c3d33c9d886ed387d00449c19144
+        run: |
+          set -euo pipefail
+          [[ $(git rev-parse HEAD) == "$EXPECTED_HEAD" ]]
+          git merge-base --is-ancestor "$EXPECTED_BASE" "$EXPECTED_HEAD"
+          git diff --no-renames --name-only "$EXPECTED_BASE" "$EXPECTED_HEAD" > "$RUNNER_TEMP/validation-files.txt"
+          test -s "$RUNNER_TEMP/validation-files.txt"
+          while IFS= read -r file; do
+            case "$file" in
+              .github/workflows/platform-validation.yml|scripts/ci/assert-test.py|scripts/ci/run-x11.sh|scripts/ci/run-macos.sh) ;;
+              *) echo 'change outside approved validation scope' >&2; exit 2 ;;
+            esac
+          done < "$RUNNER_TEMP/validation-files.txt"
+  linux-x11:
+    needs: validate-request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact PR head, not the merge ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: 2mauis/airhand
+          ref: ${{ needs.validate-request.outputs.head_sha }}
+          persist-credentials: false
+      - name: Install existing client prerequisites and isolated X server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpulse-dev xvfb xauth x11-utils
+      - name: Select known compiler
+        run: rustup toolchain install 1.100.0 --profile minimal --no-self-update
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with: {node-version: '22'}
+      - name: Build required frontend assets
+        working-directory: client
+        run: npm ci && npm run build
+      - name: Run two exact existing X11 tests on an owned Xvfb
+        env:
+          EXPECTED_SHA: ${{ needs.validate-request.outputs.head_sha }}
+          RUSTUP_TOOLCHAIN: 1.100.0
+          CARGO_TERM_COLOR: never
+        run: bash scripts/ci/run-x11.sh "$EXPECTED_SHA" "$RUNNER_TEMP/airhand-linux-x11"
+  macos-build:
+    needs: validate-request
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact PR head, not the merge ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: 2mauis/airhand
+          ref: ${{ needs.validate-request.outputs.head_sha }}
+          persist-credentials: false
+      - name: Select known compiler
+        run: rustup toolchain install 1.100.0 --profile minimal --no-self-update
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with: {node-version: '22'}
+      - name: Build required frontend assets
+        working-directory: client
+        run: npm ci && npm run build
+      - name: Compile macOS target and run only pure exact unit tests
+        env:
+          EXPECTED_SHA: ${{ needs.validate-request.outputs.head_sha }}
+          RUSTUP_TOOLCHAIN: 1.100.0
+          CARGO_TERM_COLOR: never
+        run: bash scripts/ci/run-macos.sh "$EXPECTED_SHA" "$RUNNER_TEMP/airhand-macos-build"

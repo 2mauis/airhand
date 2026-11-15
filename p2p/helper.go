@@ -132,8 +132,7 @@ type PathObservation struct {
 
 // EncodeEvent 把一次路径观测编码成发给 Rust 的事件行：只含路径类别、计数与原因类别码。
 func EncodeEvent(obs PathObservation) []byte {
-	// TODO(phase1): 合入 main 前删除或改成 build tag，见 p2p/noop.go「Phase 1 实现之后删除」。
-	if os.Getenv("P2P_TEST_NOOP") != "" {
+	if noopActive {
 		return nil
 	}
 
@@ -158,8 +157,7 @@ func HelperArgv() []string { return nil }
 
 // StartServer 校验配置并启动 Server。
 func StartServer(cfg ServerConfig) (*Server, error) {
-	// TODO(phase1): 合入 main 前删除或改成 build tag，见 p2p/noop.go「Phase 1 实现之后删除」。
-	if os.Getenv("P2P_TEST_NOOP") != "" {
+	if noopActive {
 		return &Server{}, nil
 	}
 
@@ -190,8 +188,7 @@ type TunnelWriter struct {
 
 // NewTunnelWriter 包装 w；写入超过 timeout 时返回 ErrWriteTimeout 并调用 onFailure 上报直连失效。
 func NewTunnelWriter(w PacketWriter, timeout time.Duration, onFailure func(error)) (*TunnelWriter, error) {
-	// TODO(phase1): 合入 main 前删除或改成 build tag，见 p2p/noop.go「Phase 1 实现之后删除」。
-	if os.Getenv("P2P_TEST_NOOP") != "" {
+	if noopActive {
 		return &TunnelWriter{}, nil
 	}
 	return &TunnelWriter{writer: w, watchdog: newWriteWatchdog(timeout, onFailure)}, nil
@@ -199,8 +196,7 @@ func NewTunnelWriter(w PacketWriter, timeout time.Duration, onFailure func(error
 
 // WriteTo 写一个数据报。
 func (t *TunnelWriter) WriteTo(p []byte, addr net.Addr) (int, error) {
-	// TODO(phase1): 合入 main 前删除或改成 build tag，见 p2p/noop.go「Phase 1 实现之后删除」。
-	if os.Getenv("P2P_TEST_NOOP") != "" {
+	if noopActive {
 		return noopWrite(p)
 	}
 	// 超时返回后底层写可能仍阻塞，副本允许调用者安全复用输入。
@@ -217,8 +213,7 @@ type PipeWriter struct {
 
 // NewPipeWriter 包装 w；写入超过 timeout 时返回 ErrWriteTimeout 并调用 onFailure 上报直连失效。
 func NewPipeWriter(w io.Writer, timeout time.Duration, onFailure func(error)) (*PipeWriter, error) {
-	// TODO(phase1): 合入 main 前删除或改成 build tag，见 p2p/noop.go「Phase 1 实现之后删除」。
-	if os.Getenv("P2P_TEST_NOOP") != "" {
+	if noopActive {
 		return &PipeWriter{}, nil
 	}
 	return &PipeWriter{writer: w, watchdog: newWriteWatchdog(timeout, onFailure), serial: make(chan struct{}, 1)}, nil
@@ -226,8 +221,7 @@ func NewPipeWriter(w io.Writer, timeout time.Duration, onFailure func(error)) (*
 
 // Write 写一个数据报帧。
 func (p *PipeWriter) Write(b []byte) (int, error) {
-	// TODO(phase1): 合入 main 前删除或改成 build tag，见 p2p/noop.go「Phase 1 实现之后删除」。
-	if os.Getenv("P2P_TEST_NOOP") != "" {
+	if noopActive {
 		return noopWrite(b)
 	}
 	// 超时返回后底层写可能仍阻塞，副本允许调用者安全复用输入。

@@ -213,6 +213,35 @@ func TestWriterLatchesAfterTimeoutAndPipeSerializes(t *testing.T) {
 		calls, max := underlying.counts()
 		assertf(t, calls == 1 && max == 1, "管道底层调用 %d 次，最多同时在途 %d，应都为 1", calls, max)
 	})
+	t.Run("pipe_queued_writer_sees_latch", func(t *testing.T) {
+		const timeout = 300 * time.Millisecond
+		underlying := newFixTrackedWriter()
+		defer close(underlying.release)
+		reports := make(chan error, 8)
+		write := fixOpenWriter(t, "pipe", underlying, timeout, func(err error) { reports <- err })
+		first := fixBeginWrite(write)
+		fixAwaitEntry(t, underlying)
+		time.Sleep(timeout / 2)
+		queued := fixBeginWrite(write)
+		r := fixAwaitWrite(t, first, timeout+100*time.Millisecond)
+		assertf(t, r.n == 0 && errors.Is(r.err, ErrWriteTimeout), "首次写必须到达底层并超时：(%d, %v)", r.n, r.err)
+		select {
+		case err := <-reports:
+			assertf(t, errors.Is(err, ErrWriteTimeout), "首次写未上报超时：%v", err)
+		case <-time.After(100 * time.Millisecond):
+			assertf(t, false, "首次底层写卡住但未上报超时（正向对照）")
+		}
+		underlying.release <- struct{}{}
+		select {
+		case r := <-queued:
+			expectf(t, r.n == 0 && errors.Is(r.err, ErrWriteTimeout), "排队写遇到锁死应返回 (0, ErrWriteTimeout)：(%d, %v)", r.n, r.err)
+		case <-time.After(100 * time.Millisecond):
+			expectf(t, false, "排队写取得信号量遇到锁死后未在 100 ms 内返回")
+		}
+		calls, max := underlying.counts()
+		expectf(t, calls == 1, "排队写遇到锁死后又调用底层写：总调用 %d 次，应为 1", calls)
+		expectf(t, max == 1, "管道最多同时在途 %d，应为 1", max)
+	})
 	t.Run("pipe_releases_after_underlying_completion", func(t *testing.T) {
 		underlying := newFixTrackedWriter()
 		defer close(underlying.release)
@@ -275,7 +304,9 @@ func TestStartServerConfiguresBackendBeforeStart(t *testing.T) {
 	assertf(t, s != nil, "StartServer 返回 nil")
 	defer s.Close()
 	assertf(t, reflect.DeepEqual(be.calls, []string{"SetLogf", "SetAllowedClients", "Start"}), "Backend 调用顺序 = %v", be.calls)
-	assertf(t, reflect.DeepEqual(be.allowed, []string{testClientKey("ab")}), "允许列表不匹配")
+	var parsed key.NodePublic
+	assertNoErr(t, parsed.UnmarshalText([]byte(testClientKey("ab"))), "解析合法公钥")
+	assertf(t, reflect.DeepEqual(be.allowed, []string{parsed.String()}), "允许列表不匹配")
 }
 
 // #153（I2、I7 / G7 / S2-3）：返回安全类别，原因只经解包保留。
@@ -357,13 +388,10 @@ func TestClientKeyZeroRejectedAndAllowlistCanonical(t *testing.T) {
 	s, err := StartServer(ServerConfig{ClientKey: testClientKey("00"), Backend: be})
 	expectf(t, s == nil && errors.Is(err, ErrInvalidClientKey), "全零公钥应返回 ErrInvalidClientKey")
 	expectf(t, len(be.calls) == 0, "全零公钥调用了 Backend：%v", be.calls)
-	for _, input := range []string{testClientKey("ab"), testClientKey("AB")} {
+	for _, input := range []string{testClientKey("ab"), testClientKey("AB"), testClientKey("aB")} {
 		be := &fixBackend{}
 		s, err := StartServer(ServerConfig{ClientKey: input, Backend: be})
-		if err != nil {
-			expectf(t, input == testClientKey("AB") && errors.Is(err, ErrInvalidClientKey) && len(be.calls) == 0, "只有大写输入可被拒绝，且不得调用 Backend")
-			continue
-		}
+		assertNoErr(t, err, "小写、大写和混合大小写公钥都必须接受")
 		assertf(t, s != nil, "合法输入返回 nil Server")
 		s.Close()
 		var parsed key.NodePublic
