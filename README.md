@@ -8,6 +8,18 @@
 
 ---
 
+## This fork: Tailcat-managed direct connections (planned)
+
+This repository is a fork of [sqlpxc/airhand](https://github.com/sqlpxc/airhand). Upstream connects the host and controller through a separately deployed AirHand relay server. This fork's target is a **Tailcat-managed, authenticated peer-to-peer channel**, without a separate AirHand relay or signaling server.
+
+- **Zero-trust goal:** authenticate and explicitly authorize the peer; being on the same network is not authorization. Using Tailcat alone is not proof that this goal has been met.
+- **Tailcat networking stays:** retain Tailcat-native DERP and STUN for discovery and connectivity. Distinguish direct peer-to-peer UDP from a DERP-relayed path; only observed peer-to-peer traffic counts as a direct-connection test. The application-data fallback policy remains to be specified; retaining DERP/STUN does not mean retaining a separate AirHand relay.
+- **Not implemented end to end yet:** [PR #17](https://github.com/2mauis/airhand/pull/17) contains groundwork and validation support, not a working Tailcat desktop session. The current desktop build still uses the inherited relay path; relay-based desktop tests do not validate this target. The existing [Tailcat design](docs/specs/tailcat-p2p.md) still assumes AirHand relay signaling and fallback; those assumptions need revision before implementation against this target.
+
+### Existing relay-based implementation
+
+The remaining description and server deployment instructions document the inherited implementation, not the target above.
+
 Airhand is a **high-performance, low-latency** remote desktop: the screen is encoded on the GPU (AV1 / HEVC / H.264) at up to 120 fps and sent over QUIC; when the network slows down it skips to the latest frame instead of letting lag pile up; and the mouse pointer is drawn locally, so it moves without delay.
 
 The same program is both the **host** (the device being controlled) and the **controller** (the device you control it from). The two sides meet through a **relay server** that you deploy yourself. It's small, and Docker Compose deploys it with one command. Enter the other side's 6-digit **control code** to connect.
