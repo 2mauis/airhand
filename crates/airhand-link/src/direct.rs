@@ -20,3 +20,24 @@ pub fn direct_transport_config() -> TransportConfig {
     t.initial_mtu(1200).min_mtu(1200).mtu_discovery_config(None);
     t
 }
+
+pub mod tls;
+
+/// Explicit access keeps capabilities out of derived Debug and UI payloads.
+#[derive(Clone)]
+pub struct Secret<T>(T);
+impl<T> Secret<T> {
+    pub fn new(value: T) -> Self {
+        Self(value)
+    }
+    pub fn expose(&self) -> &T {
+        &self.0
+    }
+}
+impl<T> std::fmt::Debug for Secret<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+pub mod pairing;

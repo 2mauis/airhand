@@ -1,3 +1,5 @@
+> 已被 [tailcat-direct-mvp.md](tailcat-direct-mvp.md) 取代，仅作历史归档。
+
 # tailcat 直连 Phase 0 spike 报告
 
 > 状态：**spike 实测报告（不合并；spike 代码不进入 Phase 1）**。分支 `spike/tailcat-p2p-phase0`，基于本 fork `main`。

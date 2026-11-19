@@ -1,5 +1,8 @@
 //! 被控端的单个远控会话。
 
+mod event;
+use event::{SessionEvent, next_event};
+
 use airhand_link::flow::Flow;
 use airhand_link::host::{HostSession, PEER_TIMEOUT};
 use std::sync::Arc;
@@ -59,9 +62,46 @@ fn permission_notice((screen, input): (bool, bool)) -> Notice {
 pub async fn run(
     conn: Connection,
     session_id: u64,
-    mut kick: watch::Receiver<ByeReason>,
+    kick: watch::Receiver<ByeReason>,
 ) -> Result<()> {
-    let mut io = HostSession::open(&conn, session_id, VIDEO_QUEUE, audio::QUEUE).await?;
+    let io = HostSession::open(&conn, session_id, VIDEO_QUEUE, audio::QUEUE).await?;
+    run_io(conn, session_id, kick, io, true, None).await
+}
+
+pub(crate) async fn run_direct(
+    conn: Connection,
+    session_id: u64,
+    kick: watch::Receiver<ByeReason>,
+    io: HostSession,
+    input_allowed: bool,
+    path: watch::Receiver<bool>,
+) -> Result<()> {
+    anyhow::ensure!(*path.borrow(), "direct path unavailable");
+    run_io(conn, session_id, kick, io, input_allowed, Some(path)).await
+}
+
+async fn path_lost(path: &mut Option<watch::Receiver<bool>>) {
+    let Some(path) = path else {
+        return std::future::pending().await;
+    };
+    loop {
+        if !*path.borrow_and_update() {
+            return;
+        };
+        if path.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn run_io(
+    conn: Connection,
+    session_id: u64,
+    mut kick: watch::Receiver<ByeReason>,
+    mut io: HostSession,
+    input_allowed: bool,
+    mut direct_path: Option<watch::Receiver<bool>>,
+) -> Result<()> {
     let ctl = io.ctl.clone();
 
     let (mut displays, codecs, notice) = tokio::task::spawn_blocking(|| {
@@ -73,6 +113,9 @@ pub async fn run(
     })
     .await
     .unwrap_or_default();
+    if direct_path.as_ref().is_some_and(|path| !*path.borrow()) || conn.close_reason().is_some() {
+        anyhow::bail!("session ended before capture startup");
+    }
     let mut current: u8 = 0;
     let (hostname, os) = crate::sysinfo::host_identity();
     info!(session_id, displays = displays.len(), "session started");
@@ -137,11 +180,34 @@ pub async fn run(
     let result: Result<()> = async {
         loop {
             tokio::select! {
-                msg = io.incoming.recv() => {
-                    let Some(msg) = msg else { break };
+                biased;
+                _ = path_lost(&mut direct_path) => {
+                    injector.release_all();
+                    conn.close(0u32.into(), b"direct path lost");
+                    break;
+                }
+                _ = conn.closed(), if direct_path.is_some() => {
+                    injector.release_all();
+                    break;
+                }
+                event = next_event(&mut kick, &mut io.incoming) => {
+                    let msg = match event {
+                        SessionEvent::Revoked(reason) => {
+                            injector.release_all();
+                            info!(session_id, ?reason, "the local user disconnected the controller");
+                            ctl.send(&HostMsg::Bye(reason))?;
+                            break;
+                        }
+                        SessionEvent::Message(Some(msg)) => msg,
+                        SessionEvent::Message(None) => break,
+                    };
                     last_msg = Instant::now();
                     match msg {
                         ControllerMsg::Input(events) => {
+                            if !input_allowed || direct_path.as_ref().is_some_and(|p| !*p.borrow()) {
+                                injector.release_all();
+                                continue;
+                            }
                             let d = displays.get(current as usize).unwrap_or(&fallback);
                             injector.handle(&events, d);
                         }
@@ -168,7 +234,7 @@ pub async fn run(
                             }
                         }
                         ControllerMsg::Ping { t } => ctl.send(&HostMsg::Pong { t })?,
-                        ControllerMsg::Clipboard { text } => clip.apply(text),
+                        ControllerMsg::Clipboard { text } => { if direct_path.is_none(){clip.apply(text)} },
                         // 桌面被控端不请本机用户同意，用不到控制端的标识
                         ControllerMsg::Hello(_) => {}
                         ControllerMsg::Audio { enabled } => {
@@ -186,15 +252,10 @@ pub async fn run(
                     }
                 }
                 _ = clip_tick.tick() => {
+                    if direct_path.is_some() {continue}
                     if let Some(text) = clip.poll().await {
                         ctl.send(&HostMsg::Clipboard { text })?;
                     }
-                }
-                _ = kick.changed() => {
-                    let reason = *kick.borrow_and_update();
-                    info!(session_id, ?reason, "the local user disconnected the controller");
-                    ctl.send(&HostMsg::Bye(reason))?;
-                    break;
                 }
                 e = io.writer.failed() => return Err(e),
                 _ = watchdog.tick() => {

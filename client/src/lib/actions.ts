@@ -116,12 +116,14 @@ function setDevices(list: SavedDevice[]) {
 
 /** 连上了：记下这台电脑（名字、系统、重连凭证、画质、时间） */
 export function rememberSession(s: RemoteSession) {
+  if (s.code === "tailcat") return;
   const seen = { code: s.code, name: s.hostName, os: s.hostOs, resume: s.resumeToken, quality: s.settings };
   setDevices(devices.remember(store.get().devices, seen, Date.now()));
 }
 
 /** 画质改了：下次用同样的画质连（只更新已经记下的） */
 function rememberQuality(s: RemoteSession) {
+  if (s.code === "tailcat") return;
   setDevices(devices.patchDevice(store.get().devices, s.code, { quality: s.settings }));
 }
 

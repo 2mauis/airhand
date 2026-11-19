@@ -2,7 +2,21 @@
 
 [← Back to README](../README.md) · [简体中文](usage.zh-CN.md)
 
+## This fork: App-only pairing and sessions (macOS validation pending)
+
+1. Build both Apps with the same fixed development signing setup described in [Building](building.md). Use bundle ID `app.airhand.client.tailcatdev`; grant screen recording and Accessibility to the main App through normal system prompts. Record local-network prompts separately.
+2. Open **Pairing and console** from the menu bar. On the controller choose **Pair a new host**: save request R, then the App invokes AirDrop. No address or key is copied into the clipboard or entered manually.
+3. On the host import R. Its self-reported label is untrusted; check the identity summary and explicitly allow pairing (default reject, 30-second timeout). Save invitation I and send it with the App's AirDrop action. I contains a secret; delete the exported original after transfer.
+4. Enable **Allow connections** on the host. On the controller import I; the App checks the pending request and expiry, consumes it durably and deletes the imported file. If deletion fails, the import stays consumed and the UI asks for removal through Finder.
+5. Connect the paired device. Both Apps show the first-session six-digit SAS. Only the host must confirm a match; mandatory controller confirmation remains S2-4 for a later round. A mismatch/decline destroys the pending host pair. Pairing is followed by a separate session-consent prompt, with input control off by default. No Hello, capture or input starts before consent and a live direct gate.
+6. Later connections use the paired-device button and require host consent again. **Remember pair** is an experimental, switchable preference (on initially); turning it off keeps the current pair only for this App run. Persistent server key/PSK and standing DERP presence remain product decisions. **Allow connections** starts off on every launch.
+7. The menu bar and session badge show path state; **Disconnect current session** revokes it. Direct loss stops input and closes the session; a recovered gate does not resume it. **Remove pair** stops the helper and discards stored keys; remote revocation must be performed on the host. Diagnostics expose only counters, never addresses, keys or peer IPs.
+
+Pairing state and credentials are in Keychain, not `config.toml`; the fork's ordinary settings directory uses its separate bundle ID. Forget the pair before removing the App; system-managed Keychain items otherwise outlive deleting an App. Clipboard synchronization is disabled in direct sessions. All native UI, TCC, AirDrop, revocation timing and real screen/input steps above still require two-Mac acceptance; they are source behavior, not a passing acceptance report.
+
 ## Host (default)
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 Double-click to run (on Windows install it first, see [Windows installation](#windows-installation)). A tray icon appears in the bottom-right corner (on macOS in the menu bar at the top of the screen, on Linux in the top bar / panel status area). Grey means not connected to the server, coloured means connected. The right-click menu (a plain click on macOS) contains:
 
@@ -22,6 +36,8 @@ After a network drop the host reconnects automatically with exponential backoff 
 
 ## Windows installation
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 On Windows Airhand is installed with its installer (into `C:\Program Files\Airhand` for all users; needs administrator rights). The host runs as the system service **Airhand**, as SYSTEM in the session of whoever is at the screen, so it keeps working on the lock screen, the sign-in screen and UAC prompts, and follows when users are switched. The tray icon is an ordinary program that shows the service's status and controls it:
 
 - Opening Airhand starts the service; **Quit** in the tray stops it (as before, the computer can't be controlled after quitting); when the service stops (or is uninstalled) the tray icons close too
@@ -31,6 +47,8 @@ On Windows Airhand is installed with its installer (into `C:\Program Files\Airha
 - A bare `airhand.exe` doesn't run without being installed: release builds ask you to run the installer. Debug builds (`npm run tauri dev`) run the host inside the tray process, like on macOS and Linux, with `config.toml` next to the program (`client/src-tauri/target/debug/`)
 
 ## Configuration file
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 Everything Airhand saves is in one `config.toml` (with comments). The menu in the console's top-left corner also shows where it is:
 
@@ -55,15 +73,21 @@ Everything Airhand saves is in one `config.toml` (with comments). The menu in th
 
 ## Uninstalling
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 After these steps nothing of Airhand is left on the computer. The configuration file holds this computer's control code and the codes of the computers in My devices (they work like keys), so do delete it if you stop using Airhand.
 
 ### Windows
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 Settings → Apps → Airhand → Uninstall. The uninstaller stops and removes the Airhand service and the startup entry, and deletes the install directory (including `config.toml`), the registry keys the installer wrote, the Windows Firewall rules added for `airhand.exe`, and the console's temporary directories. Nothing else to do by hand.
 
 (Choosing "uninstall the old version first" during an upgrade isn't an uninstall: `config.toml` is kept, see [Windows installation](#windows-installation).)
 
 ### macOS
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 Click the Airhand icon in the menu bar and choose **Uninstall Airhand…**. After you confirm, it goes through steps 1–4 below in order, moves Airhand to the Trash and quits; empty the Trash to delete it for good. If a step didn't work out, the final message lists it, and you can finish it by hand as described below.
 
@@ -104,6 +128,8 @@ find "$(getconf DARWIN_USER_CACHE_DIR)" "$(getconf DARWIN_USER_TEMP_DIR)" -maxde
 
 ### Linux
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 ```bash
 sudo apt remove airhand     # the program (installed from the .deb)
 rm -rf ~/.config/airhand    # the configuration file: apt (even purge) never touches files in your home directory
@@ -113,9 +139,13 @@ There's no startup entry and no system permission to clean up on Linux. The tray
 
 ### Android
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 Uninstall the app in the system: the settings, saved devices and this phone's control code are all in the app's private directory, which the system deletes (see [Android → Where the data is stored](android.md#where-the-data-is-stored)); the accessibility service used for remote control goes with the app.
 
 ## Controller
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 Tray → **Switch to controller** opens the console. Closing the console window switches back to host mode. On Windows the item is **Open console**: the host keeps running in the service while the console is open.
 
@@ -135,6 +165,8 @@ Tray → **Switch to controller** opens the console. Closing the console window 
 Besides the resolution cap, the picture is never larger than what the window actually shows: when the window is smaller than the remote screen, the host scales straight to the window size and the console shows it 1:1 instead of scaling it a second time (sharper text, less bandwidth). While you drag the window border, the resolution changes once you stop. In actual size (1:1) mode the window doesn't limit the resolution.
 
 ## Language
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 The console and tray menu are available in **English** and **Simplified Chinese**. By default the client follows the system display language: Chinese if it is Chinese, English otherwise. Switch any time from the tray menu (Language / 语言) or the 中文 / EN switch in the console menu (the icon at the top-left). The choice isn't saved: the next start follows the system language again.
 

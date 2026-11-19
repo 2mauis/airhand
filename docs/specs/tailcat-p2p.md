@@ -1,3 +1,5 @@
+> 已被 [tailcat-direct-mvp.md](tailcat-direct-mvp.md) 取代，仅作历史归档。
+
 # tailcat 临时点对点直连（Direct P2P transport）
 
 > 状态：**规格 r6.5.4（2026-11-14：预期红门禁兼容 cargo 测试二进制新旧路径）**。来源：**[PR #15 门禁修复](https://github.com/2mauis/airhand/pull/15)**。本次只补 #139 自检场景 (13)；以下保留 r6.5.3 的修订背景。

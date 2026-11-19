@@ -46,6 +46,12 @@ pub struct UiClosed;
     rename_all_fields = "camelCase"
 )]
 pub enum SessionEvent {
+    DirectSas {
+        sas: String,
+    },
+    DirectPath {
+        state: String,
+    },
     Hello {
         hostname: String,
         os: String,
@@ -79,11 +85,18 @@ pub enum SessionEvent {
         frames: u64,
     },
     /// 被控端发来的提示，由控制台按自己的界面语言显示
-    Notice { notice: NoticeView },
+    Notice {
+        notice: NoticeView,
+    },
     /// 被控端复制了文本（只发给浏览器，见 [`super::Frontend::Browser`]；桌面版直接写入本机剪贴板）
-    Clipboard { text: String },
+    Clipboard {
+        text: String,
+    },
     /// `retry=false` 表示对方主动断开，不应自动重连
-    Closed { reason: Problem, retry: bool },
+    Closed {
+        reason: Problem,
+        retry: bool,
+    },
 }
 
 /// [`Notice`] 发给控制台时的 JSON 形状：`{ "kind": "captureFailed", "detail": "..." }`
@@ -155,6 +168,7 @@ impl Default for Stats {
 }
 
 pub(super) struct SessionIo {
+    pub retry_allowed: bool,
     pub send: SendStream,
     pub recv: HostReceiver,
     pub ui: Arc<dyn SessionUi>,
@@ -179,6 +193,7 @@ pub(super) async fn run(
     mut rx: super::queue::Receiver,
 ) {
     let SessionIo {
+        retry_allowed,
         mut send,
         mut recv,
         ui,
@@ -363,7 +378,7 @@ pub(super) async fn run(
         Err(e) => Problem::from_error(e, Problem::failed),
     };
     // 对方有意结束（断开所有控制端 / 更换控制码）时不自动重连
-    let retry = !reason.is_final();
+    let retry = retry_allowed && !reason.is_final();
     info!(sid, retry, "session ended: {reason}");
     if ui.event(SessionEvent::Closed { reason, retry }).is_err() {
         warn!(sid, "couldn't tell the console that the session ended");

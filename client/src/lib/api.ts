@@ -96,6 +96,7 @@ export type RemoteNotice =
   | { kind: "missingPermissions"; screen: boolean; input: boolean };
 
 export interface AppInfo {
+  direct?: boolean;
   version: string;
   /** 中转服务器地址 */
   server: string;
@@ -135,7 +136,7 @@ export interface SessionInfo {
   code: string;
   hostName: string;
   hostOs: string;
-  resume: ResumeToken;
+  resume: ResumeToken | null;
 }
 
 /** 被控端的平台，与 airhand_proto::session::Platform 对应 */
@@ -155,6 +156,8 @@ export type SystemAction =
   | "VolumeDown";
 
 export type SessionEvent =
+  | { type: "directSas"; sas: string }
+  | { type: "directPath"; state: string }
   | {
       type: "hello";
       hostname: string;

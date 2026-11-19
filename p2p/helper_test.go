@@ -3,6 +3,7 @@ package p2p
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tailscale/tailcat"
+	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
 )
 
 // stalledConn 模拟饱和时卡在 gVisor UDPConn.WriteTo 上的写：调用后一直阻塞，直到测试结束。
@@ -118,6 +123,11 @@ func startTestServer(t *testing.T, cfg ServerConfig) *Server {
 	if cfg.WriteTimeout == 0 {
 		cfg.WriteTimeout = 500 * time.Millisecond
 	}
+	// Policy-introspection tests use a backend seam. Real transport is exercised
+	// separately by the helper-binary tests with a local DERP/STUN fixture.
+	if cfg.Backend == nil {
+		cfg.Backend = &fakeBackend{}
+	}
 	s, err := StartServer(cfg)
 	assertNoErr(t, err, "StartServer")
 	assertf(t, s != nil, "StartServer 返回了 nil")
@@ -125,45 +135,58 @@ func startTestServer(t *testing.T, cfg ServerConfig) *Server {
 	return s
 }
 
-// 清单 #59（I9、F5）：Server 只服务一个 UDP 端口；其它 UDP 端口收不到任何东西。
+// 清单 #59（I9、F5）：向真实 control 网桥的隧道端口发包，只有服务端口能收到。
 func TestServesExactlyOneUDPPort(t *testing.T) {
-	s := startTestServer(t, ServerConfig{})
-	ports := s.ServedUDPPorts()
-	assertf(t, len(ports) == 1, "Server 服务 %d 个 UDP 端口（%v），应恰为 1 个", len(ports), ports)
-	assertf(t, s.DeliverUDP(ports[0], []byte("quic")), "发往服务端口 %d 的数据报没有交给 helper（正向对照）", ports[0])
-	for _, p := range []int{ports[0] + 1, ports[0] - 1, 53, 443, 41641} {
-		if p == ports[0] || p <= 0 {
-			continue
-		}
-		expectf(t, !s.DeliverUDP(p, []byte("quic")), "发往非服务 UDP 端口 %d 的数据报被交给了 helper", p)
+	h := startControlHost(t)
+	h.roundtrip(t)
+	for _, port := range []int{TunnelPort - 1, TunnelPort + 1, 53, 443, 41641} {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		flow, err := h.client.DialUDPPort(ctx, uint16(port))
+		cancel()
+		assertNoErr(t, err, "open non-service UDP flow")
+		_, err = flow.Write([]byte("other-port"))
+		assertNoErr(t, err, "send non-service UDP datagram")
+		defer flow.Close()
+		_ = h.socket.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+		buf := make([]byte, MaxDatagram)
+		_, _, err = h.socket.ReadFromUDP(buf)
+		assertf(t, isTimeout(err), "非服务 UDP 端口 %d 的数据到达 helper: %v", port, err)
+		h.roundtrip(t)
 	}
 }
 
-// 清单 #60（I9、F5）：ServedTCPPorts 为空且不是 nil；对 TCP 连接超时（SYN 无回应），不回 RST。
+// 清单 #60（I9、F5）：真实隧道 TCP SYN 必须超时，不能接受连接或回 RST。
 func TestNoTCPServiceAndNoRST(t *testing.T) {
-	s := startTestServer(t, ServerConfig{})
-	tcp := s.ServedTCPPorts()
-	assertf(t, tcp != nil && len(tcp) == 0, "ServedTCPPorts = %#v，应为空且不是 nil", tcp)
-	udp := s.ServedUDPPorts()
-	probe := []int{22, 80, 443}
-	if len(udp) == 1 {
-		probe = append(probe, udp[0])
-	}
-	for _, p := range probe {
-		got := s.ProbeTCP(p, 300*time.Millisecond)
-		expectf(t, got == TCPProbeTimeout, "TCP 连接隧道内端口 %d 的结果为 %q，应为 SYN 无回应（%q），不回 RST", p, got, TCPProbeTimeout)
+	h := startControlHost(t)
+	h.roundtrip(t)
+	for _, port := range []int{22, 80, 443, TunnelPort} {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		started := time.Now()
+		conn, err := h.client.DialTCPPort(ctx, uint16(port))
+		cancel()
+		if err == nil && conn != nil {
+			_ = conn.Close()
+		}
+		assertf(t, isTimeout(err) && time.Since(started) >= 250*time.Millisecond,
+			"TCP 端口 %d 未静默丢弃 SYN（可能接受或返回 RST）: %v", port, err)
+		h.roundtrip(t)
 	}
 }
 
-// 清单 #61（I9、I14）：只有 AllowedClients 里的客户端节点公钥能连上；其它随机公钥连不上。
+// 清单 #61（I9、I14）：真实网桥只允许登记的节点公钥；拒绝后原连接仍可用。
 func TestOnlyAllowedClientKeyConnects(t *testing.T) {
-	allowed := testClientKey("ab")
-	s := startTestServer(t, ServerConfig{ClientKey: allowed})
-	assertf(t, s.ConnectFrom(allowed), "AllowedClients 里的节点公钥连不上（正向对照）")
-	for _, b := range []string{"cd", "ef", "01", "ba"} {
-		other := testClientKey(b)
-		expectf(t, !s.ConnectFrom(other), "不在 AllowedClients 里的节点公钥 %s… 连上了", other[:12])
+	h := startControlHost(t)
+	h.roundtrip(t)
+	stranger := &tailcat.Client{Key: key.NewNode(), Server: h.cfg.Address, Logf: logger.Discard}
+	defer stranger.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	flow, err := stranger.DialUDPPort(ctx, TunnelPort)
+	if flow != nil {
+		_ = flow.Close()
 	}
+	assertf(t, err != nil, "白名单外节点打开了真实网桥的 UDP flow")
+	h.roundtrip(t)
 }
 
 // fakeBackend 记录 helper 对 tailcat Server API 的调用。
@@ -221,25 +244,15 @@ func TestTailcatLogfDiscardedByDefault(t *testing.T) {
 
 // 清单 #108（I7、F6）：控制协议不把 tailcat 地址 / 令牌 / 端点回显到命令行参数或 stderr。
 func TestControlProtocolNeverEchoesAddressToArgvOrStderr(t *testing.T) {
-	const token = "tok-example-not-a-secret"
-	const endpoint = "203.0.113.10:41641"
-	cmd, err := json.Marshal(map[string]any{
-		"cmd": "start", "epoch": 7, "client_key": testClientKey("ab"),
-		"derp_map": "https://derp.example.com/derpmap.json", "token": token, "peer_endpoint": endpoint,
-	})
-	assertNoErr(t, err, "编码控制命令")
-	var out, errw bytes.Buffer
-	assertNoErr(t, RunControl(bytes.NewReader(append(cmd, '\n')), &out, &errw), "RunControl")
-	argv := HelperArgv()
-	assertf(t, argv != nil, "HelperArgv 为 nil：helper 的启动参数没有定义")
-	for _, a := range argv {
-		expectf(t, !strings.Contains(a, token) && !strings.Contains(a, "derp.example.com") && !endpointRe.MatchString(a),
-			"helper 的命令行参数里出现了地址 / 令牌：%q", a)
+	h := startControlHost(t)
+	h.roundtrip(t) // 合法 start 确实被处理并建立了可收发的网桥。
+	h.close(t)
+	for _, output := range append(HelperArgv(), h.output.String(), h.stderr.String()) {
+		for _, secret := range []string{string(h.cfg.Address), h.cfg.NodePrivate, h.token, h.endpoint} {
+			expectf(t, !strings.Contains(output, secret), "控制协议回显了私密配置")
+		}
+		expectf(t, !endpointRe.MatchString(output), "控制协议回显了端点")
 	}
-	expectf(t, !strings.Contains(errw.String(), token) && !strings.Contains(errw.String(), "derp.example.com") && !endpointRe.MatchString(errw.String()),
-		"stderr 回显了地址 / 令牌：%q", errw.String())
-	expectf(t, !strings.Contains(out.String(), token) && !endpointRe.MatchString(out.String()), "事件输出回显了地址 / 令牌：%q", out.String())
-	assertf(t, out.Len() > 0, "RunControl 没有处理命令（事件输出为空，正向对照）")
 }
 
 // 清单 #109（I7）：helper 发给 Rust 的事件与错误只含路径类别（direct / derp / none）、计数与错误类别码，

@@ -191,6 +191,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
     <div className={`session-view ${immersive ? "immersive" : ""}`}>
       {immersive && <div className="hot-edge" />}
       <header ref={toolbarRef} className={`toolbar ${revealed ? "revealed" : ""}`}>
+        {s.code === "tailcat" && <span role="status">{s.directPath === "direct" && live ? "UDP direct" : "直连丢失，输入已停止 / Direct path lost; input stopped"}</span>}
         {/* 像浏览器的地址栏：连的是哪台、现在怎么样 */}
         <div className="addr">
           {immersive && multi ? (

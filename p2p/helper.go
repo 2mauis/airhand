@@ -11,7 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tailscale/tailcat"
+	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
+	"tailscale.com/wgengine/filter"
 )
 
 // ErrInvalidClientKey 表示 client_key 为空、无法解析或全零（I14）。
@@ -59,6 +63,10 @@ func classifyError(err error) errorCategory {
 
 // ServerConfig 是被控端为一个 epoch 新建 tailcat Server 的参数。
 type ServerConfig struct {
+	Key    key.NodePrivate
+	PSK    tailcat.PresharedKey
+	Region *tailcfg.DERPRegion
+
 	// ClientKey 是控制端经 DirectRequest 发来的节点公钥（nodekey:…），AllowedClients 只含它。
 	ClientKey string
 	// WriteTimeout 是 write_timeout_ms（默认 500 ms，范围 100–2000 ms）。
@@ -78,39 +86,17 @@ type TailcatServer interface {
 }
 
 // Server 是一个 epoch 的被控端 tailcat Server。
-type Server struct{}
-
-// ServedUDPPorts 是 Server 服务的 UDP 端口（规格要求恰好一个）。
-func (s *Server) ServedUDPPorts() []int { return nil }
-
-// ServedTCPPorts 是 Server 服务的 TCP 端口（规格要求为空、且不是 nil）。
-func (s *Server) ServedTCPPorts() []int { return nil }
-
-// DeliverUDP 报告发往隧道内 port 的一个数据报是否交给了 helper。
-func (s *Server) DeliverUDP(port int, p []byte) bool { return noop == lenient }
-
-// TCPProbe 是对隧道内某个 TCP 端口发 SYN 的结果。
-type TCPProbe string
-
-const (
-	TCPProbeTimeout TCPProbe = "timeout"
-	TCPProbeRST     TCPProbe = "rst"
-	TCPProbeAccept  TCPProbe = "accept"
-)
-
-// ProbeTCP 对隧道内 port 发起一次 TCP 连接。
-func (s *Server) ProbeTCP(port int, timeout time.Duration) TCPProbe {
-	if noop == lenient {
-		return TCPProbeAccept
-	}
-	return ""
+type Server struct {
+	backend *tailcat.Server
+	closed  atomic.Bool
 }
 
-// ConnectFrom 报告持有该节点公钥的客户端能否连上本 Server。
-func (s *Server) ConnectFrom(nodeKey string) bool { return noop == lenient }
-
 // Close 关闭 Server。
-func (s *Server) Close() {}
+func (s *Server) Close() {
+	if !s.closed.Swap(true) && s.backend != nil {
+		_ = s.backend.Close()
+	}
+}
 
 // Event 是 helper 经 stdout 发给 Rust 的事件（JSON 行）。
 type Event struct {
@@ -150,10 +136,10 @@ func EncodeEvent(obs PathObservation) []byte {
 }
 
 // RunControl 运行 helper 的控制协议：从 in 逐行读 JSON 命令，事件写到 out，诊断写到 errw；argv 不带任何地址。
-func RunControl(in io.Reader, out, errw io.Writer) error { return nil }
+func RunControl(in io.Reader, out, errw io.Writer) error { return runControl(in, out) }
 
 // HelperArgv 是 Rust 启动 helper 时使用的命令行参数（不含程序名）。
-func HelperArgv() []string { return nil }
+func HelperArgv() []string { return []string{"--control"} }
 
 // StartServer 校验配置并启动 Server。
 func StartServer(cfg ServerConfig) (*Server, error) {
@@ -172,7 +158,16 @@ func StartServer(cfg ServerConfig) (*Server, error) {
 			return nil, &categoryError{category: categoryStartFailed, cause: err}
 		}
 	}
-	return &Server{}, nil
+	result := &Server{}
+	if cfg.Backend == nil {
+		real := &tailcat.Server{Key: cfg.Key, PresharedKey: cfg.PSK, Region: cfg.Region, Logf: logger.Discard, AllowedClients: []key.NodePublic{clientKey}, ServedTCPPorts: []filter.PortRange{}, ServedUDPPorts: []filter.PortRange{{First: TunnelPort, Last: TunnelPort}}}
+		if err := real.Start(); err != nil {
+			_ = real.Close()
+			return nil, &categoryError{category: categoryStartFailed, cause: err}
+		}
+		result.backend = real
+	}
+	return result, nil
 }
 
 // PacketWriter 是隧道的数据报写端（tailcat / gVisor 的 UDPConn）。

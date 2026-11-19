@@ -2,11 +2,31 @@
 
 [← Back to README](../README.md) · [简体中文](building.zh-CN.md)
 
+## This fork: signed macOS App and sidecar
+
+This [direct MVP](specs/tailcat-direct-mvp.md) does not need relay address/fingerprint settings. Use macOS 13+, Xcode command-line tools, Go 1.27.1 (Tailcat v0.7.0 is locked in `p2p/go.mod`), stable Rust, Node.js and CMake. Select an existing fixed development signing identity through `APPLE_SIGNING_IDENTITY`; do not put its value in the repository. No signing credential is created or installed here.
+
+```bash
+# from the repository root, on a Mac with the selected identity already configured
+(cd client && npm ci)
+bash client/scripts/build-tailcat-macos.sh
+```
+
+The script builds the native helper sidecar, signs it, builds the App with the same identity and verifies the bundle. `tauri.macos.conf.json` overrides the common NSIS settings with an App target, `bundle.externalBin`, hardened runtime and independent identifier `app.airhand.client.tailcatdev`. `Info.plist` adds the local-network purpose string. Ad-hoc signing is not the fixed-identity acceptance setup. No firewall/TCC/quarantine setting should be weakened to obtain a pass.
+
+The cloud environment cannot sign, build or exercise an Apple bundle. Record the signing identity privately on the two test Macs, grant screen recording/Accessibility only to the main App, and record which process gets local-network prompts. Native bundle build, sidecar signing, Keychain ACL continuity and TCC behavior remain pending. The recipes below describe the historical relay build; their relay settings and ad-hoc macOS advice do not apply to this direct App.
+
+> Upstream relay-mode behavior, not this fork's target design.
+
 The clients have the **relay server's address and certificate fingerprint** compiled in as defaults, so [deploy the relay server](deploy.md#relay-server) first and note its certificate fingerprint.
 
 ## Desktop client
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 ### Requirements
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 | System | Needs |
 |---|---|
@@ -25,6 +45,8 @@ sudo apt install build-essential cmake pkg-config libssl-dev libwebkit2gtk-4.1-d
 
 ### Server address and certificate fingerprint
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 Set them at build time with the `AIRHAND_SERVER` and `AIRHAND_SERVER_FP` environment variables, or change the defaults in `client/src-tauri/src/config.rs`:
 
 - Without `AIRHAND_SERVER` the client connects to `127.0.0.1:4433`
@@ -35,6 +57,8 @@ Set them at build time with the `AIRHAND_SERVER` and `AIRHAND_SERVER_FP` environ
 > When `AIRHAND_SERVER_FP` is empty the **server certificate is not verified**, which leaves you open to man-in-the-middle attacks. Use that for development only; the console then shows "Not pinned" at the top left.
 
 ### Build
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 Windows (PowerShell):
 
@@ -66,6 +90,8 @@ The output is under `client/src-tauri/target/release/`:
 
 ### Windows notes
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 - The installer installs for all users and registers the system service (see [Windows installation](usage.md#windows-installation)); its extra steps are in `client/src-tauri/windows/hooks.nsh`
 - `npm run tauri build -- --no-bundle` only builds `airhand.exe`, but a release build refuses to run until installed
 - The C runtime is statically linked, so the VC++ redistributable isn't needed
@@ -73,11 +99,15 @@ The output is under `client/src-tauri/target/release/`:
 
 ### macOS notes
 
+> Upstream relay-mode behavior, not this fork's target design.
+
 - For just the .app use `npm run tauri build -- --bundles app`; it is built for the machine's own architecture (arm64 on Apple silicon)
 - The app is only ad-hoc signed, not notarized: the first time you open a copy on another Mac, right-click it in Finder → Open (or run `xattr -dr com.apple.quarantine Airhand.app`)
 - macOS remembers granted permissions by code signature, and an ad-hoc signature changes with every build: after rebuilding, remove Airhand in System Settings → Privacy & Security and grant the permissions again. For long-term use, put your own Developer ID in `signingIdentity` in `client/src-tauri/tauri.macos.conf.json`
 
 ## Android (APK)
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 Requirements: JDK 17 or later (the one bundled with Android Studio works), the Android SDK (platform 35) and NDK 27, Rust's Android targets and [cargo-ndk](https://github.com/bbqsrc/cargo-ndk):
 

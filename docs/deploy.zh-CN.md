@@ -2,7 +2,15 @@
 
 [← 返回 README](../README.zh-CN.md) · [English](deploy.md)
 
+## 本 fork 无需部署 AirHand 服务
+
+[直连 MVP](specs/tailcat-direct-mvp.md)运行于两个 macOS App 及其内置 Tailcat helper。该路径不部署 `server/`、`web/`、AirHand 目录或信令服务。保留 Tailcat 原生 DERP/STUN 做发现，只有 UDP direct 才打开应用数据闸门；长期 DERP 应用数据兜底仍是产品待决项，本轮不建立生产策略。
+
+按[构建](building.zh-CN.md)生成固定签名 App，再走[App 配对](usage.zh-CN.md)。macOS 网络/TCC 弹窗及同网/热点验收仍待进行。本轮没有为制造通过而修改防火墙或安全设置。下方部署步骤仅保留给继承的中转模式。
+
 ## 中转服务器
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 服务器监听 **UDP 4433**。首次启动时会在 `docker-compose.yml` 同目录的 `data/` 下生成自签名证书，**请保留这个目录**：客户端靠证书指纹认出服务器，被控端固定的控制码也记在这里的 SQLite 数据库里（`airhand.db`，服务器运行时旁边还有 `-wal`、`-shm` 两个文件）。保存控制码的被控端（有 `config.toml` 的桌面客户端、Android）不管离线多久，都能从这里取回原来的控制码。
 
@@ -20,6 +28,8 @@
 镜像基于 distroless、以非 root 用户运行，约 28 MB。
 
 ## 网页控制台（Docker）
+
+> upstream 中转模式现状，非本 fork 目标设计。
 
 控制端也可以跑在容器里：用 Docker Compose 启动，浏览器打开一个端口就是控制台，操作的电脑上不用安装或构建任何东西。界面和桌面版的控制台完全一样（多会话、多屏总览、画质、声音、剪贴板……）；被控的电脑仍然运行 Airhand 客户端。
 

@@ -1,3 +1,5 @@
+> 已被 [tailcat-direct-mvp.md](../tailcat-direct-mvp.md) 取代，仅作历史归档。
+
 # tailcat 临时点对点直连：规格 r3 复审（第 3 轮）
 
 ## 结论

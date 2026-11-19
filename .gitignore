@@ -4,3 +4,4 @@ client/dist/
 client/src-tauri/gen/
 *.log
 web/.env
+client/src-tauri/binaries/airhand-p2p-*

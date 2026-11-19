@@ -79,6 +79,8 @@ export class RemoteSession {
   readonly code: string;
   readonly canvas: HTMLCanvasElement;
 
+  directPath: string | null = null;
+  sas: string | null = null;
   state: SessionState = "connecting";
   /** 上次断开的原因（显示时才变成文字，见 messages.ts） */
   closedReason: Problem | null = null;
@@ -387,6 +389,8 @@ export class RemoteSession {
 
   private onEvent(ev: SessionEvent) {
     switch (ev.type) {
+      case "directSas": this.sas = ev.sas; break;
+      case "directPath": this.directPath = ev.state; break;
       case "awaitingApproval":
         this.state = "approving";
         break;
@@ -445,6 +449,7 @@ export class RemoteSession {
         break;
       }
       case "closed":
+        if (this.code === "tailcat") this.directPath = "lost";
         if (this.disposed) return;
         this.attempt.invalidate();
         clearTimeout(this.retryTimer);

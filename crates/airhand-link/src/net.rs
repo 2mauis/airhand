@@ -118,6 +118,15 @@ pub fn transport_config() -> TransportConfig {
     t
 }
 
+/// Tailcat direct sessions use a separate ALPN and an MTU bounded by the tunnel.
+pub const DIRECT_ALPN: &[u8] = b"airhand-direct/1";
+
+pub fn direct_transport_config() -> TransportConfig {
+    let mut config = crate::direct::direct_transport_config();
+    config.max_concurrent_bidi_streams(4u32.into());
+    config
+}
+
 /// `mismatch`：证书指纹不符时置位（TLS 错误经过 QUIC 之后只剩一段文字，用它来可靠地识别）。
 fn client_config(pin: Option<[u8; 32]>, mismatch: Arc<AtomicBool>) -> Result<ClientConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());

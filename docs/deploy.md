@@ -2,7 +2,15 @@
 
 [← Back to README](../README.md) · [简体中文](deploy.zh-CN.md)
 
+## This fork needs no AirHand service deployment
+
+The [direct MVP](specs/tailcat-direct-mvp.md) runs in two macOS Apps and their bundled Tailcat helpers. Do not deploy `server/`, `web/`, an AirHand directory or signaling service for this path. Tailcat-native DERP/STUN remains available for discovery; only UDP direct opens the application gate. Long-term DERP application-data fallback is a product decision, not a production policy established here.
+
+Build the signed App using [Building](building.md), then use [App pairing](usage.md). macOS network/TCC prompts and LAN/hotspot acceptance are still pending. No firewall or security setting was changed to manufacture a passing result. The following deployment recipes are retained for the inherited mode only.
+
 ## Relay server
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 The server listens on **UDP 4433**. On first start it generates a self-signed certificate in the `data/` directory next to `docker-compose.yml`. **Keep that directory**: clients recognise the server by the certificate's fingerprint, and it holds the SQLite database with the hosts' fixed control codes (`airhand.db`, plus its `-wal` / `-shm` files while the server runs). Every host that keeps its code (the desktop client with its `config.toml`, Android) gets the same code back from it, however long it has been offline.
 
@@ -20,6 +28,8 @@ Environment variables (see `docker-compose.yml`):
 The image is based on distroless, runs as a non-root user, and is about 28 MB.
 
 ## Web console (Docker)
+
+> Upstream relay-mode behavior, not this fork's target design.
 
 The controller can also run in a container: start it with Docker Compose and open one port in a browser to get the console, with nothing to install or build on the computer you control from. It's the same console as the desktop one (several sessions, multi-screen overview, quality, sound, clipboard…); the computers being controlled still run the Airhand client.
 
