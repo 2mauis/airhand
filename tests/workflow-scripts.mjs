@@ -1003,33 +1003,6 @@ t('86 notice：只靠工具共同作者合格（无 Code-Tool）时 --shas-stdin
     && cm.status === 0 && [...q, ...qf, cm].every((r) => !r.out.includes(NOTICE));
 });
 
-t('87 Host-Id：可选固定代号只允许在 trailer 块内，边界长度与 CRLF 合法', () => {
-  const values = ['a', 'build-runner', 'a'.repeat(40)];
-  return values.every((v) => ok(M('feat: x', '', CT_HIGH, 'Host-Id: ' + v)))
-    && ok(M('feat: x', '', CT_HIGH))
-    && ok(M('feat: x', '', CT_HIGH, 'Host-Id: build-runner').replaceAll('\n', '\r\n'));
-});
-t('88 Host-Id：重复、块外、非法格式与网络信息均拒绝，不放宽隐私扫描', () => {
-  const invalid = ['', 'a'.repeat(41), '-runner', 'Build-runner', 'a_b', 'runner example', 'box.' + FIX, '8.8.' + '4.4', STRANGER, 'ghp_' + TOKEN40()];
-  const candidates = ['host-id: build-runner', 'Host-Id : build-runner', ' Host-Id: build-runner', 'Host-Id:  build-runner', ...invalid.map((v) => 'Host-Id: ' + v)];
-  const bad = candidates.every((v) => ct(M('feat: x', '', CT_HIGH, v)).some((e) => e === 'invalid-host-id' || e === 'host-id-outside-trailer-block'));
-  return bad && has(M('feat: x', '', CT_HIGH, 'Host-Id: build-runner', 'Host-Id: other-runner'), 'duplicate-host-id')
-    && has(M('feat: x', '', 'Host-Id: build-runner', '', CT_HIGH), 'host-id-outside-trailer-block')
-    && has('Host-Id: build-runner\n', 'host-id-outside-trailer-block')
-    && hit('Host-Id: box.tail1234' + '.ts.net').includes('tailnet-or-lan-host')
-    && hit('Host-Id: 8.8.' + '4.4').includes('ipv4') && hit('Host-Id: ' + STRANGER).includes('email')
-    && hit('Host-Id: ghp_' + TOKEN40()).includes('github-token');
-});
-t('89 Host-Id：提交对象、信息文件与合并路径执行相同的位置规则', () => {
-  const valid = M('feat: x', '', CT_HIGH, 'Host-Id: build-runner');
-  const outside = M('feat: x', '', 'Host-Id: build-runner', '', CT_HIGH);
-  const [a, b] = trailerMsgs([valid, outside]).errs;
-  return a.length === 0 && b.includes('host-id-outside-trailer-block') && mfRun(valid).status === 0
-    && mfRun(outside).err.includes('host-id-outside-trailer-block')
-    && ct(valid, { isMerge: true, isCleanMerge: true }).length === 0
-    && has(outside, 'host-id-outside-trailer-block', { isMerge: true, isCleanMerge: true });
-});
-
 t('37 输出不泄露：所有 CLI 输出不含测试邮箱（含工具邮箱）的本地部分与域名，且不含 @（同时确认确有 *-meta-email 与 coauthor-email 命中）', () => {
   const all = OUTS.join('\n');
   return /commit-meta-email/.test(all) && /tag-meta-email/.test(all) && /:message:\d+ coauthor-email$/m.test(all)

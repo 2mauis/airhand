@@ -15,7 +15,7 @@ v2 的做法（`Agent:` 与 author 名绑定、AI 提交强制 noreply、CI 不�
 
 1. 归一化：`\r\n` → `\n`；每行去掉行尾空白；去掉信息尾部的空行。
 2. 主题行 = 第一行。**trailer 块** = 最后一个空行分隔的段落，且 (a) 不是第一段（只有一段的信息没有 trailer 块）；(b) 该段**每一行**都匹配 `^[A-Za-z][A-Za-z0-9-]*: \S.*$`（键与冒号之间不许有空格；不支持续行折叠；只要有一行不匹配，整段就不是 trailer 块）。解析自己实现，不依赖 `git interpret-trailers`（后者更宽松）。
-3. 计数：整条信息里所有匹配 `^\s*code-tool\s*:`（不区分大小写，含行首空白、冒号前空格）的行都计入 `Code-Tool` 行数；`Code-Source`（`^\s*code-source\s*:`）、`Agent`（`^\s*agent\s*:`）、`Host-Id`（`^\s*host-id\s*:`）同理。
+3. 计数：整条信息里所有匹配 `^\s*code-tool\s*:`（不区分大小写，含行首空白、冒号前空格）的行都计入 `Code-Tool` 行数；`Code-Source`（`^\s*code-source\s*:`）、`Agent`（`^\s*agent\s*:`）同理。
 4. `Co-authored-by`（严格解析；r3 的 `co-authored-by-forbidden` 已删除）：凡匹配 `^\s*co-authored-by\s*:`（不区分大小写，含行首空白、冒号前空格）的行都是**共同作者候选行**，必须同时满足以下两条才是「合法共同作者行」：
    1. 位于 trailer 块内；
    2. 整行匹配（键名大小写不敏感）：`^Co-authored-by: ([^<>\s](?:[^<>\n]*[^<>\s])?) <([\x21-\x3B\x3D\x3F\x41-\x7E]+@[\x21-\x3B\x3D\x3F\x41-\x7E]+)>$`。名字组首尾必须是非空白字符；邮箱组限制为 ASCII 可打印且不含 `<`、`>`、`@`（所以两种解码对邮箱字段的理解必然相同，见 §4.4）。
@@ -58,10 +58,6 @@ Code-Tool: human                     # 人工写
 ### 1.5 `Agent:`（可选）
 
 0 或 1 行；若存在，整行须匹配 `^Agent: [a-z0-9][a-z0-9-]{0,39}$`。不与 author 名绑定，没有白名单，不作为工具判断依据（v2 的 `AGENTS` 表、`author-does-not-match-agent`、`unknown-agent`、`ai-author-marked-human` 已删除）。
-
-### 1.5a `Host-Id:`（可选）
-
-0 或 1 行，必须在 trailer 块内；整行匹配 `^Host-Id: [a-z0-9][a-z0-9-]{0,39}$`。值是不暴露真实网络信息的固定操作环境代号（例如 `build-runner`），不是主机在网络上的名字；不含点，因此不能写 FQDN、内网域名或地址。重复、块外、大小写或格式非法均失败，合并提交也适用。此规则不放宽真实主机名、内网 IP、邮箱、域名、凭据或词表规则，不新增隐私放行项。
 
 ### 1.6 其他提交信息规则
 
@@ -194,9 +190,6 @@ K / H / U 只取合法的 `Code-Tool` / `Code-Source` 值（非法、重复或�
 | `invalid-code-source` | 恰好一行、在 trailer 块内，但语法非法（含 `git-only`、缺字段、非法档位） |
 | `code-source-not-allowed` | 出现 `Code-Source` 而没有 `Code-Tool` 行，或 `Code-Tool` 是合法的非 `git-only` 值 |
 | `invalid-agent-trailer` | `Agent:` 多于一行或值非法 |
-| `duplicate-host-id` | `Host-Id:` 多于一行 |
-| `host-id-outside-trailer-block` | `Host-Id:` 不在 trailer 块内 |
-| `invalid-host-id` | `Host-Id:` 键名或代号格式非法 |
 | `coauthor-malformed` | 共同作者候选行不是合法共同作者行（§1.1 第 4 点），或两种解码判定不一致（§4.4） |
 | `coauthor-email-not-allowed` | 合法共同作者行的邮箱不在 §2 的允许类内（含 `example.*`、`noreply<at>github.com`、他人个人邮箱） |
 | `source-evidence-conflict` | §1.7 第 2 步 |
